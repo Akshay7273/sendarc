@@ -5,7 +5,7 @@
  */
 
 /** Protocol version string, embedded in the handshake transcript and caps. */
-export const PROTOCOL_VERSION = 'agy/1';
+export const PROTOCOL_VERSION = 'sendarc/1';
 
 /** Rendezvous / secret sizes (bytes). */
 export const SID_BYTES = 16; // 128-bit routing token the server sees

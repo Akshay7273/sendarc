@@ -1,5 +1,5 @@
 {
-  "name": "@agy/web",
+  "name": "@sendarc/web",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -12,7 +12,7 @@
     "lint": "eslint . --max-warnings 0"
   },
   "dependencies": {
-    "@agy/protocol": "workspace:*"
+    "@sendarc/protocol": "workspace:*"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.0.3",
