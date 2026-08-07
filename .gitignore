@@ -1,0 +1,27 @@
+# Build artifacts
+/bin/
+apps/web/dist/
+apps/web/.svelte-kit/
+apps/server/agyd
+
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Local TLS certs (never commit private keys)
+infra/certs/*.pem
+
+# Env / local
+.env
+.env.local
+*.local
+
+# Editor / OS / local tooling
+.DS_Store
+.idea/
+.vscode/
+.claude/
+*.swp
+
+# Go
+/go/
