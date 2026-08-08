@@ -1,15 +1,21 @@
 /**
- * Protocol-wide constants. Source of truth for values shared by the web client and
- * the Go server. Go mirrors these in apps/server (see docs/protocol.md). Changing a
- * wire value here is a protocol change — bump PROTOCOL_VERSION and negotiate in caps.
+ * Protocol-wide constants. Source of truth for values shared by the web client, the
+ * Go server, and the Go CLI. The Go module `packages/wire` mirrors these; a
+ * cross-language vector test asserts they stay in sync. Changing a wire value here is
+ * a protocol change — bump PROTOCOL_VERSION and negotiate in caps.
  */
 
 /** Protocol version string, embedded in the handshake transcript and caps. */
 export const PROTOCOL_VERSION = 'sendarc/1';
 
-/** Rendezvous / secret sizes (bytes). */
-export const SID_BYTES = 16; // 128-bit routing token the server sees
-export const SECRET_BYTES = 32; // 256-bit invite secret S — never sent to the server
+/**
+ * Invite code (e.g. `4-brave-otter`). The room number is server-allocated and routes
+ * the two sockets; the words are generated client-side and never sent to the server.
+ * The full normalized string is the SPAKE2 password.
+ */
+export const DEFAULT_WORD_COUNT = 2; // 2 words × 8 bits = 16 bits; configurable higher
+export const WORDLIST_SIZE = 256; // one byte of entropy per word
+export const CODE_SEPARATOR = '-';
 
 /** Framing (see plan.md §6.3). Header is fixed-size and used as AES-GCM AAD. */
 export const FRAME_HEADER_BYTES = 16;
@@ -38,10 +44,34 @@ export const MAX_BLOCKS_PER_FILE = 0xffffffff + 1; // blockIdx is u32
 /** Session inactivity TTL on the server (ms). */
 export const SESSION_TTL_MS = 10 * 60 * 1000;
 
-/** HKDF info / domain-separation labels. Keep in sync with the Go server. */
+/**
+ * AES-256-GCM parameters for the frame AEAD. The 12-byte nonce is the directional
+ * 4-byte salt followed by a big-endian u64 counter (see aead.ts / packages/wire/aead).
+ */
+export const AEAD_KEY_BYTES = 32;
+export const AEAD_NONCE_BYTES = 12;
+export const AEAD_TAG_BYTES = 16;
+export const AEAD_SALT_BYTES = 4;
+
+/**
+ * SPAKE2 (RFC 9382, P-256) domain separation. `CONFIRMATION_KEYS_INFO` is fixed by the
+ * RFC (§4) and MUST NOT change. The `sendarc/1 …` labels are SendArc's own key schedule
+ * layered on top of the RFC's `Ke` output.
+ */
 export const HKDF_INFO = {
-  auth: `${PROTOCOL_VERSION} auth`,
+  /** Maps the invite code to the SPAKE2 password scalar w (SendArc-specific). */
+  spake2W: `${PROTOCOL_VERSION} spake2 w`,
+  /** RFC 9382 §4: KcA || KcB = HKDF(Ka, nil, "ConfirmationKeys", 32). Do not change. */
+  confirmationKeys: 'ConfirmationKeys',
+  /** SendArc master key from the RFC `Ke` output, bound to the transcript. */
   master: `${PROTOCOL_VERSION} master`,
-  dirOffererToJoiner: 'o2j',
-  dirJoinerToOfferer: 'j2o',
+  /** Directional transfer keys derived from the master key. */
+  dirOffererToJoiner: `${PROTOCOL_VERSION} o2j`,
+  dirJoinerToOfferer: `${PROTOCOL_VERSION} j2o`,
 } as const;
+
+/**
+ * Length in bytes of the HKDF output reduced mod n to form the SPAKE2 scalar w. 48 bytes
+ * (384 bits) reduced into the 256-bit scalar field leaves negligible modular bias.
+ */
+export const SPAKE2_W_HKDF_BYTES = 48;
