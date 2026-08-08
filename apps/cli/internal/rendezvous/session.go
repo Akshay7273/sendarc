@@ -15,6 +15,7 @@ import (
 // PhaseEstablished or PhaseFailed. The values mirror RendezvousPhase in rendezvous.ts.
 type Phase string
 
+// The handshake phases, in the order a session advances through them.
 const (
 	PhaseIdle           Phase = "idle"
 	PhaseAllocating     Phase = "allocating"      // offerer: sent create, awaiting the room number
@@ -47,6 +48,7 @@ func (e *Error) Error() string { return fmt.Sprintf("rendezvous: %s: %s", e.Code
 // Role identifies which end of the handshake this peer plays.
 type Role = wire.Role
 
+// The two roles, re-exported from the wire package for callers of this package.
 const (
 	RoleOfferer = wire.RoleOfferer
 	RoleJoiner  = wire.RoleJoiner
