@@ -1,0 +1,110 @@
+package wire
+
+import "testing"
+
+// The exact JSON byte strings JavaScript's JSON.stringify produces for these shapes. Go must
+// match them byte-for-byte (key order, no HTML escaping, no spaces) or a browser peer and a
+// CLI peer cannot exchange control messages.
+func TestEncodeControlWireBytes(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  ControlMsg
+		want string
+	}{
+		{
+			"manifest",
+			NewManifest([]FileEntry{{
+				Idx: 0, Name: "a.bin", Size: 10, Mime: "application/octet-stream",
+				LastModified: 5, BlockSize: 8, Blocks: 2, FileDigest: "ab",
+			}}, 10),
+			`{"type":2,"files":[{"idx":0,"name":"a.bin","size":10,"mime":"application/octet-stream","lastModified":5,"blockSize":8,"blocks":2,"fileDigest":"ab"}],"totalSize":10}`,
+		},
+		{"block_hash", NewBlockHash(0, 1, "ff"), `{"type":4,"fileIdx":0,"blockIdx":1,"sha256":"ff"}`},
+		{"block_recv", NewBlockRecv(0, 1), `{"type":5,"fileIdx":0,"blockIdx":1}`},
+		{"complete", NewComplete("deadbeef"), `{"type":9,"fileDigest":"deadbeef"}`},
+		{"done", NewDone(), `{"type":10}`},
+		{"fail", NewFail(FailDigestMismatch), `{"type":11,"reason":"digest_mismatch"}`},
+	}
+	for _, c := range cases {
+		got, err := EncodeControl(c.msg)
+		if err != nil {
+			t.Fatalf("%s: encode: %v", c.name, err)
+		}
+		if string(got) != c.want {
+			t.Errorf("%s:\n got  %s\n want %s", c.name, got, c.want)
+		}
+	}
+}
+
+// A filename with HTML-significant characters must not be \u-escaped, matching JS.
+func TestEncodeControlNoHTMLEscaping(t *testing.T) {
+	m := NewManifest([]FileEntry{{Name: "a&b<c>.txt", Mime: "text/plain", FileDigest: "x"}}, 0)
+	got, err := EncodeControl(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"type":2,"files":[{"idx":0,"name":"a&b<c>.txt","size":0,"mime":"text/plain","lastModified":0,"blockSize":0,"blocks":0,"fileDigest":"x"}],"totalSize":0}`
+	if string(got) != want {
+		t.Errorf("HTML-escaping leaked:\n got  %s\n want %s", got, want)
+	}
+}
+
+func TestDecodeControlRoundTrip(t *testing.T) {
+	msgs := []ControlMsg{
+		NewManifest([]FileEntry{{
+			Idx: 0, Name: "a.bin", Size: 10, Mime: "application/octet-stream",
+			LastModified: 5, BlockSize: 8, Blocks: 2, FileDigest: "ab",
+		}}, 10),
+		NewBlockHash(0, 1, "ff"),
+		NewBlockRecv(0, 1),
+		NewComplete("deadbeef"),
+		NewDone(),
+		NewFail(FailDigestMismatch),
+	}
+	for _, m := range msgs {
+		enc, err := EncodeControl(m)
+		if err != nil {
+			t.Fatalf("encode %d: %v", m.FrameType(), err)
+		}
+		dec, err := DecodeControl(enc)
+		if err != nil {
+			t.Fatalf("decode %d: %v", m.FrameType(), err)
+		}
+		reenc, err := EncodeControl(dec)
+		if err != nil {
+			t.Fatalf("re-encode %d: %v", m.FrameType(), err)
+		}
+		if string(reenc) != string(enc) {
+			t.Errorf("type %d not stable: %s != %s", m.FrameType(), reenc, enc)
+		}
+	}
+}
+
+// A payload the TS decoder produced must decode here to the same values (decode-side interop).
+func TestDecodeControlFromTSShapes(t *testing.T) {
+	m, err := DecodeControl([]byte(`{"type":5,"fileIdx":2,"blockIdx":7}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	br, ok := m.(*BlockRecv)
+	if !ok || br.FileIdx != 2 || br.BlockIdx != 7 {
+		t.Fatalf("decoded block_recv = %#v", m)
+	}
+}
+
+func TestDecodeControlRejectsMalformed(t *testing.T) {
+	bad := []string{
+		`{{`,                                  // invalid JSON
+		`{"type":999}`,                        // unknown type
+		`{"type":11,"reason":"nope"}`,         // bad fail reason
+		`{"type":9}`,                          // complete missing fileDigest
+		`{"type":2,"files":[],"totalSize":0}`, // empty manifest files
+		`{"type":4,"fileIdx":0}`,              // block_hash missing sha256/blockIdx
+		`{"fileIdx":0}`,                       // missing type
+	}
+	for _, s := range bad {
+		if _, err := DecodeControl([]byte(s)); err == nil {
+			t.Errorf("expected error decoding %q", s)
+		}
+	}
+}
