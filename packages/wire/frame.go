@@ -7,6 +7,11 @@ import (
 
 const frameHeaderBytes = 16
 
+// FrameVersion is the frame-header format version (the header's first byte). It mirrors
+// FRAME_VERSION in packages/protocol/src/constants.ts and is bumped only if the header
+// layout changes.
+const FrameVersion uint8 = 1
+
 // FrameHeader is the 16-byte frame header (plan.md §6.3). Its encoded bytes are the
 // AES-GCM additional authenticated data, so the codec must be exact and stable.
 //
