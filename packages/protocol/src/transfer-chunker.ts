@@ -22,7 +22,7 @@ export async function* reChunk(
   frameSize: number,
 ): AsyncGenerator<FramePiece> {
   let pos = 0; // absolute file offset of the next byte to emit
-  let buf = new Uint8Array(0);
+  let buf: Uint8Array = new Uint8Array(0);
   let start = 0; // consumed-prefix cursor into buf
 
   const avail = () => buf.length - start;
