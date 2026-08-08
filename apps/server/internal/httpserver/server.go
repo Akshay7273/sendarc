@@ -93,7 +93,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func router(cfg Config, logger *slog.Logger) (http.Handler, error) {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(securityHeaders)
 
