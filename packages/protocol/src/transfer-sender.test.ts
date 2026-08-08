@@ -51,7 +51,14 @@ describe('TransferSender', () => {
       const frame = await seal(
         keys.j2o,
         ackCtr++,
-        { version: FRAME_VERSION, type: FrameType.BlockRecv, flags: 0, fileIdx: 0, blockIdx: 0, frameOff: 0 },
+        {
+          version: FRAME_VERSION,
+          type: FrameType.BlockRecv,
+          flags: 0,
+          fileIdx: 0,
+          blockIdx: 0,
+          frameOff: 0,
+        },
         encodeControl({ type: FrameType.BlockRecv, fileIdx: 0, blockIdx }),
       );
       sender.handle(frame);
@@ -63,7 +70,14 @@ describe('TransferSender', () => {
     const done = await seal(
       keys.j2o,
       ackCtr++,
-      { version: FRAME_VERSION, type: FrameType.Done, flags: 0, fileIdx: 0, blockIdx: 0, frameOff: 0 },
+      {
+        version: FRAME_VERSION,
+        type: FrameType.Done,
+        flags: 0,
+        fileIdx: 0,
+        blockIdx: 0,
+        frameOff: 0,
+      },
       encodeControl({ type: FrameType.Done }),
     );
     sender.handle(done);
@@ -103,7 +117,14 @@ describe('TransferSender', () => {
     const fail = await seal(
       keys.j2o,
       0,
-      { version: FRAME_VERSION, type: FrameType.Fail, flags: 0, fileIdx: 0, blockIdx: 0, frameOff: 0 },
+      {
+        version: FRAME_VERSION,
+        type: FrameType.Fail,
+        flags: 0,
+        fileIdx: 0,
+        blockIdx: 0,
+        frameOff: 0,
+      },
       encodeControl({ type: FrameType.Fail, reason: 'integrity' }),
     );
     sender.handle(fail);
