@@ -33,3 +33,15 @@ function sanitize(name: string): string {
   const base = name.replace(/^.*[\\/]/, '').trim();
   return base.length > 0 ? base : 'download';
 }
+
+/**
+ * Read a finished OPFS file back by name, without opening a writable (which would truncate it).
+ * The orchestrator calls this after the worker reports `done` to hand a downloadable File to the
+ * UI. OPFS is origin-global, so the file the worker wrote is visible here on the main thread.
+ */
+export async function readOpfsFile(name: string): Promise<File> {
+  const root = await navigator.storage.getDirectory();
+  const handle = await root.getFileHandle(sanitize(name), { create: false });
+  const f = await handle.getFile();
+  return new File([f], name, { type: f.type, lastModified: f.lastModified });
+}

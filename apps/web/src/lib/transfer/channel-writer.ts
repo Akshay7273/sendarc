@@ -10,7 +10,7 @@ export interface ChannelLike {
   bufferedAmount: number;
   bufferedAmountLowThreshold: number;
   send(data: ArrayBuffer): void;
-  onbufferedamountlow: ((this: unknown, ev: Event) => void) | null;
+  onbufferedamountlow: ((ev: Event) => unknown) | null;
 }
 
 export class ChannelWriter {
