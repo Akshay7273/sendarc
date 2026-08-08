@@ -7,7 +7,7 @@ import { FRAME_VERSION } from './constants.js';
 import { sha256 } from './webcrypto.js';
 import { bytesToHex } from './bytes.js';
 import { encodeControl } from './transfer-messages.js';
-import { MemorySink, type Digest } from './transfer-ports.js';
+import { MemorySink, type Digest, type Sink } from './transfer-ports.js';
 import { TransferReceiver } from './transfer-receiver.js';
 
 function nodeDigest(): Digest {
@@ -160,6 +160,75 @@ describe('TransferReceiver', () => {
     for (const f of b.frames) receiver.handle(f);
     await expect(receiver.done).rejects.toThrow(/integrity/);
     expect(sink.abortReason).toBe('integrity');
+  });
+
+  it('invokes onManifest with the file entry before writing the first block', async () => {
+    const keys = await deriveTransferKeys(master);
+    const data = new Uint8Array(8).map((_, i) => i);
+    const fileDigest = createHash('sha256').update(data).digest('hex');
+    const b = await build(keys);
+    await b.ctrl(FrameType.Manifest, {
+      type: FrameType.Manifest,
+      files: [
+        {
+          idx: 0,
+          name: 'note.txt',
+          size: 8,
+          mime: 'text/plain',
+          lastModified: 0,
+          blockSize: 8,
+          blocks: 1,
+          fileDigest,
+        },
+      ],
+      totalSize: 8,
+    });
+    await b.push(
+      {
+        version: FRAME_VERSION,
+        type: FrameType.BlockData,
+        flags: 1,
+        fileIdx: 0,
+        blockIdx: 0,
+        frameOff: 0,
+      },
+      data,
+    );
+    await b.ctrl(FrameType.BlockHash, {
+      type: FrameType.BlockHash,
+      fileIdx: 0,
+      blockIdx: 0,
+      sha256: bytesToHex(await sha256(data)),
+    });
+    await b.ctrl(FrameType.Complete, { type: FrameType.Complete, fileDigest });
+
+    const events: string[] = [];
+    const seen: string[] = [];
+    const sink: Sink = {
+      write: () => void events.push('write'),
+      close: () => {},
+      abort: () => {},
+    };
+    const receiver = new TransferReceiver({
+      send: () => {},
+      sendDir: keys.j2o,
+      recvDir: keys.o2j,
+      sendCounterStart: 0,
+      recvCounterStart: 0,
+      createDigest: nodeDigest,
+      sink,
+      onManifest: (file) => {
+        events.push('manifest');
+        seen.push(file.name);
+      },
+    });
+    for (const f of b.frames) receiver.handle(f);
+    await receiver.done;
+
+    expect(seen).toEqual(['note.txt']);
+    expect(events[0]).toBe('manifest');
+    expect(events).toContain('write');
+    expect(events.indexOf('manifest')).toBeLessThan(events.indexOf('write'));
   });
 
   it('fails digest_mismatch when complete disagrees', async () => {

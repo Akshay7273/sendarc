@@ -31,6 +31,11 @@ export interface TransferReceiverOptions {
   createDigest(): Digest;
   sink: Sink;
   onProgress?(receivedBytes: number): void;
+  /**
+   * Called once when the manifest decodes, before any block is written — lets the host open a
+   * destination named after the file (e.g. an OPFS sink) without the engine knowing about it.
+   */
+  onManifest?(file: FileEntry): void | Promise<void>;
 }
 
 export class TransferReceiver {
@@ -82,7 +87,7 @@ export class TransferReceiver {
     const opened = await open(this.o.recvDir, this.recvCounter++, frame); // throw → integrity abort
     switch (opened.header.type) {
       case FrameType.Manifest:
-        return this.onManifest(opened.plaintext);
+        return this.applyManifest(opened.plaintext);
       case FrameType.BlockData:
         return this.onBlockData(opened.header.blockIdx, opened.header.frameOff, opened.plaintext);
       case FrameType.BlockHash:
@@ -97,10 +102,13 @@ export class TransferReceiver {
     }
   }
 
-  private onManifest(payload: Uint8Array): void {
+  private async applyManifest(payload: Uint8Array): Promise<void> {
     const msg = decodeControl(payload);
     if (msg.type !== FrameType.Manifest) throw new TransferError('integrity', 'expected manifest');
-    this.file = msg.files[0];
+    const file = msg.files[0];
+    if (!file) throw new TransferError('integrity', 'manifest has no files');
+    this.file = file;
+    await this.o.onManifest?.(file);
   }
 
   private onBlockData(blockIdx: number, frameOff: number, payload: Uint8Array): void {
