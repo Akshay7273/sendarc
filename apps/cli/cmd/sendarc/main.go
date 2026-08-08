@@ -47,7 +47,7 @@ func main() {
 }
 
 func usage(w *os.File) {
-	fmt.Fprint(w, `sendarc — secure peer-to-peer file transfer
+	_, _ = fmt.Fprint(w, `sendarc — secure peer-to-peer file transfer
 
 Usage:
   sendarc send [flags]

@@ -12,6 +12,7 @@ package wire
 // RFC 9382 party "A"; the joiner accepts it and plays party "B".
 type Role string
 
+// The two roles, as they appear on the wire.
 const (
 	RoleOfferer Role = "offerer"
 	RoleJoiner  Role = "joiner"
