@@ -20,3 +20,4 @@ export * from './transfer-ports.js';
 export * from './transfer-chunker.js';
 export * from './transfer-messages.js';
 export * from './transfer-sender.js';
+export * from './transfer-receiver.js';
