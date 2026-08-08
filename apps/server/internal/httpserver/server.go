@@ -1,6 +1,7 @@
-// Package httpserver wires the HTTP surface for agyd: health, security headers, and
-// serving the web app — either from a built directory (prod) or by proxying the Vite
-// dev server (dev). Signaling/relay handlers mount onto this router in later milestones.
+// Package httpserver wires the HTTP surface for sendarcd: health, security headers,
+// and serving the web app — either from a built directory (prod) or by proxying the
+// Vite dev server (dev). Signaling/relay handlers mount onto this router in later
+// milestones.
 package httpserver
 
 import (
@@ -19,7 +20,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 )
 
-// Config controls how agyd serves the web app and terminates TLS.
+// Config controls how sendarcd serves the web app and terminates TLS.
 type Config struct {
 	Addr     string // listen address, e.g. ":8443"
 	TLSCert  string // path to TLS cert (PEM); empty => plain HTTP (dev/testing only)
@@ -28,14 +29,14 @@ type Config struct {
 	DevProxy string // URL of the Vite dev server to proxy to (dev); overrides WebDir
 }
 
-// ConfigFromEnv reads configuration from AGY_* environment variables with defaults.
+// ConfigFromEnv reads configuration from SENDARC_* environment variables with defaults.
 func ConfigFromEnv() Config {
 	return Config{
-		Addr:     env("AGY_ADDR", ":8443"),
-		TLSCert:  os.Getenv("AGY_TLS_CERT"),
-		TLSKey:   os.Getenv("AGY_TLS_KEY"),
-		WebDir:   os.Getenv("AGY_WEB_DIR"),
-		DevProxy: os.Getenv("AGY_WEB_DEV_PROXY"),
+		Addr:     env("SENDARC_ADDR", ":8443"),
+		TLSCert:  os.Getenv("SENDARC_TLS_CERT"),
+		TLSKey:   os.Getenv("SENDARC_TLS_KEY"),
+		WebDir:   os.Getenv("SENDARC_WEB_DIR"),
+		DevProxy: os.Getenv("SENDARC_WEB_DEV_PROXY"),
 	}
 }
 
@@ -51,13 +52,13 @@ func (c Config) Mode() string {
 	}
 }
 
-// Server wraps *http.Server with agy's config so it can choose TLS vs plain HTTP.
+// Server wraps *http.Server with SendArc's config so it can choose TLS vs plain HTTP.
 type Server struct {
 	http *http.Server
 	cfg  Config
 }
 
-// New builds a Server with the agy router and sensible timeouts.
+// New builds a Server with the SendArc router and sensible timeouts.
 func New(cfg Config, logger *slog.Logger) (*Server, error) {
 	handler, err := router(cfg, logger)
 	if err != nil {
@@ -123,7 +124,7 @@ func router(cfg Config, logger *slog.Logger) (http.Handler, error) {
 func devProxy(target string) (http.Handler, error) {
 	u, err := url.Parse(target)
 	if err != nil {
-		return nil, fmt.Errorf("invalid AGY_WEB_DEV_PROXY %q: %w", target, err)
+		return nil, fmt.Errorf("invalid SENDARC_WEB_DEV_PROXY %q: %w", target, err)
 	}
 	return httputil.NewSingleHostReverseProxy(u), nil
 }

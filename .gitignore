@@ -2,7 +2,7 @@
 /bin/
 apps/web/dist/
 apps/web/.svelte-kit/
-apps/server/agyd
+apps/server/sendarcd
 
 # Dependencies
 node_modules/
