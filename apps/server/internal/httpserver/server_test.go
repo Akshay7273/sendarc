@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -49,6 +50,8 @@ func TestSecurityHeaders(t *testing.T) {
 	}
 	if got := rec.Header().Get("Content-Security-Policy"); got == "" {
 		t.Error("missing Content-Security-Policy")
+	} else if !strings.Contains(got, "wasm-unsafe-eval") {
+		t.Errorf("CSP missing wasm-unsafe-eval for hash-wasm: %q", got)
 	}
 	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 		t.Errorf("X-Content-Type-Options = %q, want nosniff", got)

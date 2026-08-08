@@ -14,7 +14,7 @@ func securityHeaders(next http.Handler) http.Handler {
 				"connect-src 'self' wss: https:; "+
 				"img-src 'self' data:; "+
 				"style-src 'self' 'unsafe-inline'; "+
-				"script-src 'self'; "+
+				"script-src 'self' 'wasm-unsafe-eval'; "+
 				"object-src 'none'; "+
 				"base-uri 'none'; "+
 				"frame-ancestors 'none'")
