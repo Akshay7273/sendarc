@@ -71,6 +71,17 @@ export function describeCaps(c: CapsPayload): string {
   return `${c.version} · ${humanBytes(c.maxFrame)} frames · ${humanBytes(c.blockSize)} blocks`;
 }
 
+/** Integer completion percent (0–100), clamped, safe for a zero total. */
+export function progressPercent(done: number, total: number): number {
+  if (total <= 0) return 0;
+  return Math.min(100, Math.floor((done / total) * 100));
+}
+
+/** Human-readable `"<done> / <total> (<pct>%)"` for the progress-bar caption. */
+export function progressLabel(done: number, total: number): string {
+  return `${humanBytes(done)} / ${humanBytes(total)} (${progressPercent(done, total)}%)`;
+}
+
 /** Turn a rendezvous failure into a plain-language line, translating the stable codes. */
 export function describeError(e: ErrorLike): string {
   switch (e.code) {
