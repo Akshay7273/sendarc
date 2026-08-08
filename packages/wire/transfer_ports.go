@@ -1,6 +1,11 @@
 package wire
 
-import "errors"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"hash"
+)
 
 // IO ports for the transfer engine (M2 design §5.2, §7). The Sender/Receiver depend only on
 // these primitives, so the same core runs over an in-memory pipe in tests and over the real
@@ -32,9 +37,40 @@ type Sink interface {
 	Abort(reason string) error
 }
 
+// Digest is a streaming whole-file hasher producing a sha256sum-identical hex string. The
+// sender computes it in a first pass so the file is never buffered whole; a fresh Digest is
+// requested per transfer so implementations may be stateful. It is the Go twin of the TS
+// Digest port.
+type Digest interface {
+	Update(bytes []byte)
+	HexDigest() string
+}
+
+// sha256Digest is the default Digest, backed by the standard library.
+type sha256Digest struct{ h hash.Hash }
+
+// NewSHA256Digest returns a streaming SHA-256 Digest — the CLI's default whole-file hasher.
+func NewSHA256Digest() Digest { return &sha256Digest{h: sha256.New()} }
+
+func (d *sha256Digest) Update(b []byte) { d.h.Write(b) }
+
+func (d *sha256Digest) HexDigest() string { return hex.EncodeToString(d.h.Sum(nil)) }
+
 // FailReason is the machine-readable tag for a transfer failure, sent on the wire in a fail
 // message. The set mirrors the TypeScript Fail['reason'] union exactly.
 type FailReason string
+
+// Transfer sizing defaults, mirroring packages/protocol/src/constants.ts. They are the
+// negotiation starting point; a caps exchange may lower them within the header field widths.
+const (
+	// DefaultBlockBytes is the logical block size — the unit of ack, retry, and resume.
+	DefaultBlockBytes = 1024 * 1024
+	// DefaultFrameBytes is the default DataChannel/relay payload size.
+	DefaultFrameBytes = 16 * 1024
+	// DefaultInflightBlocks bounds how many blocks the sender may run ahead of the
+	// receiver's block_recv, capping receiver memory regardless of sink speed.
+	DefaultInflightBlocks = 8
+)
 
 const (
 	// FailDigestMismatch means the whole-file digest did not match the sender's Complete.
