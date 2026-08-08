@@ -1,6 +1,6 @@
-// Command agyd is the agy signaling + relay server. In M0 it serves the web bundle
-// over TLS (or reverse-proxies the Vite dev server) and exposes /healthz. Signaling
-// and relay are added in M1/M5.
+// Command sendarcd is the SendArc signaling + relay server. In M0 it serves the web
+// bundle over TLS (or reverse-proxies the Vite dev server) and exposes /healthz.
+// Signaling and relay are added in M1/M5.
 package main
 
 import (
@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/agy/server/internal/httpserver"
+	"github.com/sendarc/server/internal/httpserver"
 )
 
 func main() {
@@ -31,7 +31,7 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("agyd listening",
+		logger.Info("sendarcd listening",
 			"addr", cfg.Addr,
 			"tls", cfg.TLSCert != "",
 			"mode", cfg.Mode(),

@@ -1,14 +1,14 @@
 <script lang="ts">
-  import { PROTOCOL_VERSION } from '@agy/protocol';
+  import { PROTOCOL_VERSION } from '@sendarc/protocol';
 
-  // M0 hello route: proves the toolchain, the workspace import of @agy/protocol,
+  // M0 hello route: proves the toolchain, the workspace import of @sendarc/protocol,
   // and secure-context APIs are wired. Real send/receive screens arrive in M1.
   const secureContext = typeof window !== 'undefined' && window.isSecureContext;
   const hasWebCrypto = typeof crypto !== 'undefined' && 'subtle' in crypto;
 </script>
 
 <main>
-  <h1>agy</h1>
+  <h1>SendArc</h1>
   <p>Secure, end-to-end-encrypted, peer-to-peer file transfer.</p>
   <dl>
     <dt>Protocol</dt>
