@@ -74,8 +74,12 @@ export class TransferSender {
     this.done.catch(() => {});
   }
 
-  /** Drive the whole send. Resolves when the receiver confirms `done`, rejects on `fail`. */
-  async run(): Promise<void> {
+  /**
+   * Drive the whole send. Resolves with the canonical whole-file digest (hex) when the receiver
+   * confirms `done`, rejects on `fail`. The digest is the same value carried in the manifest and
+   * `complete`, so a host can report it without recomputing.
+   */
+  async run(): Promise<string> {
     const { meta } = this.o.file;
 
     // Pass 1: whole-file digest (streamed; the file is never held).
@@ -105,7 +109,10 @@ export class TransferSender {
     let blockParts: Uint8Array[] = [];
     for await (const piece of reChunk(this.o.file.stream(), this.blockSize, this.frameSize)) {
       await this.gate(piece.blockIdx);
-      if (this.settled) return this.done; // aborted by an inbound fail
+      if (this.settled) {
+        await this.done; // aborted by an inbound fail → propagate the rejection
+        return fileDigest;
+      }
       await this.sendFrame(
         {
           version: FRAME_VERSION,
@@ -134,7 +141,8 @@ export class TransferSender {
     }
 
     await this.sendControl(FrameType.Complete, { type: FrameType.Complete, fileDigest });
-    return this.done;
+    await this.done;
+    return fileDigest;
   }
 
   /** Feed one inbound frame from the receiver (block_recv / done / fail). */
