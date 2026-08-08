@@ -31,6 +31,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
 
+      - name: Build protocol package
+        run: pnpm --filter @sendarc/protocol build
+
       - name: Check formatting
         run: pnpm run format:check
 
