@@ -1,6 +1,6 @@
 module github.com/sendarc/wire
 
-go 1.26.5
+go 1.24.0
 
 require filippo.io/nistec v0.0.4
 
