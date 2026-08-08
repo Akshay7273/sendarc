@@ -20,6 +20,9 @@ export const CODE_SEPARATOR = '-';
 /** Framing (see plan.md §6.3). Header is fixed-size and used as AES-GCM AAD. */
 export const FRAME_HEADER_BYTES = 16;
 
+/** Frame-header format version (the header's first byte). Bumped only if the header layout changes. */
+export const FRAME_VERSION = 1;
+
 /** Default DataChannel/relay payload size; negotiable up to MAX_FRAME_BYTES via caps. */
 export const DEFAULT_FRAME_BYTES = 16 * 1024;
 export const MAX_FRAME_BYTES = 64 * 1024;

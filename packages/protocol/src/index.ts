@@ -14,3 +14,4 @@ export * from './spake2.js';
 export * from './keyschedule.js';
 export * from './aead.js';
 export * from './words.js';
+export * from './rendezvous.js';
