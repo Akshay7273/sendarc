@@ -18,3 +18,4 @@ export * from './rendezvous.js';
 export * from './authmac.js';
 export * from './transfer-ports.js';
 export * from './transfer-chunker.js';
+export * from './transfer-messages.js';
