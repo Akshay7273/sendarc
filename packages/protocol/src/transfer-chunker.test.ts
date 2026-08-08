@@ -5,7 +5,12 @@ async function* fromChunks(chunks: number[][]): AsyncGenerator<Uint8Array> {
   for (const c of chunks) yield new Uint8Array(c);
 }
 async function collect(stream: AsyncIterable<Uint8Array>, block: number, frame: number) {
-  const pieces: Array<{ blockIdx: number; frameOff: number; payload: number[]; lastInBlock: boolean }> = [];
+  const pieces: Array<{
+    blockIdx: number;
+    frameOff: number;
+    payload: number[];
+    lastInBlock: boolean;
+  }> = [];
   for await (const p of reChunk(stream, block, frame)) {
     pieces.push({
       blockIdx: p.blockIdx,
@@ -44,7 +49,11 @@ describe('reChunk', () => {
     // Same 16 bytes delivered as 3+7+6 — output must be identical to one 16-byte chunk.
     const data = Array.from({ length: 16 }, (_, i) => i);
     const pieces = await collect(
-      fromChunks([[0, 1, 2], [3, 4, 5, 6, 7, 8, 9], [10, 11, 12, 13, 14, 15]]),
+      fromChunks([
+        [0, 1, 2],
+        [3, 4, 5, 6, 7, 8, 9],
+        [10, 11, 12, 13, 14, 15],
+      ]),
       8,
       4,
     );

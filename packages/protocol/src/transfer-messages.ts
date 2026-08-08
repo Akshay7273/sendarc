@@ -52,7 +52,8 @@ export function decodeControl(payload: Uint8Array): TransferMsg {
 
 function num(m: Record<string, unknown>, k: string): number {
   const v = m[k];
-  if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error(`control frame: ${k} not a number`);
+  if (typeof v !== 'number' || !Number.isFinite(v))
+    throw new Error(`control frame: ${k} not a number`);
   return v;
 }
 function str(m: Record<string, unknown>, k: string): string {
@@ -77,8 +78,13 @@ function asFileEntry(v: unknown): FileEntry {
 }
 
 function asManifest(m: Record<string, unknown>): Manifest {
-  if (!Array.isArray(m.files) || m.files.length === 0) throw new Error('control frame: manifest.files');
-  return { type: FrameType.Manifest, files: m.files.map(asFileEntry), totalSize: num(m, 'totalSize') };
+  if (!Array.isArray(m.files) || m.files.length === 0)
+    throw new Error('control frame: manifest.files');
+  return {
+    type: FrameType.Manifest,
+    files: m.files.map(asFileEntry),
+    totalSize: num(m, 'totalSize'),
+  };
 }
 function asBlockHash(m: Record<string, unknown>): BlockHash {
   return {

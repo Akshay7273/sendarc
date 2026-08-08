@@ -40,9 +40,9 @@ export class TransferReceiver {
   private sendCounter: number;
   private recvCounter: number;
 
-  private file?: FileEntry;
+  private file: FileEntry | undefined;
   private curBlock = 0;
-  private blockBuf?: Uint8Array;
+  private blockBuf: Uint8Array | undefined;
   private blockLen = 0;
   private received = 0;
 
@@ -108,7 +108,10 @@ export class TransferReceiver {
     if (blockIdx !== this.curBlock)
       throw new TransferError('integrity', `out-of-order block ${blockIdx}`);
     if (frameOff === 0) {
-      this.blockLen = Math.min(this.file.blockSize, this.file.size - blockIdx * this.file.blockSize);
+      this.blockLen = Math.min(
+        this.file.blockSize,
+        this.file.size - blockIdx * this.file.blockSize,
+      );
       this.blockBuf = new Uint8Array(this.blockLen);
       this.received = 0;
     }
