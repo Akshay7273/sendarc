@@ -23,7 +23,7 @@ import {
   type SignalMsg,
 } from '@sendarc/protocol';
 
-import { SignalingClient, type BackoffOptions } from '../signaling/client.js';
+import { SignalingClient, type BackoffOptions, type SignalChannel } from '../signaling/client.js';
 
 export interface RendezvousControllerOptions {
   /** Signaling endpoint. Defaults to `/ws` on the current origin (ws/wss to match the page). */
@@ -45,6 +45,13 @@ export interface RendezvousController {
   readonly done: Promise<RendezvousResult>;
   /** Abort locally: notify the peer with `bye` and tear down the socket. Idempotent. */
   cancel(reason?: string): void;
+  /**
+   * Take over the still-open signaling socket for the M2 transfer, before it is auto-closed.
+   * Valid only after `done` resolves; the caller then owns teardown via the returned channel's
+   * `close()`. Swapping in a new `onMessage` handler reroutes inbound frames (SDP/ICE) away from
+   * the settled handshake session and into the transfer layer.
+   */
+  adoptSignaling(): SignalChannel;
 }
 
 /** Start as the offerer: allocate a room and display the generated invite code. */
@@ -84,6 +91,12 @@ function run(
 ): RendezvousController {
   const url = opts.url ?? defaultSignalingUrl();
 
+  // Inbound frames go to the handshake session until the transfer layer adopts the socket, at
+  // which point `route` is swapped to the transfer's own handler. `adopted` also suppresses the
+  // success auto-close, since the transfer layer then owns the socket's lifetime.
+  let route: (msg: SignalMsg) => void = (msg) => session.handle(msg);
+  let adopted = false;
+
   // The two layers reference each other, so one closure must name the other before it is
   // constructed: the session's sink calls `client.send`, but nothing sends until the socket
   // has opened (connect → start), by which point `client` below is initialized.
@@ -91,7 +104,7 @@ function run(
 
   const client = new SignalingClient({
     url,
-    onMessage: (msg) => session.handle(msg),
+    onMessage: (msg) => route(msg),
     onClose: (clean, code, reason) => {
       // A post-open drop is terminal; translate it into a session failure. If the session
       // already settled (the normal close we trigger on `done`), abort is a no-op.
@@ -101,10 +114,12 @@ function run(
     ...(opts.backoff !== undefined ? { backoff: opts.backoff } : {}),
   });
 
-  // Tear the socket down once the handshake settles either way — success frees the room on
-  // the server, failure stops a doomed retry loop.
+  // Tear the socket down once the handshake settles. Failure closes immediately (stop a doomed
+  // retry loop). Success defers to a macrotask so a caller can `adoptSignaling()` synchronously
+  // off `await done` and keep the socket for the M2 transfer; if nobody adopts, it still closes
+  // to free the room on the server.
   void session.done.then(
-    () => client.close(),
+    () => setTimeout(() => void (adopted || client.close()), 0),
     () => client.close(),
   );
 
@@ -124,6 +139,14 @@ function run(
     cancel: (reason = 'cancelled') => {
       session.abort(reason);
       client.close();
+    },
+    adoptSignaling: () => {
+      adopted = true;
+      return {
+        send: (msg) => client.send(msg),
+        onMessage: (handler) => (route = handler),
+        close: () => client.close(),
+      };
     },
   };
 }
