@@ -4,7 +4,7 @@
  * wire value here is a protocol change — bump PROTOCOL_VERSION and negotiate in caps.
  */
 /** Protocol version string, embedded in the handshake transcript and caps. */
-export declare const PROTOCOL_VERSION = "agy/1";
+export declare const PROTOCOL_VERSION = "sendarc/1";
 /** Rendezvous / secret sizes (bytes). */
 export declare const SID_BYTES = 16;
 export declare const SECRET_BYTES = 32;
@@ -30,8 +30,8 @@ export declare const MAX_BLOCKS_PER_FILE: number;
 export declare const SESSION_TTL_MS: number;
 /** HKDF info / domain-separation labels. Keep in sync with the Go server. */
 export declare const HKDF_INFO: {
-    readonly auth: "agy/1 auth";
-    readonly master: "agy/1 master";
+    readonly auth: "sendarc/1 auth";
+    readonly master: "sendarc/1 master";
     readonly dirOffererToJoiner: "o2j";
     readonly dirJoinerToOfferer: "j2o";
 };

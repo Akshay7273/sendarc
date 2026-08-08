@@ -1,4 +1,4 @@
-# agy — developer task runner
+# SendArc — developer task runner
 # Requires: go (~/.local/go/bin), pnpm (corepack), mkcert, just.
 # PATH note: ~/.bashrc exports Go, ~/go/bin, and ~/.local/bin.
 
@@ -27,7 +27,7 @@ dev: certs
     set -uo pipefail
     ( cd apps/web && pnpm dev ) &
     WEB_PID=$!
-    ( cd apps/server && AGY_TLS_CERT="{{CERT_DIR}}/localhost.pem" AGY_TLS_KEY="{{CERT_DIR}}/localhost-key.pem" AGY_WEB_DEV_PROXY="http://localhost:5173" go run ./cmd/agyd ) &
+    ( cd apps/server && SENDARC_TLS_CERT="{{CERT_DIR}}/localhost.pem" SENDARC_TLS_KEY="{{CERT_DIR}}/localhost-key.pem" SENDARC_WEB_DEV_PROXY="http://localhost:5173" go run ./cmd/sendarcd ) &
     SRV_PID=$!
     trap "kill $WEB_PID $SRV_PID 2>/dev/null" EXIT INT TERM
     wait
@@ -35,11 +35,11 @@ dev: certs
 # Build the web bundle and the Go server binary
 build:
     pnpm --filter ./packages/... --filter ./apps/web build
-    cd apps/server && go build -o ../../bin/agyd ./cmd/agyd
+    cd apps/server && go build -o ../../bin/sendarcd ./cmd/sendarcd
 
 # Run the production-style server (serves the built web bundle over TLS)
 serve: build certs
-    cd apps/server && AGY_TLS_CERT="{{CERT_DIR}}/localhost.pem" AGY_TLS_KEY="{{CERT_DIR}}/localhost-key.pem" AGY_WEB_DIR="../web/dist" go run ./cmd/agyd
+    cd apps/server && SENDARC_TLS_CERT="{{CERT_DIR}}/localhost.pem" SENDARC_TLS_KEY="{{CERT_DIR}}/localhost-key.pem" SENDARC_WEB_DIR="../web/dist" go run ./cmd/sendarcd
 
 # Lint everything
 lint:
