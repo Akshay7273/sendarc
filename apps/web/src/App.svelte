@@ -1,14 +1,23 @@
 <script lang="ts">
-  import type { CapsPayload, RendezvousPhase } from '@sendarc/protocol';
+  import type { CapsPayload, RendezvousPhase, RendezvousResult, Role } from '@sendarc/protocol';
   import { RendezvousError } from '@sendarc/protocol';
 
   import { offer, join, type RendezvousController } from './lib/session/rendezvous.js';
+  import type { SignalChannel } from './lib/signaling/client.js';
+  import {
+    runSend,
+    runReceive,
+    type TransferController,
+    type TransferOutcome,
+  } from './lib/session/transfer.js';
   import {
     codeFromHash,
     describeCaps,
     describeError,
     inviteLinkFor,
     phaseLabel,
+    progressLabel,
+    progressPercent,
     sasFingerprint,
     type ErrorLike,
   } from './lib/session/present.js';
@@ -25,8 +34,20 @@
   let peerCaps = $state<CapsPayload | undefined>(undefined);
   let errorText = $state('');
 
+  // M2 transfer state, live once the handshake settles and the socket is adopted.
+  let role = $state<Role | undefined>(undefined);
+  let pickedFile = $state<File | null>(null);
+  let transfer = $state<TransferController | null>(null);
+  let sentBytes = $state(0);
+  let totalBytes = $state(0);
+  let outcome = $state<TransferOutcome | null>(null);
+  let downloadUrl = $state<string | null>(null);
+
   let controller: RendezvousController | undefined;
+  let handshake: RendezvousResult | undefined;
+  let signaling: SignalChannel | undefined;
   let copyTimer: ReturnType<typeof setTimeout> | undefined;
+  let progressTimer: ReturnType<typeof setInterval> | undefined;
 
   function readHashCode(): string {
     return typeof window === 'undefined' ? '' : codeFromHash(window.location.hash);
@@ -69,7 +90,14 @@
         if (controller !== ctrl) return; // superseded by a restart
         fingerprint = await sasFingerprint(res.master);
         peerCaps = res.remoteCaps;
+        handshake = res;
+        role = res.role;
+        // Take over the still-open signaling socket so the WebRTC negotiation can reuse it,
+        // then drop onto the transfer screen. The offerer waits for a file pick; the joiner
+        // begins receiving straight away.
+        signaling = ctrl.adoptSignaling();
         screen = 'done';
+        startTransferIfReady();
       },
       (err: unknown) => {
         if (controller !== ctrl) return;
@@ -82,6 +110,53 @@
   function asErrorLike(err: unknown): ErrorLike {
     if (err instanceof RendezvousError) return { code: err.code, message: err.message };
     return { code: 'unknown', message: err instanceof Error ? err.message : String(err) };
+  }
+
+  function onPick(ev: Event) {
+    const input = ev.currentTarget as HTMLInputElement;
+    pickedFile = input.files?.[0] ?? null;
+    startTransferIfReady();
+  }
+
+  /**
+   * Kick off the transfer once everything it needs is in hand. The joiner receives as soon as the
+   * channel is adopted; the offerer waits until a file has been picked. Guarded so it runs once.
+   */
+  function startTransferIfReady() {
+    if (transfer || handshake === undefined || signaling === undefined) return;
+    if (role === 'offerer') {
+      if (pickedFile === null) return; // still waiting for the sender to choose a file
+      beginTransfer(runSend(handshake, signaling, { file: pickedFile }));
+    } else {
+      beginTransfer(runReceive(handshake, signaling));
+    }
+  }
+
+  /** Bind a running transfer's live progress and terminal outcome to the UI. */
+  function beginTransfer(ctrl: TransferController) {
+    transfer = ctrl;
+    sentBytes = 0;
+    totalBytes = ctrl.total() ?? 0;
+    progressTimer = setInterval(() => {
+      sentBytes = ctrl.progress();
+      totalBytes = ctrl.total() ?? totalBytes;
+    }, 100);
+    ctrl.done.then(
+      (result) => {
+        if (transfer !== ctrl) return; // superseded by a restart
+        clearInterval(progressTimer);
+        sentBytes = result.size;
+        totalBytes = result.size;
+        outcome = result;
+        if (result.file) downloadUrl = URL.createObjectURL(result.file);
+      },
+      (err: unknown) => {
+        if (transfer !== ctrl) return;
+        clearInterval(progressTimer);
+        errorText = describeError(asErrorLike(err));
+        screen = 'failed';
+      },
+    );
   }
 
   async function copy(text: string) {
@@ -99,6 +174,19 @@
   function reset() {
     controller?.cancel();
     controller = undefined;
+    transfer?.cancel();
+    transfer = null;
+    clearInterval(progressTimer);
+    progressTimer = undefined;
+    if (downloadUrl) URL.revokeObjectURL(downloadUrl);
+    downloadUrl = null;
+    handshake = undefined;
+    signaling = undefined;
+    role = undefined;
+    pickedFile = null;
+    sentBytes = 0;
+    totalBytes = 0;
+    outcome = null;
     phase = 'idle';
     code = '';
     link = '';
@@ -173,8 +261,31 @@
       {#if peerCaps}
         <p class="caps">Peer: {describeCaps(peerCaps)}</p>
       {/if}
-      <p class="hint">File transfer arrives in the next milestone.</p>
-      <button class="primary" onclick={backHome}>Start over</button>
+
+      {#if outcome}
+        {#if downloadUrl}
+          <p class="status">Received <strong>{outcome.name}</strong> — verified.</p>
+          <a class="primary download" href={downloadUrl} download={outcome.name}>
+            Save {outcome.name}
+          </a>
+        {:else}
+          <p class="status">Sent <strong>{outcome.name}</strong> — verified by the receiver.</p>
+        {/if}
+      {:else if transfer}
+        <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+          <div class="bar-fill" style={`width:${progressPercent(sentBytes, totalBytes)}%`}></div>
+        </div>
+        <p class="status" aria-live="polite">{progressLabel(sentBytes, totalBytes)}</p>
+      {:else if role === 'offerer'}
+        <label class="filepick">
+          <span>Choose a file to send</span>
+          <input type="file" onchange={onPick} />
+        </label>
+      {:else}
+        <p class="status" aria-live="polite">Waiting for the sender to choose a file…</p>
+      {/if}
+
+      <button class="ghost" onclick={backHome}>Start over</button>
     </section>
   {:else if screen === 'failed'}
     <section class="result bad">
@@ -334,9 +445,38 @@
     font-size: 0.9rem;
     margin: 0;
   }
-  .hint {
-    color: #868e96;
-    font-size: 0.85rem;
-    margin: 0;
+
+  .filepick {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    width: 100%;
+  }
+  .filepick span {
+    font-weight: 600;
+  }
+  .filepick input {
+    padding: 0.5rem 0;
+    border: none;
+    font: inherit;
+  }
+
+  .bar {
+    width: 100%;
+    height: 0.5rem;
+    background: #e9ecef;
+    border-radius: 999px;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    background: #3b5bdb;
+    border-radius: inherit;
+    transition: width 0.15s linear;
+  }
+
+  .download {
+    text-decoration: none;
+    display: inline-block;
   }
 </style>
