@@ -3,6 +3,7 @@
 apps/web/dist/
 apps/web/.svelte-kit/
 apps/server/sendarcd
+packages/protocol/dist/
 
 # Dependencies
 node_modules/
