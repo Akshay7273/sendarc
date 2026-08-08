@@ -7,6 +7,8 @@ import {
   humanBytes,
   inviteLinkFor,
   phaseLabel,
+  progressLabel,
+  progressPercent,
   sasFingerprint,
 } from './present.js';
 
@@ -89,5 +91,27 @@ describe('phaseLabel', () => {
   it('labels every known phase', () => {
     expect(phaseLabel('waiting')).toMatch(/waiting/i);
     expect(phaseLabel('established')).toBe('Connected');
+  });
+});
+
+describe('progressPercent', () => {
+  it('is 0 for zero total (avoids divide-by-zero)', () => {
+    expect(progressPercent(0, 0)).toBe(0);
+  });
+  it('rounds down to an integer percent', () => {
+    expect(progressPercent(1, 3)).toBe(33);
+  });
+  it('clamps to 100 when done exceeds total', () => {
+    expect(progressPercent(10, 5)).toBe(100);
+  });
+});
+
+describe('progressLabel', () => {
+  it('formats done/total with percent', () => {
+    // humanBytes renders IEC units only on exact power-of-two multiples: 1_572_864 = 1536·1024.
+    expect(progressLabel(1_572_864, 4_194_304)).toBe('1536 KiB / 4 MiB (37%)');
+  });
+  it('shows 100% at completion', () => {
+    expect(progressLabel(4_194_304, 4_194_304)).toBe('4 MiB / 4 MiB (100%)');
   });
 });
