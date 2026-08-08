@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -13,7 +14,7 @@ import (
 
 func testRouter(t *testing.T, cfg Config) http.Handler {
 	t.Helper()
-	h, err := router(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h, err := router(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("router: %v", err)
 	}

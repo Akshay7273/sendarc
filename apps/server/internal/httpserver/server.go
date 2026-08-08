@@ -18,6 +18,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+
+	"github.com/sendarc/server/internal/signal"
 )
 
 // Config controls how sendarcd serves the web app and terminates TLS.
@@ -27,6 +29,8 @@ type Config struct {
 	TLSKey   string // path to TLS key (PEM)
 	WebDir   string // directory of the built web bundle to serve (prod)
 	DevProxy string // URL of the Vite dev server to proxy to (dev); overrides WebDir
+
+	Signal signal.Config // signaling limits + WSS origin allowlist
 }
 
 // ConfigFromEnv reads configuration from SENDARC_* environment variables with defaults.
@@ -37,6 +41,7 @@ func ConfigFromEnv() Config {
 		TLSKey:   os.Getenv("SENDARC_TLS_KEY"),
 		WebDir:   os.Getenv("SENDARC_WEB_DIR"),
 		DevProxy: os.Getenv("SENDARC_WEB_DEV_PROXY"),
+		Signal:   signal.ConfigFromEnv(),
 	}
 }
 
@@ -54,18 +59,22 @@ func (c Config) Mode() string {
 
 // Server wraps *http.Server with SendArc's config so it can choose TLS vs plain HTTP.
 type Server struct {
-	http *http.Server
-	cfg  Config
+	http   *http.Server
+	cfg    Config
+	cancel context.CancelFunc
 }
 
 // New builds a Server with the SendArc router and sensible timeouts.
 func New(cfg Config, logger *slog.Logger) (*Server, error) {
-	handler, err := router(cfg, logger)
+	ctx, cancel := context.WithCancel(context.Background())
+	handler, err := router(ctx, cfg, logger)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	return &Server{
-		cfg: cfg,
+		cfg:    cfg,
+		cancel: cancel,
 		http: &http.Server{
 			Addr:              cfg.Addr,
 			Handler:           handler,
@@ -85,12 +94,13 @@ func (s *Server) ListenAndServe() error {
 	return s.http.ListenAndServe()
 }
 
-// Shutdown gracefully stops the server.
+// Shutdown gracefully stops the server and its background workers.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.cancel()
 	return s.http.Shutdown(ctx)
 }
 
-func router(cfg Config, logger *slog.Logger) (http.Handler, error) {
+func router(ctx context.Context, cfg Config, logger *slog.Logger) (http.Handler, error) {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
@@ -101,6 +111,10 @@ func router(cfg Config, logger *slog.Logger) (http.Handler, error) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
+
+	// Signaling endpoint: origin-checked WebSocket rendezvous (plan.md §6.1).
+	hub := signal.NewHub(ctx, cfg.Signal, logger)
+	r.Handle("/ws", hub.Handler(ctx))
 
 	// Web app: dev proxy takes precedence, then a static build dir.
 	switch {
