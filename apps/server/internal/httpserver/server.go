@@ -1,0 +1,154 @@
+// Package httpserver wires the HTTP surface for agyd: health, security headers, and
+// serving the web app — either from a built directory (prod) or by proxying the Vite
+// dev server (dev). Signaling/relay handlers mount onto this router in later milestones.
+package httpserver
+
+import (
+	"context"
+	"crypto/tls"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+)
+
+// Config controls how agyd serves the web app and terminates TLS.
+type Config struct {
+	Addr     string // listen address, e.g. ":8443"
+	TLSCert  string // path to TLS cert (PEM); empty => plain HTTP (dev/testing only)
+	TLSKey   string // path to TLS key (PEM)
+	WebDir   string // directory of the built web bundle to serve (prod)
+	DevProxy string // URL of the Vite dev server to proxy to (dev); overrides WebDir
+}
+
+// ConfigFromEnv reads configuration from AGY_* environment variables with defaults.
+func ConfigFromEnv() Config {
+	return Config{
+		Addr:     env("AGY_ADDR", ":8443"),
+		TLSCert:  os.Getenv("AGY_TLS_CERT"),
+		TLSKey:   os.Getenv("AGY_TLS_KEY"),
+		WebDir:   os.Getenv("AGY_WEB_DIR"),
+		DevProxy: os.Getenv("AGY_WEB_DEV_PROXY"),
+	}
+}
+
+// Mode reports how the web app is being served, for logging.
+func (c Config) Mode() string {
+	switch {
+	case c.DevProxy != "":
+		return "dev-proxy"
+	case c.WebDir != "":
+		return "static"
+	default:
+		return "api-only"
+	}
+}
+
+// Server wraps *http.Server with agy's config so it can choose TLS vs plain HTTP.
+type Server struct {
+	http *http.Server
+	cfg  Config
+}
+
+// New builds a Server with the agy router and sensible timeouts.
+func New(cfg Config, logger *slog.Logger) (*Server, error) {
+	handler, err := router(cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+	return &Server{
+		cfg: cfg,
+		http: &http.Server{
+			Addr:              cfg.Addr,
+			Handler:           handler,
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       120 * time.Second,
+			TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
+			// No WriteTimeout: signaling/relay use long-lived streaming connections.
+		},
+	}, nil
+}
+
+// ListenAndServe serves over TLS when a cert/key are configured, else plain HTTP.
+func (s *Server) ListenAndServe() error {
+	if s.cfg.TLSCert != "" && s.cfg.TLSKey != "" {
+		return s.http.ListenAndServeTLS(s.cfg.TLSCert, s.cfg.TLSKey)
+	}
+	return s.http.ListenAndServe()
+}
+
+// Shutdown gracefully stops the server.
+func (s *Server) Shutdown(ctx context.Context) error {
+	return s.http.Shutdown(ctx)
+}
+
+func router(cfg Config, logger *slog.Logger) (http.Handler, error) {
+	r := chi.NewRouter()
+	r.Use(middleware.RequestID)
+	r.Use(middleware.RealIP)
+	r.Use(middleware.Recoverer)
+	r.Use(securityHeaders)
+
+	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+
+	// Web app: dev proxy takes precedence, then a static build dir.
+	switch {
+	case cfg.DevProxy != "":
+		proxy, err := devProxy(cfg.DevProxy)
+		if err != nil {
+			return nil, err
+		}
+		r.Handle("/*", proxy)
+	case cfg.WebDir != "":
+		r.Handle("/*", spaFileServer(cfg.WebDir))
+	default:
+		logger.Warn("no web source configured; serving /healthz only")
+	}
+
+	return r, nil
+}
+
+// devProxy reverse-proxies everything (including Vite HMR websockets) to the dev server.
+func devProxy(target string) (http.Handler, error) {
+	u, err := url.Parse(target)
+	if err != nil {
+		return nil, fmt.Errorf("invalid AGY_WEB_DEV_PROXY %q: %w", target, err)
+	}
+	return httputil.NewSingleHostReverseProxy(u), nil
+}
+
+// spaFileServer serves static files and falls back to index.html for client routes.
+func spaFileServer(dir string) http.Handler {
+	fs := http.FileServer(http.Dir(dir))
+	index := strings.TrimRight(dir, "/") + "/index.html"
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		path := strings.TrimPrefix(req.URL.Path, "/")
+		if path == "" {
+			http.ServeFile(w, req, index)
+			return
+		}
+		if _, err := os.Stat(dir + "/" + path); os.IsNotExist(err) {
+			http.ServeFile(w, req, index) // SPA deep-link fallback
+			return
+		}
+		fs.ServeHTTP(w, req)
+	})
+}
+
+func env(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
