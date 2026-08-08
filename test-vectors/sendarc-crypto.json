@@ -29,5 +29,14 @@
     "headerHex": "010100000000000000000000001b0000",
     "plaintextUtf8": "sendarc caps vector payload",
     "frameHex": "010100000000000000000000001b00009888677ac00c856a25561506dc2ee2f89b4b7fb356920d6819299deb894321e18c92c9123133f0b77b6a4c"
+  },
+  "authmac": {
+    "note": "mac = HMAC-SHA256(kAuth, type || ':' || u32be(room) || ':' || u32be(seq) || ':' || body). Self-contained kAuth (not derived from spake2 above).",
+    "kAuthHex": "000102030405060708090a0b0c0d0e0f",
+    "type": "sdp",
+    "room": 7,
+    "seq": 3,
+    "body": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n",
+    "mac": "161bfabb966e41d6803cd65eb76966c7292d70c9ec2b9eefce19716b4309f0f0"
   }
 }
