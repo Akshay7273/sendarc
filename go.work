@@ -1,3 +1,6 @@
 go 1.26.5
 
-use ./apps/server
+use (
+	./apps/server
+	./packages/wire
+)
