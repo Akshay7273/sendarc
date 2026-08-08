@@ -4,7 +4,7 @@ import { ChannelWriter, type ChannelLike } from './channel-writer.js';
 class FakeChannel implements ChannelLike {
   bufferedAmount = 0;
   bufferedAmountLowThreshold = 0;
-  onbufferedamountlow: ((this: unknown, ev: Event) => void) | null = null;
+  onbufferedamountlow: ((ev: Event) => unknown) | null = null;
   sent: number[] = [];
   send(data: ArrayBuffer): void {
     this.sent.push(data.byteLength);

@@ -15,6 +15,17 @@
 
 import type { SignalMsg } from '@sendarc/protocol';
 
+/**
+ * A live, bidirectional signaling channel with a swappable inbound handler. The rendezvous layer
+ * hands one of these to the M2 transfer layer (via `adoptSignaling`) once the handshake settles,
+ * so the SDP/ICE exchange can reuse the still-open socket instead of opening a second one.
+ */
+export interface SignalChannel {
+  send(msg: SignalMsg): void;
+  onMessage(handler: (msg: SignalMsg) => void): void;
+  close(): void;
+}
+
 /** Backoff schedule for the initial connect. Delays are `base * factor^n`, capped at `maxMs`. */
 export interface BackoffOptions {
   /** Number of retries after the first attempt before giving up. */
