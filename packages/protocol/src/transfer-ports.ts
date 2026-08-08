@@ -37,13 +37,17 @@ export interface Digest {
   hexDigest(): string | Promise<string>;
 }
 
-/** A transfer failure carrying one of the protocol's `fail` reasons. */
+/**
+ * A transfer failure carrying one of the protocol's `fail` reasons. The `reason` is the
+ * machine-readable tag sent on the wire; it is always prefixed onto `message` so the reason
+ * survives in `error.message` (logs, `toThrow` matchers) even when a detail string is given.
+ */
 export class TransferError extends Error {
   constructor(
     readonly reason: Fail['reason'],
     message?: string,
   ) {
-    super(message ?? reason);
+    super(message ? `${reason}: ${message}` : reason);
     this.name = 'TransferError';
   }
 }
