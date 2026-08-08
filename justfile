@@ -34,7 +34,7 @@ dev: certs
 
 # Build the web bundle and the Go server binary
 build:
-    pnpm --filter ./packages/... --filter ./apps/web build
+    pnpm -r build
     cd apps/server && go build -o ../../bin/sendarcd ./cmd/sendarcd
 
 # Run the production-style server (serves the built web bundle over TLS)
@@ -44,7 +44,8 @@ serve: build certs
 # Lint everything
 lint:
     pnpm -r lint
-    cd apps/server && go vet ./... && test -x "$(command -v golangci-lint)" && golangci-lint run || echo "golangci-lint not installed; ran go vet only"
+    for m in packages/wire apps/server apps/cli; do ( cd "$m" && go vet ./... ) || exit 1; done
+    if command -v golangci-lint >/dev/null; then for m in packages/wire apps/server apps/cli; do ( cd "$m" && golangci-lint run ) || exit 1; done; else echo "golangci-lint not installed; ran go vet only"; fi
 
 # Typecheck TS + Svelte
 typecheck:
@@ -53,9 +54,9 @@ typecheck:
 # Run all tests
 test:
     pnpm -r test
-    cd apps/server && go test ./...
+    for m in packages/wire apps/server apps/cli; do ( cd "$m" && go test ./... ) || exit 1; done
 
 # Format
 fmt:
     pnpm format
-    cd apps/server && go fmt ./...
+    for m in packages/wire apps/server apps/cli; do ( cd "$m" && go fmt ./... ); done

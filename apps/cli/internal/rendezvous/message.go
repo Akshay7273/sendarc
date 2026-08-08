@@ -58,6 +58,7 @@ type Sink interface {
 // SinkFunc adapts a plain function to a Sink.
 type SinkFunc func(Message) error
 
+// Send implements Sink.
 func (f SinkFunc) Send(m Message) error { return f(m) }
 
 // MarshalMessage encodes a signaling message to its JSON wire form.

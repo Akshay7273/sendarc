@@ -91,7 +91,9 @@ func Dial(ctx context.Context, url string, opts DialOptions) (*Client, error) {
 
 	var lastErr error
 	for n := 0; ; n++ {
-		ws, _, err := websocket.Dial(ctx, url, dialOpts)
+		// coder/websocket owns the handshake response body ("You never need to close
+		// resp.Body yourself"), so there is nothing for us to close here.
+		ws, _, err := websocket.Dial(ctx, url, dialOpts) //nolint:bodyclose // library manages resp.Body
 		if err == nil {
 			ws.SetReadLimit(readLimit)
 			return &Client{ws: ws}, nil
