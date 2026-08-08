@@ -42,7 +42,16 @@ describe('TransferReceiver', () => {
     await b.ctrl(FrameType.Manifest, {
       type: FrameType.Manifest,
       files: [
-        { idx: 0, name: 'f', size: 20, mime: '', lastModified: 0, blockSize, blocks: 3, fileDigest },
+        {
+          idx: 0,
+          name: 'f',
+          size: 20,
+          mime: '',
+          lastModified: 0,
+          blockSize,
+          blocks: 3,
+          fileDigest,
+        },
       ],
       totalSize: 20,
     });
@@ -112,12 +121,28 @@ describe('TransferReceiver', () => {
     await b.ctrl(FrameType.Manifest, {
       type: FrameType.Manifest,
       files: [
-        { idx: 0, name: 'f', size: 8, mime: '', lastModified: 0, blockSize: 8, blocks: 1, fileDigest },
+        {
+          idx: 0,
+          name: 'f',
+          size: 8,
+          mime: '',
+          lastModified: 0,
+          blockSize: 8,
+          blocks: 1,
+          fileDigest,
+        },
       ],
       totalSize: 8,
     });
     await b.push(
-      { version: FRAME_VERSION, type: FrameType.BlockData, flags: 1, fileIdx: 0, blockIdx: 0, frameOff: 0 },
+      {
+        version: FRAME_VERSION,
+        type: FrameType.BlockData,
+        flags: 1,
+        fileIdx: 0,
+        blockIdx: 0,
+        frameOff: 0,
+      },
       data,
     );
     b.frames.at(-1)![b.frames.at(-1)!.length - 1] ^= 0x01; // corrupt the tag
@@ -144,12 +169,28 @@ describe('TransferReceiver', () => {
     await b.ctrl(FrameType.Manifest, {
       type: FrameType.Manifest,
       files: [
-        { idx: 0, name: 'f', size: 8, mime: '', lastModified: 0, blockSize: 8, blocks: 1, fileDigest: 'ff' },
+        {
+          idx: 0,
+          name: 'f',
+          size: 8,
+          mime: '',
+          lastModified: 0,
+          blockSize: 8,
+          blocks: 1,
+          fileDigest: 'ff',
+        },
       ],
       totalSize: 8,
     });
     await b.push(
-      { version: FRAME_VERSION, type: FrameType.BlockData, flags: 1, fileIdx: 0, blockIdx: 0, frameOff: 0 },
+      {
+        version: FRAME_VERSION,
+        type: FrameType.BlockData,
+        flags: 1,
+        fileIdx: 0,
+        blockIdx: 0,
+        frameOff: 0,
+      },
       data,
     );
     await b.ctrl(FrameType.BlockHash, {

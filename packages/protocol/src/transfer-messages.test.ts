@@ -37,9 +37,9 @@ describe('control-message codec', () => {
   it('rejects malformed JSON and unknown/invalid shapes', () => {
     expect(() => decodeControl(new Uint8Array([0x7b, 0x7b]))).toThrow(); // "{{"
     expect(() => decodeControl(encodeControl({ type: 999 } as never))).toThrow();
-    expect(() => decodeControl(encodeControl({ type: FrameType.Fail, reason: 'nope' } as never))).toThrow();
     expect(() =>
-      decodeControl(encodeControl({ type: FrameType.Complete } as never)),
-    ).toThrow(); // missing fileDigest
+      decodeControl(encodeControl({ type: FrameType.Fail, reason: 'nope' } as never)),
+    ).toThrow();
+    expect(() => decodeControl(encodeControl({ type: FrameType.Complete } as never))).toThrow(); // missing fileDigest
   });
 });
