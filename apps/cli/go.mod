@@ -2,7 +2,10 @@ module github.com/sendarc/cli
 
 go 1.24.0
 
-require github.com/sendarc/wire v0.0.0
+require (
+	github.com/coder/websocket v1.8.15
+	github.com/sendarc/wire v0.0.0
+)
 
 require (
 	filippo.io/nistec v0.0.4 // indirect
