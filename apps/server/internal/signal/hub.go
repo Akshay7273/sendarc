@@ -189,6 +189,39 @@ func (h *Hub) join(p *peer, number int) (*peer, string) {
 	return r.offerer, ""
 }
 
+// resume re-attaches p to a vacated slot of an existing (lingering) room after the peer
+// reloaded and lost its ephemeral session. Only the slot for the claimed role may be
+// filled, and only if empty; the room and its number are unchanged. It returns the
+// surviving partner so the caller can prompt both sides to re-run the handshake.
+func (h *Hub) resume(p *peer, number int, role string) (*peer, string) {
+	if role != roleOfferer && role != roleJoiner {
+		return nil, errBadMessage
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	r, ok := h.rooms[number]
+	if !ok {
+		return nil, errUnknownRoom
+	}
+	switch role {
+	case roleOfferer:
+		if r.offerer != nil {
+			return nil, errRoomFull
+		}
+		r.offerer = p
+	case roleJoiner:
+		if r.joiner != nil {
+			return nil, errRoomFull
+		}
+		r.joiner = p
+	}
+	p.room = number
+	p.role = role
+	r.lastSeen = time.Now()
+	return roomPartner(r, p), ""
+}
+
 // partner returns the other peer in p's room, or nil if the room is gone or p is not
 // yet paired. It also refreshes the room's activity timestamp.
 func (h *Hub) partner(p *peer) *peer {
@@ -210,9 +243,11 @@ func (h *Hub) partner(p *peer) *peer {
 	}
 }
 
-// remove drops p from its room. If a partner remains it is returned so the caller can
-// notify it; the room is then deleted when either peer leaves.
-func (h *Hub) remove(p *peer) *peer {
+// vacate frees p's slot after an unexpected socket drop. If a partner remains, the room
+// is kept — only p's slot is cleared — so the departed peer can reload and re-attach
+// (see resume) within the idle window; the partner is returned so the caller can tell it
+// to wait. If p was the last peer, the room is deleted and nil is returned.
+func (h *Hub) vacate(p *peer) *peer {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -224,11 +259,33 @@ func (h *Hub) remove(p *peer) *peer {
 	switch p {
 	case r.offerer:
 		other = r.joiner
+		r.offerer = nil
 	case r.joiner:
 		other = r.offerer
+		r.joiner = nil
 	default:
 		return nil
 	}
+	if other == nil {
+		delete(h.rooms, r.number)
+		return nil
+	}
+	r.lastSeen = time.Now()
+	return other
+}
+
+// discard tears down p's whole room after a graceful bye. Any remaining partner is
+// returned so the caller can close it too — a bye ends the session for both peers and is
+// never resumable.
+func (h *Hub) discard(p *peer) *peer {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	r, ok := h.rooms[p.room]
+	if !ok {
+		return nil
+	}
+	other := roomPartner(r, p)
 	delete(h.rooms, r.number)
 	return other
 }
