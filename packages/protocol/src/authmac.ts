@@ -1,10 +1,10 @@
 /**
- * SDP/ICE authentication (M2 design §4.2). Each `sdp`/`ice` signaling message is
+ * SDP/ICE authentication. Each `sdp`/`ice` signaling message is
  * authenticated so a malicious server cannot swap in its own SDP to MITM the DataChannel:
  *
  *   mac = HMAC-SHA256(k_auth, utf8(type) || ":" || u32be(room) || ":" || u32be(seq) || ":" || body)
  *
- * `k_auth` is the SPAKE2 key-confirmation material M1 retains: each peer signs with its own
+ * `k_auth` is retained SPAKE2 key-confirmation material: each peer signs with its own
  * confirmation key and verifies with the peer's. This is defense-in-depth for the direct
  * path — confidentiality still rests on the AES-GCM frame layer keyed by K.
  */

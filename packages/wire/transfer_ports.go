@@ -7,7 +7,7 @@ import (
 	"hash"
 )
 
-// IO ports for the transfer engine (M2 design §5.2, §7). The Sender/Receiver depend only on
+// IO ports for the transfer engine. The Sender/Receiver depend only on
 // these primitives, so the same core runs over an in-memory pipe in tests and over the real
 // pion DataChannel in the CLI. Concrete OS-backed implementations (file source, file sink)
 // live in apps/cli; this file defines the contracts plus in-memory helpers. It is the Go twin

@@ -114,7 +114,7 @@ func (h *Hub) partner(p *peer) *peer {
 }
 
 // remove drops p from its room. If a partner remains it is returned so the caller can
-// notify it; the room is then deleted (M1 tears down on either peer leaving).
+// notify it; the room is then deleted when either peer leaves.
 func (h *Hub) remove(p *peer) *peer {
 	h.mu.Lock()
 	defer h.mu.Unlock()

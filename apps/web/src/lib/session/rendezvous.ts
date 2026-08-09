@@ -46,7 +46,7 @@ export interface RendezvousController {
   /** Abort locally: notify the peer with `bye` and tear down the socket. Idempotent. */
   cancel(reason?: string): void;
   /**
-   * Take over the still-open signaling socket for the M2 transfer, before it is auto-closed.
+   * Take over the still-open signaling socket for the transfer, before it is auto-closed.
    * Valid only after `done` resolves; the caller then owns teardown via the returned channel's
    * `close()`. Swapping in a new `onMessage` handler reroutes inbound frames (SDP/ICE) away from
    * the settled handshake session and into the transfer layer.
@@ -116,7 +116,7 @@ function run(
 
   // Tear the socket down once the handshake settles. Failure closes immediately (stop a doomed
   // retry loop). Success defers to a macrotask so a caller can `adoptSignaling()` synchronously
-  // off `await done` and keep the socket for the M2 transfer; if nobody adopts, it still closes
+  // off `await done` and keep the socket for the transfer; if nobody adopts, it still closes
   // to free the room on the server.
   void session.done.then(
     () => setTimeout(() => void (adopted || client.close()), 0),

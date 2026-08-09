@@ -2,10 +2,10 @@ package httpserver
 
 import "net/http"
 
-// securityHeaders applies the baseline hardening from plan.md §14. The CSP is
+// securityHeaders applies the baseline HTTP hardening. The CSP is
 // deliberately strict; connect-src stays 'self' because signaling runs same-origin
 // (wss to the same host). Referrer-Policy is an extra guard so the URL fragment
-// secret can never leak via Referer. Tightened further for release in M7.
+// secret cannot leak via Referer.
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()

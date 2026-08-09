@@ -44,7 +44,7 @@ func NewSignalAuthenticator(room int, keys wire.SignalAuthKeys) *SignalAuthentic
 	return &SignalAuthenticator{room: uint32(room), keys: keys, inSeq: -1}
 }
 
-// FromSession derives the authenticator from a completed M1 handshake, selecting the peer's
+// FromSession derives the authenticator from a completed handshake, selecting the peer's
 // confirmation keys by role (the offerer signs with KcA and verifies with KcB; the joiner is
 // the mirror). It is the twin of SignalAuthenticator.fromSession.
 func FromSession(role wire.Role, room int, spake2 *wire.Spake2Output) *SignalAuthenticator {

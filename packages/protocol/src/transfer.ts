@@ -1,9 +1,9 @@
 /**
  * Transfer protocol — messages carried as plaintext INSIDE AES-GCM frames, over the
- * DataChannel or the relay (plan.md §6.2). The frame header (§6.3) is the GCM AAD.
+ * DataChannel or another binary transport. The frame header is the GCM AAD.
  */
 
-/** One frame's binary header fields (plan.md §6.3). `frameOff` is within-block. */
+/** One frame's binary header fields. `frameOff` is within-block. */
 export interface FrameHeader {
   version: number;
   type: FrameType;
@@ -20,7 +20,7 @@ export enum FrameType {
   Manifest = 2,
   BlockData = 3,
   BlockHash = 4,
-  BlockRecv = 5, // lightweight M2 in-flight-window signal
+  BlockRecv = 5, // lightweight in-flight-window signal
   Ack = 6,
   Nack = 7,
   Control = 8,
@@ -32,7 +32,7 @@ export enum FrameType {
 /** Feature flags negotiated in caps. */
 export type Feature = 'folders' | 'resume' | 'relay' | 'archive';
 
-/** Hints about which receiver sink is available (plan.md M4). */
+/** Hints about which receiver sink is available. */
 export type SinkHint = 'direct-file' | 'opfs' | 'archive';
 
 /** First encrypted message after the handshake. */
@@ -48,7 +48,7 @@ export interface Caps {
 /** One file's metadata within a manifest. */
 export interface FileEntry {
   idx: number;
-  name: string; // sanitized on receipt (plan.md M4)
+  name: string; // sanitized on receipt
   size: number;
   mime: string;
   lastModified: number;
@@ -72,21 +72,21 @@ export interface BlockHash {
   sha256: string; // hex
 }
 
-/** M2 window signal: receiver has taken delivery of a block (pre-ack). */
+/** Window signal: receiver has taken delivery of a block (pre-ack). */
 export interface BlockRecv {
   type: FrameType.BlockRecv;
   fileIdx: number;
   blockIdx: number;
 }
 
-/** M3: receiver confirms a block was verified and written to the sink. */
+/** Receiver confirms a block was verified and written to the sink. */
 export interface Ack {
   type: FrameType.Ack;
   fileIdx: number;
   blockIdx: number;
 }
 
-/** M3: receiver requests retransmission of a missing block (not for integrity fails). */
+/** Receiver requests retransmission of a missing block (not for integrity failures). */
 export interface Nack {
   type: FrameType.Nack;
   fileIdx: number;
