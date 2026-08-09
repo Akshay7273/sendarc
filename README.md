@@ -9,7 +9,7 @@ and terminal. It authenticates two peers with a short invite code, establishes a
 WebRTC connection, and streams the file without loading it all into memory.
 
 > [!NOTE]
-> SendArc is pre-release software. Direct single-file transfers are working, but there is
+> SendArc is pre-release software. Direct file and folder transfers are working, but there is
 > no stable release or compatibility guarantee yet.
 
 ## Why SendArc
@@ -22,6 +22,8 @@ WebRTC connection, and streams the file without loading it all into memory.
   instead of being uploaded to server-side storage.
 - **Streams large files with bounded memory.** Fixed-size blocks, transport backpressure,
   and a bounded in-flight window keep memory use independent of file size.
+- **Files and folders.** Each file is independently verified; browsers can write directly to a
+  chosen destination or stream a portable ZIP fallback without buffering the file set in memory.
 - **Reliable and controllable.** Verified block acknowledgements drive progress and recovery;
   missing blocks are retried, and either peer can pause, resume, or cancel a transfer.
 - **Verifiable completion.** Every block is authenticated and hashed; the final streaming
@@ -91,10 +93,10 @@ With the local server running, build the CLI:
 (cd apps/cli && go build -o ../../bin/sendarc ./cmd/sendarc)
 ```
 
-Send a file:
+Send one or more files or folders:
 
 ```bash
-bin/sendarc send ./example.zip --insecure-skip-verify
+bin/sendarc send ./photos ./notes.txt --insecure-skip-verify
 ```
 
 Receive it from another terminal:
