@@ -1,5 +1,5 @@
 /**
- * IO ports for the transfer engine (M2 design §5.2, §7). The engine depends only on these
+ * IO ports for the transfer engine. The engine depends only on these
  * async primitives, so the same core runs inline in Node and inside the browser worker with
  * no forked logic. Concrete implementations (OPFS sink, hash-wasm digest, File source) live
  * in the host; this module defines the contracts plus in-memory helpers for tests.

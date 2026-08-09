@@ -2,7 +2,7 @@
 // forwarder and pairer. It allocates room numbers, links exactly two sockets per
 // room, and relays the peers' SPAKE2 handshake and encrypted capability frames
 // without inspecting them. It never sees the word code, any key, or any plaintext —
-// only room numbers and connection metadata (plan.md §5.5, §6.1).
+// only room numbers and connection metadata.
 package signal
 
 import (
@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// Wire message types (plan.md §6.1). Control types are handled by the server; the
+// Wire message types. Control types are handled by the server; the
 // forwardable types are relayed peer-to-peer as opaque bytes.
 const (
 	typeCreate     = "create"
@@ -39,8 +39,7 @@ const (
 )
 
 // forwardable is the set of peer→peer types the server relays without inspection.
-// sdp and ice are unused until M2 but are relayed now so the handshake path is
-// complete; their bodies are never parsed.
+// SDP and ICE bodies are forwarded without being parsed.
 var forwardable = map[string]bool{
 	typePake:    true,
 	typeConfirm: true,

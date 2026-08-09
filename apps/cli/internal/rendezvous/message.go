@@ -1,5 +1,5 @@
-// Package rendezvous drives one CLI peer through the SendArc M1 handshake over the blind
-// signaling channel (plan.md §5.2): create/join → peer-joined → pake → confirm → an
+// Package rendezvous drives one CLI peer through the SendArc handshake over the blind
+// signaling channel: create/join → peer-joined → pake → confirm → an
 // AEAD-sealed caps round-trip, ending with a shared master key and both directional
 // transfer keys.
 //
@@ -13,7 +13,7 @@ package rendezvous
 
 import "encoding/json"
 
-// Signaling message type tags (plan.md §6.1). These match the string tags in
+// Signaling message type tags. These match the string tags in
 // packages/protocol/src/signaling.ts exactly; the server forwards the peer→peer bodies
 // verbatim, so a mismatch here would break interop with a browser peer.
 const (
@@ -43,16 +43,16 @@ type Message struct {
 	// Msg carries the base64url SPAKE2 share on pake, and the human text on error.
 	Msg string `json:"msg,omitempty"`
 	// Mac is the base64url RFC 9382 key-confirmation MAC on confirm, and the
-	// authmac tag over the body on sdp/ice (plan.md §6.1, M2).
+	// authmac tag over the body on sdp/ice.
 	Mac string `json:"mac,omitempty"`
 	// Frame is the base64url AEAD-sealed frame on caps.
 	Frame string `json:"frame,omitempty"`
-	// Sdp carries the SDP offer/answer text on sdp (M2 peer→peer).
+	// Sdp carries the SDP offer/answer text on sdp.
 	Sdp string `json:"sdp,omitempty"`
-	// Cand carries the ICE candidate string on ice (M2 peer→peer).
+	// Cand carries the ICE candidate string on ice.
 	Cand string `json:"cand,omitempty"`
 	// Seq is the sender-monotonic sequence number authenticated on sdp/ice. It is a
-	// pointer so seq:0 — the first message — still serializes, while every non-M2
+	// pointer so seq:0 — the first message — still serializes, while every non-SDP/ICE
 	// message omits the field entirely.
 	Seq *int `json:"seq,omitempty"`
 	// Reason is the optional detail on bye.
@@ -76,7 +76,7 @@ func (f SinkFunc) Send(m Message) error { return f(m) }
 func MarshalMessage(m Message) ([]byte, error) { return json.Marshal(m) }
 
 // NewSDP builds an authenticated sdp message. seq is the sender-monotonic sequence
-// number and mac the base64url authmac tag over the body (plan.md §6.1, M2). It is
+// number and mac the base64url authmac tag over the body. It is
 // exported because the RTC layer, not the handshake session, emits these.
 func NewSDP(seq int, sdp, mac string) Message {
 	return Message{Type: typeSDP, Sdp: sdp, Seq: &seq, Mac: mac}

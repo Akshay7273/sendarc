@@ -7,7 +7,7 @@
 
 import type { DirectionalKey } from '@sendarc/protocol';
 
-/** Session crypto state handed to the worker at start — counters continue from M1, never reset. */
+/** Session crypto state handed to the worker at start — counters continue, never reset. */
 export interface SessionCrypto {
   sendDir: DirectionalKey;
   recvDir: DirectionalKey;

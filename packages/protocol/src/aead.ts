@@ -1,5 +1,5 @@
 /**
- * AES-256-GCM frame codec (plan.md §6.3). Each frame is a fixed 16-byte header followed
+ * AES-256-GCM frame codec. Each frame is a fixed 16-byte header followed
  * by the GCM output (ciphertext with appended 16-byte tag). The encoded header is the
  * GCM additional authenticated data, so any header tampering fails decryption.
  *

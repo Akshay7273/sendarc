@@ -54,7 +54,7 @@ const (
 	RoleJoiner  = wire.RoleJoiner
 )
 
-// Result is everything a completed handshake yields — enough to run the M2 transfer under
+// Result is everything a completed handshake yields — enough to run the transfer under
 // the same key. The caps exchange consumed frame counter 0 in each direction, so both
 // counters are 1: the transfer must continue from here without resetting, or it would
 // reuse an AES-GCM nonce.
@@ -64,7 +64,7 @@ type Result struct {
 	Code        string // the full normalized invite code (<room>-<words>); the SPAKE2 password
 	Master      []byte
 	Keys        wire.TransferKeys
-	Spake2      *wire.Spake2Output // retained for the M2 SDP/ICE MAC keys (KcA/KcB)
+	Spake2      *wire.Spake2Output // retained for the SDP/ICE MAC keys (KcA/KcB)
 	LocalCaps   Caps
 	RemoteCaps  Caps
 	SendCounter uint64
@@ -352,7 +352,7 @@ func (s *Session) onConfirm(msg Message) {
 		expected = s.spake2.ConfirmA
 	}
 	if !hmac.Equal(got, expected) {
-		// Wrong code or a MITM: fail closed (RFC 9382 §4). This is the core M1 guarantee.
+		// Wrong code or a MITM: fail closed (RFC 9382 §4).
 		s.fail(&Error{CodeConfirmationFailed, "key confirmation failed"})
 		return
 	}

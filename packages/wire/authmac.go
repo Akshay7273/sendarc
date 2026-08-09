@@ -5,13 +5,13 @@ import (
 	"encoding/binary"
 )
 
-// Signaling-message authentication (M2 design §4.2). Each sdp/ice signaling message is
+// Signaling-message authentication. Each sdp/ice signaling message is
 // MAC'd so a malicious rendezvous server cannot substitute its own SDP to man-in-the-middle
 // the DataChannel:
 //
 //	mac = HMAC-SHA256(k_auth, utf8(type) || ":" || u32be(room) || ":" || u32be(seq) || ":" || body)
 //
-// k_auth is the SPAKE2 key-confirmation material M1 retains: each peer signs with its own
+// k_auth is retained SPAKE2 key-confirmation material: each peer signs with its own
 // confirmation key and verifies with the peer's. This is defense-in-depth for the direct
 // path — confidentiality still rests on the AES-GCM frame layer keyed by K. This is the Go
 // twin of packages/protocol/src/authmac.ts and produces byte-identical MACs.

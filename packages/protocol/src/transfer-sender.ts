@@ -4,7 +4,7 @@
  *   Pass 1  read the file once → whole-file streaming digest → manifest (with fileDigest).
  *   Pass 2  re-chunk into `block_data` frames; at each block boundary send `block_hash`.
  *   Finish  send `complete{fileDigest}`; resolve when the receiver returns `done`.
- * Outbound frames are AES-GCM sealed with a per-direction counter that continues from M1
+ * Outbound frames are AES-GCM sealed with a per-direction counter that continues from the handshake
  * (never reset). The sender never runs more than `window` blocks ahead of the receiver's
  * `block_recv` signal, bounding the outbound queue.
  */

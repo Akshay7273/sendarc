@@ -42,7 +42,7 @@ describe('authmac', () => {
     expect(await verifySignal(k, 'sdp', 8, 3, 'hello', mac)).toBe(false); // room bound
   });
 
-  it('domain-separates from the M1 confirm MAC (type prefix present)', () => {
+  it('domain-separates from the confirm MAC (type prefix present)', () => {
     const input = signalMacInput('sdp', 7, 3, 'x');
     expect(new TextDecoder().decode(input.slice(0, 4))).toBe('sdp:');
   });

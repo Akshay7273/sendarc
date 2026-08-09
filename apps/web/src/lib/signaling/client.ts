@@ -8,16 +8,15 @@
  * Reconnection is deliberately limited to that first connect. Once the socket has opened,
  * the server holds this session's room and pairing on *this* connection; a drop tears the
  * room down and notifies the peer with `bye`, so a fresh socket cannot resume it — it
- * would only allocate a new, unrelated room. Recovering a dropped session by
- * re-handshaking under the same code is a later milestone (plan.md §M6); here a
- * post-open close is surfaced as a terminal event for the caller to handle.
+ * would only allocate a new, unrelated room. A post-open close is surfaced as a terminal
+ * event for the caller to handle.
  */
 
 import type { SignalMsg } from '@sendarc/protocol';
 
 /**
  * A live, bidirectional signaling channel with a swappable inbound handler. The rendezvous layer
- * hands one of these to the M2 transfer layer (via `adoptSignaling`) once the handshake settles,
+ * hands one of these to the transfer layer (via `adoptSignaling`) once the handshake settles,
  * so the SDP/ICE exchange can reuse the still-open socket instead of opening a second one.
  */
 export interface SignalChannel {

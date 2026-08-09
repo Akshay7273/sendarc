@@ -1,86 +1,141 @@
 # SendArc
 
-SendArc is a self-hostable, end-to-end-encrypted, peer-to-peer file transfer. Two peers
-share a short invite code; SendArc establishes an authenticated rendezvous, negotiates a
-direct WebRTC connection, and streams the file encrypted, with bounded memory on both
-ends and a verified digest at completion. It ships as a browser app and a terminal client
-that speak the same protocol.
+[![CI](https://github.com/Akshay7273/sendarc/actions/workflows/ci.yml/badge.svg)](https://github.com/Akshay7273/sendarc/actions/workflows/ci.yml)
 
-The server is a blind rendezvous point and will gain a fallback relay in M5. It pairs two
-peers by a room number and forwards their messages untouched; it never sees the invite
-words, the file bytes, filenames, or the encryption keys.
+**Send files directly. Share only a short code. Keep the server out of your data.**
 
-## Status
+SendArc is a self-hostable, end-to-end-encrypted file-transfer application for the browser
+and terminal. It authenticates two peers with a short invite code, establishes a direct
+WebRTC connection, and streams the file without loading it all into memory.
 
-Early development. The foundation (M0), authenticated rendezvous (M1), and direct-transfer
-vertical slice (M2) are complete. Browser and CLI peers can establish an authenticated
-WebRTC DataChannel and stream one encrypted file with bounded memory, per-block integrity,
-and a verified whole-file digest. Active work moves to M3 — acknowledgements,
-retransmission, pause/resume, and cancellation.
+> [!NOTE]
+> SendArc is pre-release software. Direct single-file transfers are working, but there is
+> no stable release or compatibility guarantee yet.
+
+## Why SendArc
+
+- **End-to-end encrypted.** File contents, names, digests, and session keys are encrypted
+  between the two peers. The rendezvous server cannot read them.
+- **Authenticated by a human-friendly code.** SPAKE2 binds the cryptographic handshake to
+  the invite code and fails closed when the code is wrong.
+- **Direct peer-to-peer transport.** Files travel over an authenticated WebRTC DataChannel
+  instead of being uploaded to server-side storage.
+- **Streams large files with bounded memory.** Fixed-size blocks, transport backpressure,
+  and a bounded in-flight window keep memory use independent of file size.
+- **Verifiable completion.** Every block is authenticated and hashed; the final streaming
+  SHA-256 digest is compatible with `sha256sum`.
+- **Browser and CLI interoperability.** Send or receive with either client using the same
+  protocol and invite code.
 
 ## How it works
 
-- **Invite code.** The sender asks the server for a room and mints a few random words,
-  e.g. `4-brave-otter`. The room number routes the two sockets; the words are generated
-  and checked entirely on the clients. In the browser the code travels in the URL
-  fragment (`#…`), which is never put on the wire, so the words never reach the server.
-- **Authenticated handshake.** Both ends run SPAKE2 (RFC 9382, over P-256) with the full
-  invite code as the shared password, then exchange RFC 9382 key-confirmation MACs. A
-  wrong code fails closed, so a malicious or compromised server cannot man-in-the-middle
-  the connection. Both peers also derive the same short fingerprint, which the two humans
-  can read to each other as an out-of-band check.
-- **Encrypted transfer.** Files are streamed as AES-256-GCM frames keyed by the handshake
-  output. The 16-byte frame header is the AEAD's associated data, binding each frame to
-  its position. The same frame layer is used on the direct WebRTC path and on the relay
-  fallback, so recovery is transport-agnostic. Integrity is checked per block (SHA-256)
-  and for the whole file with a streaming digest that matches `sha256sum`.
-- **Bounded memory.** The sender streams from disk, in-flight data is capped by a fixed
-  window, and the receiver writes verified blocks to its sink and drops them — neither
-  side buffers the whole file in RAM.
-
-## Repository layout
-
-```
-apps/web            Svelte 5 + Vite single-page app (UI, WebRTC, crypto, transfer)
-apps/cli            Go terminal client (sendarc send / receive)
-apps/server         Go signaling + relay server (sendarcd)
-packages/protocol   Wire types and constants shared by the web app and CLI (TypeScript)
-packages/wire       Go mirror of the wire protocol, shared by the server and CLI
-infra/certs         Local mkcert TLS material (gitignored)
+```text
+ Sender                      Blind rendezvous                     Receiver
+   │  create room ─────────────────▶│                                │
+   │◀──────────── room number       │◀────────────── join room ─────│
+   │                                │                                │
+   │  SPAKE2 + key confirmation ◀───┼───▶ SPAKE2 + key confirmation │
+   │  authenticated SDP / ICE   ◀───┼───▶ authenticated SDP / ICE   │
+   │                                │                                │
+   └════════ encrypted WebRTC DataChannel, peer to peer ════════════┘
 ```
 
-## Quick start (development)
+The room number is only a routing token. The random words stay on the clients—in browser
+links they live after `#`, which is not sent in HTTP requests. Both peers use the complete
+code as the SPAKE2 password, confirm the derived key, and authenticate WebRTC signaling
+before transferring encrypted frames.
 
-Requires Node ≥ 22, Go ≥ 1.24, [pnpm](https://pnpm.io) (via `corepack enable`),
-[mkcert](https://github.com/FiloSottile/mkcert), and
-[just](https://github.com/casey/just).
+The rendezvous server can observe connection metadata and WebRTC signaling required to
+connect the peers. It cannot derive the session key or decrypt file metadata and content.
+The security section below summarizes the trust boundary.
+
+## Supported paths
+
+| Sender  | Receiver | Transfer path          |
+| ------- | -------- | ---------------------- |
+| Browser | Browser  | Direct WebRTC          |
+| Browser | CLI      | Direct WebRTC          |
+| CLI     | Browser  | Direct WebRTC          |
+| CLI     | CLI      | Direct WebRTC via Pion |
+
+## Run locally
+
+### Requirements
+
+- Node.js 22 or newer
+- Go 1.24 or newer
+- [pnpm](https://pnpm.io/) through Corepack
+- [just](https://github.com/casey/just)
+- [mkcert](https://github.com/FiloSottile/mkcert)
+
+### Browser application
 
 ```bash
-just install     # install JS and Go dependencies
-just dev         # Vite HMR + Go server at https://localhost
+git clone https://github.com/Akshay7273/sendarc.git
+cd sendarc
+corepack enable
+just install
+just dev
 ```
 
-`just dev` generates a local certificate on first run. If the browser distrusts it,
-run `mkcert -install` once to add the local CA to your system trust store.
+Open `https://localhost:8443` on both peers. The first run creates a local TLS certificate.
+Run `mkcert -install` once if your browser does not trust the development certificate.
 
-Other recipes:
+### Terminal client
+
+With the local server running, build the CLI:
 
 ```bash
-just build       # build the web bundle and the sendarcd binary
-just serve       # serve the production build over TLS
-just lint        # lint the web app and every Go module
-just typecheck   # TypeScript + Svelte
-just test        # unit tests (web + Go modules)
+(cd apps/cli && go build -o ../../bin/sendarc ./cmd/sendarc)
+```
+
+Send a file:
+
+```bash
+bin/sendarc send ./example.zip --insecure-skip-verify
+```
+
+Receive it from another terminal:
+
+```bash
+bin/sendarc receive 4-brave-otter --out ./downloads --insecure-skip-verify
+```
+
+`--insecure-skip-verify` is only for the self-signed local development certificate. Do not
+use it with a deployed server. Run `bin/sendarc help` for all options.
+
+## Development
+
+```bash
+just build       # build the web application and server binary
+just lint        # lint TypeScript, Svelte, and every Go module
+just typecheck   # run TypeScript and Svelte diagnostics
+just test        # run JavaScript and Go test suites
+just serve       # serve a production-style local build over TLS
+```
+
+The repository is a pnpm and Go workspace:
+
+```text
+apps/web            Svelte web application, WebRTC client, and transfer worker
+apps/cli            Go terminal client
+apps/server         Go HTTPS and blind rendezvous server
+packages/protocol   TypeScript protocol, cryptography, and transfer engine
+packages/wire       Go implementation of the shared wire protocol
 ```
 
 ## Security
 
-SendArc treats the server and the network as untrusted for confidentiality and
-integrity. Encryption is end-to-end on both the direct and relay paths, and peer
-authentication is bound to the invite code.
+SendArc treats the rendezvous server and network as untrusted for confidentiality and
+integrity. Bulk encryption uses AES-256-GCM with monotonic per-direction nonces; the frame
+header is authenticated as associated data. SPAKE2 with RFC 9382 key confirmation protects
+the short invite code from offline guessing by the server and prevents an undetected
+man-in-the-middle handshake.
+
+SendArc has not yet received an independent security audit. Please do not use pre-release
+builds for irreplaceable or highly sensitive data.
 
 ## License
 
-Not yet chosen. Until a license is added, no rights are granted beyond viewing the
-source; do not assume any license. A license will be selected before the first public
-release.
+No license has been granted yet. Until a `LICENSE` file is added, the source is available
+for inspection only; do not assume permission to copy, modify, or distribute it.
