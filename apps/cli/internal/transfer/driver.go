@@ -1,7 +1,7 @@
-// Package transfer wires a completed rendezvous into a direct file transfer: it adopts
-// the open signaling socket, brings up the authenticated WebRTC DataChannel (internal/rtc), and
-// runs the transport-agnostic transfer engine (packages/wire) over it — the offerer sends the
-// file, the joiner writes it to disk. It is the CLI counterpart of
+// Package transfer wires a completed rendezvous into a direct-or-relayed file transfer: it adopts
+// the open signaling socket, prefers an authenticated WebRTC DataChannel (internal/rtc), and falls
+// back to the encrypted relay before running the transport-agnostic engine (packages/wire). The
+// offerer sends the file and the joiner writes it to disk. It is the CLI counterpart of
 // apps/web/src/lib/transfer/transfer-core.ts, adapted to Go concurrency and OS files.
 package transfer
 
@@ -11,19 +11,22 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pion/webrtc/v4"
+	relaytransport "github.com/sendarc/cli/internal/relay"
 	"github.com/sendarc/cli/internal/rendezvous"
 	"github.com/sendarc/cli/internal/rtc"
 	"github.com/sendarc/wire"
 )
 
 // Signal is the live signaling connection the driver adopts for the whole exchange — first the
-// handshake, then the sdp/ice negotiation. *wsclient.Client satisfies it; tests supply an
-// in-memory relay.
+// handshake, then SDP/ICE negotiation or opaque relay frames. *wsclient.Client satisfies it;
+// tests supply an in-memory relay.
 type Signal interface {
 	Send(rendezvous.Message) error
-	Run(ctx context.Context, onMessage func(rendezvous.Message)) error
+	SendBinary([]byte) error
+	Run(ctx context.Context, onMessage func(rendezvous.Message), onBinary func([]byte)) error
 	Close()
 }
 
@@ -48,6 +51,12 @@ type Spec struct {
 	// ICEServers overrides rtc.DefaultICEServers. An explicit empty slice uses host candidates
 	// only (loopback tests); nil takes the default STUN server.
 	ICEServers []webrtc.ICEServer
+	// ForceRelay skips direct negotiation. ConnectTimeout selects relay when direct negotiation
+	// does not finish in time; zero uses the production default.
+	ForceRelay     bool
+	ConnectTimeout time.Duration
+	// OnTransport reports "direct" or "relay" once the byte path is selected.
+	OnTransport func(string)
 	// OnConnect fires once the DataChannel opens, before the first byte moves.
 	OnConnect func()
 	// OnManifest fires on the receiver when the sender's manifest arrives (file named and sized).
@@ -100,6 +109,7 @@ type driver struct {
 	// peer and res are set once, by the read-loop goroutine, at establishment; peerCh publishes
 	// the peer to run once it exists.
 	peer   *rtc.Peer
+	relay  *relaytransport.Conn
 	res    *rendezvous.Result
 	peerCh chan *rtc.Peer
 }
@@ -112,6 +122,13 @@ func (d *driver) Send(m rendezvous.Message) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.sig.Send(m)
+}
+
+// SendBinary serializes opaque relay writes with signaling control writes on the WebSocket.
+func (d *driver) SendBinary(frame []byte) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.sig.SendBinary(frame)
 }
 
 func (d *driver) run(ctx context.Context) (*Outcome, error) {
@@ -129,7 +146,7 @@ func (d *driver) run(ctx context.Context) (*Outcome, error) {
 	}()
 
 	readErr := make(chan error, 1)
-	go func() { readErr <- d.sig.Run(ctx, d.route) }()
+	go func() { readErr <- d.sig.Run(ctx, d.route, d.routeBinary) }()
 
 	d.sess.Start()
 
@@ -152,25 +169,64 @@ func (d *driver) run(ctx context.Context) (*Outcome, error) {
 	}
 
 	res := d.res
-	conn, err := peer.Channel(ctx)
+	conn, path, err := d.selectTransport(ctx, peer, readErr)
 	if err != nil {
-		_ = peer.Close()
+		if peer != nil {
+			_ = peer.Close()
+		}
 		d.sig.Close()
-		return nil, fmt.Errorf("transfer: data channel: %w", err)
+		return nil, err
+	}
+	if d.spec.OnTransport != nil {
+		d.spec.OnTransport(path)
 	}
 	if d.spec.OnConnect != nil {
 		d.spec.OnConnect()
 	}
 
-	out, terr := d.transfer(ctx, conn, res)
+	var out *Outcome
+	var terr error
+	readEnded := false
+	if path == "relay" {
+		transferCtx, cancelTransfer := context.WithCancel(ctx)
+		type transferResult struct {
+			out *Outcome
+			err error
+		}
+		transferDone := make(chan transferResult, 1)
+		go func() {
+			result, transferErr := d.transfer(transferCtx, conn, res)
+			transferDone <- transferResult{out: result, err: transferErr}
+		}()
+		select {
+		case result := <-transferDone:
+			out, terr = result.out, result.err
+		case sigErr := <-readErr:
+			readEnded = true
+			cancelTransfer()
+			_ = conn.Close()
+			<-transferDone
+			if sigErr == nil {
+				sigErr = errors.New("signaling closed")
+			}
+			terr = fmt.Errorf("transfer: relay connection lost: %w", sigErr)
+		}
+		cancelTransfer()
+	} else {
+		out, terr = d.transfer(ctx, conn, res)
+	}
 
 	// Drain the data channel before tearing down the peer: the first side to finish (the
 	// receiver, once it has sent done) must let that final frame reach the wire, or closing the
 	// PeerConnection aborts SCTP and the waiting sender never learns the transfer completed.
 	_ = conn.Close()
-	_ = peer.Close()
+	if peer != nil {
+		_ = peer.Close()
+	}
 	d.sig.Close()
-	<-readErr // let the read loop drain once the socket is closed
+	if !readEnded {
+		<-readErr // let the read loop drain once the socket is closed
+	}
 
 	if terr != nil {
 		return nil, terr
@@ -179,17 +235,85 @@ func (d *driver) run(ctx context.Context) (*Outcome, error) {
 	return out, nil
 }
 
+type dataConn interface {
+	Send([]byte) error
+	OnData(func([]byte))
+	Close() error
+}
+
+type rtcResult struct {
+	conn *rtc.DataConn
+	err  error
+}
+
+func (d *driver) selectTransport(ctx context.Context, peer *rtc.Peer, readErr <-chan error) (dataConn, string, error) {
+	if d.relay == nil {
+		return nil, "", errors.New("transfer: relay was not initialized")
+	}
+	direct := make(chan rtcResult, 1)
+	if peer != nil && !d.spec.ForceRelay {
+		go func() {
+			conn, err := peer.Channel(ctx)
+			direct <- rtcResult{conn: conn, err: err}
+		}()
+	} else if err := d.relay.Open(); err != nil {
+		return nil, "", err
+	}
+	timeout := d.spec.ConnectTimeout
+	if timeout <= 0 {
+		timeout = 8 * time.Second
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	timeoutCh := timer.C
+
+	for {
+		select {
+		case result := <-direct:
+			if result.err == nil {
+				return result.conn, "direct", nil
+			}
+			if err := d.relay.Open(); err != nil {
+				return nil, "", fmt.Errorf("transfer: direct failed (%v), relay open: %w", result.err, err)
+			}
+			direct = nil
+		case <-timeoutCh:
+			if err := d.relay.Open(); err != nil {
+				return nil, "", fmt.Errorf("transfer: relay fallback: %w", err)
+			}
+			timeoutCh = nil
+		case <-d.relay.Ready():
+			if peer != nil {
+				_ = peer.Close()
+			}
+			return d.relay, "relay", nil
+		case err := <-readErr:
+			if err == nil {
+				err = errors.New("signaling closed")
+			}
+			return nil, "", fmt.Errorf("transfer: signaling: %w", err)
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		}
+	}
+}
+
 // route is the single inbound dispatch. Before establishment it feeds the handshake session;
 // the instant the session establishes it builds the peer — synchronously, so the peer exists
 // before the next frame (the offer, for a joiner) is read — and thereafter feeds the peer.
 // Running entirely on the read-loop goroutine makes the switch race-free.
 func (d *driver) route(m rendezvous.Message) {
-	if d.peer != nil {
-		d.peer.Accept(m)
+	if d.res != nil {
+		if d.relay != nil && d.relay.HandleMessage(m) {
+			return
+		}
+		if d.peer != nil {
+			d.peer.Accept(m)
+		}
 		return
 	}
 	d.sess.Handle(m)
-	if d.peer != nil {
+	if d.res != nil {
 		return
 	}
 	select {
@@ -201,26 +325,37 @@ func (d *driver) route(m rendezvous.Message) {
 	if err != nil {
 		return // handshake failed; the watcher goroutine closes the socket
 	}
-	peer, perr := rtc.NewPeer(rtc.PeerOptions{
-		Role:       res.Role,
-		Auth:       rtc.FromSession(res.Role, res.Room, res.Spake2),
-		Send:       d.Send,
-		ICEServers: d.spec.ICEServers,
-	})
-	if perr != nil {
-		d.sig.Close() // unrecoverable; run's readErr branch reports it
-		return
+	var peer *rtc.Peer
+	if !d.spec.ForceRelay {
+		var perr error
+		peer, perr = rtc.NewPeer(rtc.PeerOptions{
+			Role:       res.Role,
+			Auth:       rtc.FromSession(res.Role, res.Room, res.Spake2),
+			Send:       d.Send,
+			ICEServers: d.spec.ICEServers,
+		})
+		if perr != nil {
+			d.sig.Close()
+			return
+		}
 	}
 	d.res = res
+	d.relay = relaytransport.New(d)
 	d.peer = peer
 	d.peerCh <- peer
+}
+
+func (d *driver) routeBinary(frame []byte) {
+	if d.relay != nil {
+		d.relay.HandleBinary(frame)
+	}
 }
 
 // transfer runs the engine over the open channel: the offerer sends its file, the joiner
 // receives one. Counters continue from the handshake so the AES-GCM nonce is never reused, and
 // block/frame sizes are the min of the two peers' announced caps. Canceling ctx aborts the
 // in-flight transfer.
-func (d *driver) transfer(ctx context.Context, conn *rtc.DataConn, res *rendezvous.Result) (*Outcome, error) {
+func (d *driver) transfer(ctx context.Context, conn dataConn, res *rendezvous.Result) (*Outcome, error) {
 	sendDir, recvDir := directionalKeys(res)
 	if res.Role == wire.RoleOfferer {
 		return d.send(ctx, conn, res, sendDir, recvDir)
@@ -228,7 +363,7 @@ func (d *driver) transfer(ctx context.Context, conn *rtc.DataConn, res *rendezvo
 	return d.receive(ctx, conn, res, sendDir, recvDir)
 }
 
-func (d *driver) send(ctx context.Context, conn *rtc.DataConn, res *rendezvous.Result, sendDir, recvDir wire.DirectionalKey) (*Outcome, error) {
+func (d *driver) send(ctx context.Context, conn dataConn, res *rendezvous.Result, sendDir, recvDir wire.DirectionalKey) (*Outcome, error) {
 	if (d.spec.Source == nil) == (len(d.spec.Sources) == 0) {
 		return nil, errors.New("transfer: exactly one of Source or Sources is required to send")
 	}
@@ -285,7 +420,7 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
-func (d *driver) receive(ctx context.Context, conn *rtc.DataConn, res *rendezvous.Result, sendDir, recvDir wire.DirectionalKey) (*Outcome, error) {
+func (d *driver) receive(ctx context.Context, conn dataConn, res *rendezvous.Result, sendDir, recvDir wire.DirectionalKey) (*Outcome, error) {
 	destination, err := NewOSDestination(d.spec.DestDir)
 	if err != nil {
 		return nil, wire.NewTransferError(wire.FailSinkError, err.Error())

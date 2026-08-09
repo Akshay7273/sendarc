@@ -99,7 +99,7 @@ export class TransferReceiver {
   }
 
   /** Feed one inbound encrypted frame from the sender. */
-  handle(frame: Uint8Array): void {
+  handle(frame: Uint8Array): Promise<void> {
     this.inbound = this.inbound
       .then(() => this.process(frame))
       .catch((e: unknown) => {
@@ -109,6 +109,7 @@ export class TransferReceiver {
             : new TransferError('integrity', e instanceof Error ? e.message : String(e)),
         );
       });
+    return this.inbound;
   }
 
   /** Ask the sender to stop producing data frames. Buffered transport bytes may still drain. */

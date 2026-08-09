@@ -129,12 +129,13 @@ export class TransferSender {
   }
 
   /** Feed one inbound encrypted control frame from the receiver. */
-  handle(frame: Uint8Array): void {
+  handle(frame: Uint8Array): Promise<void> {
     this.inbound = this.inbound
       .then(() => this.processInbound(frame))
       .catch((e: unknown) => {
         this.fail(e instanceof Error ? e : new Error(String(e)));
       });
+    return this.inbound;
   }
 
   /** Pause locally and ask the peer to reflect the paused state. */

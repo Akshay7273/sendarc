@@ -52,6 +52,7 @@
   let rateBps = $state(0);
   let etaSeconds = $state<number | undefined>(undefined);
   let transferState = $state<'running' | 'paused' | 'canceled'>('running');
+  let transportPath = $state<'connecting' | 'direct' | 'relay'>('connecting');
   let outcome = $state<TransferOutcome | null>(null);
   let downloadUrl = $state<string | null>(null);
 
@@ -82,6 +83,7 @@
       sinkHints.push('opfs', 'archive');
     }
     if (pickerWindow.showSaveFilePicker) sinkHints.push('direct-file');
+    features.push('relay');
     return { features, sinkHints };
   }
 
@@ -202,6 +204,7 @@
       rateBps = snapshot.rateBps;
       etaSeconds = snapshot.etaSeconds;
       transferState = snapshot.state;
+      transportPath = ctrl.transport();
     }, 100);
     ctrl.done.then(
       (result) => {
@@ -253,6 +256,7 @@
     rateBps = 0;
     etaSeconds = undefined;
     transferState = 'running';
+    transportPath = 'connecting';
     outcome = null;
     phase = 'idle';
     code = '';
@@ -364,7 +368,7 @@
         <p class="transfer-detail" aria-live="polite">
           {transferState === 'paused'
             ? 'Paused'
-            : `${rateLabel(rateBps)} · ${etaLabel(etaSeconds)}`}
+            : `${rateLabel(rateBps)} · ${etaLabel(etaSeconds)}${transportPath === 'relay' ? ' · encrypted relay' : transportPath === 'direct' ? ' · direct' : ''}`}
         </p>
         <div class="transfer-controls">
           {#if transferState === 'paused'}

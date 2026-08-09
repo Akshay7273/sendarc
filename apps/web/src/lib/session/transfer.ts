@@ -1,9 +1,9 @@
 /**
  * Transfer orchestrator — the main-thread conductor that turns a settled rendezvous into a running
- * file transfer. It adopts the still-open signaling socket, brings up the authenticated WebRTC data
- * channel ({@link createPeer}), spawns the transfer worker ({@link runTransferCore} host), and pumps
- * frames between the two: worker → channel with SCTP backpressure ({@link ChannelWriter}), channel →
- * worker as inbound frames. The worker owns crypto and disk; this module owns transport and the
+ * file transfer. It adopts the still-open signaling socket, prefers an authenticated WebRTC data
+ * channel ({@link createPeer}), and falls back to the encrypted relay when direct negotiation fails.
+ * It spawns the transfer worker ({@link runTransferCore} host) and pumps frames between the selected
+ * path and worker. The worker owns crypto and disk; this module owns transport selection and the
  * public {@link TransferController} the UI binds against (progress, a `done` promise, cancel).
  *
  * Browser-only (needs `Worker`, `RTCPeerConnection`); not unit-tested — the pieces it wires each
@@ -15,6 +15,7 @@ import type { SignalChannel } from '../signaling/client.js';
 import { SignalAuthenticator } from '../transfer/authed-signaling.js';
 import { createPeer, type Peer } from '../transfer/peer.js';
 import { ChannelWriter } from '../transfer/channel-writer.js';
+import { RelayTransport } from '../transfer/relay.js';
 import { ProgressTracker, type TransferSnapshot } from '../transfer/progress.js';
 import { readOpfsOutput, removeOpfsOutput } from '../transfer/sink.js';
 import type {
@@ -44,6 +45,8 @@ export interface TransferController {
   total(): number | undefined;
   /** A coherent acknowledged-byte, smoothed-rate, ETA, and run-state snapshot. */
   snapshot(): TransferSnapshot;
+  /** Active byte path, including automatic relay fallback. */
+  transport(): 'connecting' | 'direct' | 'relay';
   /** Resolves when the transfer completes and verifies; rejects on any failure. */
   readonly done: Promise<TransferOutcome>;
   /** Stop producing new data frames; already-buffered transport bytes may drain. */
@@ -101,6 +104,8 @@ function run(
   let peer: Peer | undefined;
   let worker: Worker | undefined;
   let writer: ChannelWriter | undefined;
+  let relay: RelayTransport | undefined;
+  let transport: 'connecting' | 'direct' | 'relay' = 'connecting';
   let cancelTimer: ReturnType<typeof setTimeout> | undefined;
 
   let resolveDone!: (o: TransferOutcome) => void;
@@ -114,6 +119,7 @@ function run(
     clearTimeout(cancelTimer);
     worker?.terminate();
     peer?.close();
+    relay?.close();
     signaling.close();
   };
   const finish = (o: TransferOutcome): void => {
@@ -138,9 +144,19 @@ function run(
       );
       const p = createPeer({ role: rendezvous.role, auth, send: (msg) => signaling.send(msg) });
       peer = p;
+      const relayPath = new RelayTransport(signaling);
+      relay = relayPath;
+      signaling.onClose((err) => {
+        if (transport !== 'direct') {
+          relayPath.fail(err);
+          fail(err);
+        }
+      });
       signaling.onMessage((msg) => {
+        if (relayPath.handleMessage(msg)) return;
         if (msg.type === 'sdp' || msg.type === 'ice') p.accept(msg);
       });
+      signaling.onBinary((frame) => relayPath.handleBinary(frame));
 
       const w = new Worker(new URL('../transfer/transfer.worker.ts', import.meta.url), {
         type: 'module',
@@ -150,8 +166,13 @@ function run(
       // which can beat the channel negotiation; a late listener would miss it and hang forever.
       const ready = workerReady(w);
 
-      const channel = await p.channel;
-      writer = new ChannelWriter(channel);
+      const selected = await selectTransport(p, relayPath);
+      transport = selected.kind;
+      if (selected.kind === 'direct') {
+        writer = new ChannelWriter(selected.channel);
+      } else {
+        p.close();
+      }
       await ready;
 
       // Worker → host events.
@@ -159,7 +180,16 @@ function run(
         const msg = ev.data as WorkerToHost;
         switch (msg.kind) {
           case 'outbound-frame':
-            writer?.write(msg.frame);
+            if (transport === 'relay') {
+              void relayPath
+                .write(msg.frame)
+                .catch((err: unknown) => fail(err instanceof Error ? err : new Error(String(err))));
+            } else {
+              writer?.write(msg.frame);
+            }
+            return;
+          case 'frame-consumed':
+            if (transport === 'relay') relayPath.consumed(msg.bytes);
             return;
           case 'progress':
             progress.update(msg.bytes);
@@ -190,9 +220,10 @@ function run(
       });
 
       // Channel → worker: forward every inbound data frame as a Transferable.
-      p.onData((frame) =>
-        w.postMessage({ kind: 'inbound-frame', frame } satisfies HostToWorker, [frame]),
-      );
+      const receive = (frame: ArrayBuffer): void =>
+        w.postMessage({ kind: 'inbound-frame', frame } satisfies HostToWorker, [frame]);
+      if (selected.kind === 'direct') p.onData(receive);
+      else relayPath.onData(receive);
 
       // Kick off the transfer in the worker.
       const startMsg = spec.start();
@@ -243,6 +274,7 @@ function run(
     progress: () => progress.snapshot().bytes,
     total: () => total,
     snapshot: () => progress.snapshot(),
+    transport: () => transport,
     done: donePromise,
     pause: () => {
       if (settled || progress.snapshot().state === 'paused') return;
@@ -265,6 +297,25 @@ function run(
       cancelTimer = setTimeout(() => fail(new Error(reason)), 1000);
     },
   };
+}
+
+type SelectedTransport = { kind: 'direct'; channel: RTCDataChannel } | { kind: 'relay' };
+
+async function selectTransport(peer: Peer, relay: RelayTransport): Promise<SelectedTransport> {
+  let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => relay.open(), 8000);
+  const direct = peer.channel.then(
+    (channel): SelectedTransport => ({ kind: 'direct', channel }),
+    async (): Promise<SelectedTransport> => {
+      relay.open();
+      await relay.ready;
+      return { kind: 'relay' };
+    },
+  );
+  const relayed = relay.ready.then((): SelectedTransport => ({ kind: 'relay' }));
+  const selected = await Promise.race([direct, relayed]);
+  clearTimeout(timer);
+  timer = undefined;
+  return selected;
 }
 
 /** Resolve once the worker posts its one-time `ready` handshake. */
