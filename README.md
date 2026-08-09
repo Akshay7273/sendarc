@@ -6,17 +6,17 @@ direct WebRTC connection, and streams the file encrypted, with bounded memory on
 ends and a verified digest at completion. It ships as a browser app and a terminal client
 that speak the same protocol.
 
-The server is a blind rendezvous point and fallback relay. It pairs two peers by a room
-number and forwards their messages untouched; it never sees the invite words, the file
-bytes, filenames, or the encryption keys.
+The server is a blind rendezvous point and will gain a fallback relay in M5. It pairs two
+peers by a room number and forwards their messages untouched; it never sees the invite
+words, the file bytes, filenames, or the encryption keys.
 
 ## Status
 
-Early development. The foundation (M0) and the authenticated rendezvous (M1) are in
-place: the monorepo, the browser and CLI clients, the blind signaling server, local
-HTTPS, and CI. Two peers can already reach a mutually authenticated, verified secure
-channel. Active work is M2 — the direct WebRTC connection and the encrypted, streamed,
-digest-verified file transfer on top of it.
+Early development. The foundation (M0), authenticated rendezvous (M1), and direct-transfer
+vertical slice (M2) are complete. Browser and CLI peers can establish an authenticated
+WebRTC DataChannel and stream one encrypted file with bounded memory, per-block integrity,
+and a verified whole-file digest. Active work moves to M3 — acknowledgements,
+retransmission, pause/resume, and cancellation.
 
 ## How it works
 
