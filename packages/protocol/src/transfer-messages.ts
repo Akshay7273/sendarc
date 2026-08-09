@@ -140,8 +140,7 @@ function asComplete(m: Record<string, unknown>): Complete {
   return { type: FrameType.Complete, fileDigest: str(m, 'fileDigest') };
 }
 function asResumeFileState(v: unknown): ResumeFileState {
-  if (typeof v !== 'object' || v === null)
-    throw new Error('control frame: bad resume file state');
+  if (typeof v !== 'object' || v === null) throw new Error('control frame: bad resume file state');
   const f = v as Record<string, unknown>;
   return { idx: num(f, 'idx'), haveBlocks: num(f, 'haveBlocks') };
 }

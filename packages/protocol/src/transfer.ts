@@ -148,4 +148,14 @@ export interface ResumeState {
 }
 
 export type TransferMsg =
-  Caps | Manifest | BlockHash | BlockRecv | Ack | Nack | Control | Complete | Done | Fail | ResumeState;
+  | Caps
+  | Manifest
+  | BlockHash
+  | BlockRecv
+  | Ack
+  | Nack
+  | Control
+  | Complete
+  | Done
+  | Fail
+  | ResumeState;
