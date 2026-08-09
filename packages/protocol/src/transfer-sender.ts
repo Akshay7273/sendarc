@@ -21,6 +21,7 @@ import { bytesToHex } from './bytes.js';
 import { TransferError, type Digest, type FileSource } from './transfer-ports.js';
 import { reChunk } from './transfer-chunker.js';
 import { decodeControl, encodeControl } from './transfer-messages.js';
+import { validateManifest } from './safe-path.js';
 
 /** Header flag: this frame is the last of its block. */
 export const FRAME_FLAG_LAST_IN_BLOCK = 0x01;
@@ -156,7 +157,7 @@ export class TransferSender {
     const fileDigest = await digest.hexDigest();
 
     const blocks = Math.ceil(meta.size / this.blockSize);
-    await this.sendControl(FrameType.Manifest, {
+    const manifest = validateManifest({
       type: FrameType.Manifest,
       files: [
         {
@@ -172,6 +173,7 @@ export class TransferSender {
       ],
       totalSize: meta.size,
     });
+    await this.sendControl(FrameType.Manifest, manifest);
 
     // Asking reChunk for block-sized pieces yields one retained buffer per logical block. The
     // block is then split into transport-sized frames by sendBlock.
