@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -93,8 +94,22 @@ func NewSender(opts SenderOptions) *Sender {
 
 // Run drives the whole send. It returns the canonical whole-file digest (hex) once the
 // receiver confirms done, or an error on fail or an IO failure. The digest is the same value
-// carried in the manifest and complete, so a host can report it without recomputing.
-func (s *Sender) Run() (string, error) {
+// carried in the manifest and complete, so a host can report it without recomputing. Canceling
+// ctx aborts the transfer in bounded time.
+func (s *Sender) Run(ctx context.Context) (string, error) {
+	// Watch ctx so a canceled transfer (peer dropped, host aborted) settles in bounded time
+	// rather than parking forever on the window gate or waitDone. stop retires the watcher when
+	// Run returns so it never outlives the send.
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+			s.cancel(ctx.Err())
+		case <-stop:
+		}
+	}()
+
 	meta := s.o.File.Meta()
 
 	// Pass 1: whole-file digest, streamed so the file is never held.
@@ -253,6 +268,15 @@ func (s *Sender) failLocked(err error) {
 	s.settled = true
 	s.err = err
 	s.cond.Broadcast()
+}
+
+// cancel settles the send as canceled unless it has already finished. It is the ctx-cancellation
+// path: it only touches local state and wakes the waiters (gate/waitDone), never the transport,
+// so it cannot block on a peer that has already gone away.
+func (s *Sender) cancel(cause error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failLocked(NewTransferError(FailCanceled, cause.Error()))
 }
 
 // sendControl seals and sends a control message; its frame-header type is the message's tag.
