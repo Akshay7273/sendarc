@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
@@ -85,7 +86,7 @@ func TestSenderEmitsGrammarGatedByBlockRecv(t *testing.T) {
 	}
 	res := make(chan result, 1)
 	go func() {
-		d, err := s.Run()
+		d, err := s.Run(context.Background())
 		res <- result{d, err}
 	}()
 
@@ -200,7 +201,7 @@ func TestSenderRejectsOnReceiverFail(t *testing.T) {
 
 	res := make(chan error, 1)
 	go func() {
-		_, err := s.Run()
+		_, err := s.Run(context.Background())
 		res <- err
 	}()
 

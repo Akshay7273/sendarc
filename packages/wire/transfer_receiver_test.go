@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
@@ -99,7 +100,7 @@ func TestReceiverAssemblesVerifiesWritesDone(t *testing.T) {
 	for _, f := range sf.frames {
 		r.Handle(f)
 	}
-	res, err := r.Wait()
+	res, err := r.Wait(context.Background())
 	if err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
@@ -153,7 +154,7 @@ func TestReceiverAbortsIntegrityOnCorruptFrame(t *testing.T) {
 	for _, f := range sf.frames {
 		r.Handle(f)
 	}
-	_, err = r.Wait()
+	_, err = r.Wait(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "integrity") {
 		t.Fatalf("Wait error = %v, want one mentioning integrity", err)
 	}
@@ -198,7 +199,7 @@ func TestReceiverOnManifestBeforeFirstWrite(t *testing.T) {
 	for _, f := range sf.frames {
 		r.Handle(f)
 	}
-	if _, err := r.Wait(); err != nil {
+	if _, err := r.Wait(context.Background()); err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
 	if len(seen) != 1 || seen[0] != "note.txt" {
@@ -232,7 +233,7 @@ func TestReceiverFailsDigestMismatch(t *testing.T) {
 	for _, f := range sf.frames {
 		r.Handle(f)
 	}
-	_, err = r.Wait()
+	_, err = r.Wait(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "digest_mismatch") {
 		t.Fatalf("Wait error = %v, want one mentioning digest_mismatch", err)
 	}
