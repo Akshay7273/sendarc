@@ -75,5 +75,10 @@ export function validateManifest(manifest: Manifest): Manifest {
   if (!Number.isSafeInteger(manifest.totalSize) || manifest.totalSize !== totalSize) {
     throw new Error('manifest total size mismatch');
   }
-  return { type: FrameType.Manifest, files, totalSize };
+  return {
+    type: FrameType.Manifest,
+    ...(manifest.transferId !== undefined ? { transferId: manifest.transferId } : {}),
+    files,
+    totalSize,
+  };
 }

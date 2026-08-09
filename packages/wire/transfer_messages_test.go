@@ -19,6 +19,17 @@ func TestEncodeControlWireBytes(t *testing.T) {
 			}}, 10),
 			`{"type":2,"files":[{"idx":0,"name":"a.bin","size":10,"mime":"application/octet-stream","lastModified":5,"blockSize":8,"blocks":2,"fileDigest":"ab"}],"totalSize":10}`,
 		},
+		{
+			"manifest with transferId",
+			&Manifest{
+				Type: FrameManifest, TransferID: "0123456789abcdef0123456789abcdef",
+				Files: []FileEntry{{
+					Idx: 0, Name: "a.bin", Size: 10, Mime: "application/octet-stream",
+					LastModified: 5, BlockSize: 8, Blocks: 2, FileDigest: "ab",
+				}}, TotalSize: 10,
+			},
+			`{"type":2,"transferId":"0123456789abcdef0123456789abcdef","files":[{"idx":0,"name":"a.bin","size":10,"mime":"application/octet-stream","lastModified":5,"blockSize":8,"blocks":2,"fileDigest":"ab"}],"totalSize":10}`,
+		},
 		{"block_hash", NewBlockHash(0, 1, "ff"), `{"type":4,"fileIdx":0,"blockIdx":1,"sha256":"ff"}`},
 		{"block_recv", NewBlockRecv(0, 1), `{"type":5,"fileIdx":0,"blockIdx":1}`},
 		{"ack", NewAck(0, 1), `{"type":6,"fileIdx":0,"blockIdx":1}`},
@@ -29,6 +40,11 @@ func TestEncodeControlWireBytes(t *testing.T) {
 		{"complete", NewComplete("deadbeef"), `{"type":9,"fileDigest":"deadbeef"}`},
 		{"done", NewDone(), `{"type":10}`},
 		{"fail", NewFail(FailDigestMismatch), `{"type":11,"reason":"digest_mismatch"}`},
+		{
+			"resume_state",
+			NewResumeState("0123456789abcdef0123456789abcdef", []ResumeFileState{{Idx: 0, HaveBlocks: 3}, {Idx: 1, HaveBlocks: 0}}),
+			`{"type":12,"transferId":"0123456789abcdef0123456789abcdef","files":[{"idx":0,"haveBlocks":3},{"idx":1,"haveBlocks":0}]}`,
+		},
 	}
 	for _, c := range cases {
 		got, err := EncodeControl(c.msg)
@@ -71,6 +87,14 @@ func TestDecodeControlRoundTrip(t *testing.T) {
 		NewComplete("deadbeef"),
 		NewDone(),
 		NewFail(FailDigestMismatch),
+		&Manifest{
+			Type: FrameManifest, TransferID: "0123456789abcdef0123456789abcdef",
+			Files: []FileEntry{{
+				Idx: 0, Name: "a.bin", Size: 10, Mime: "application/octet-stream",
+				LastModified: 5, BlockSize: 8, Blocks: 2, FileDigest: "ab",
+			}}, TotalSize: 10,
+		},
+		NewResumeState("0123456789abcdef0123456789abcdef", []ResumeFileState{{Idx: 0, HaveBlocks: 3}, {Idx: 1, HaveBlocks: 0}}),
 	}
 	for _, m := range msgs {
 		enc, err := EncodeControl(m)
@@ -101,6 +125,25 @@ func TestDecodeControlFromTSShapes(t *testing.T) {
 	if !ok || nack.FileIdx != 2 || nack.BlockIdx != 7 || nack.Reason != NackTimeout {
 		t.Fatalf("decoded nack = %#v", m)
 	}
+
+	m, err = DecodeControl([]byte(`{"type":12,"transferId":"abc123","files":[{"idx":0,"haveBlocks":5},{"idx":1,"haveBlocks":0}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs, ok := m.(*ResumeState)
+	if !ok || rs.TransferID != "abc123" || len(rs.Files) != 2 ||
+		rs.Files[0] != (ResumeFileState{Idx: 0, HaveBlocks: 5}) || rs.Files[1] != (ResumeFileState{Idx: 1, HaveBlocks: 0}) {
+		t.Fatalf("decoded resume_state = %#v", m)
+	}
+
+	// A manifest carrying a transferId decodes with the id preserved.
+	m, err = DecodeControl([]byte(`{"type":2,"transferId":"abc123","files":[{"idx":0,"name":"a","size":0,"mime":"x","lastModified":0,"blockSize":1,"blocks":0,"fileDigest":"y"}],"totalSize":0}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if man, ok := m.(*Manifest); !ok || man.TransferID != "abc123" {
+		t.Fatalf("decoded manifest transferId = %#v", m)
+	}
 }
 
 func TestDecodeControlRejectsMalformed(t *testing.T) {
@@ -114,6 +157,9 @@ func TestDecodeControlRejectsMalformed(t *testing.T) {
 		`{"type":9}`,                                               // complete missing fileDigest
 		`{"type":2,"files":[],"totalSize":0}`,                      // empty manifest files
 		`{"type":4,"fileIdx":0}`,                                   // block_hash missing sha256/blockIdx
+		`{"type":12,"files":[{"idx":0,"haveBlocks":0}]}`,           // resume_state missing transferId
+		`{"type":12,"transferId":"x","files":[]}`,                  // resume_state empty files
+		`{"type":12,"transferId":"x","files":[{"idx":0}]}`,         // resume file missing haveBlocks
 		`{"fileIdx":0}`,                                            // missing type
 	}
 	for _, s := range bad {
