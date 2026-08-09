@@ -114,7 +114,7 @@ export interface Done {
 
 export interface Fail {
   type: FrameType.Fail;
-  reason: 'digest_mismatch' | 'integrity' | 'sink_error' | 'canceled' | 'quota';
+  reason: 'digest_mismatch' | 'integrity' | 'sink_error' | 'canceled' | 'quota' | 'retry_exhausted';
 }
 
 export type TransferMsg =

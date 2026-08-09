@@ -21,6 +21,11 @@ func TestEncodeControlWireBytes(t *testing.T) {
 		},
 		{"block_hash", NewBlockHash(0, 1, "ff"), `{"type":4,"fileIdx":0,"blockIdx":1,"sha256":"ff"}`},
 		{"block_recv", NewBlockRecv(0, 1), `{"type":5,"fileIdx":0,"blockIdx":1}`},
+		{"ack", NewAck(0, 1), `{"type":6,"fileIdx":0,"blockIdx":1}`},
+		{"nack", NewNack(0, 2, NackMissing), `{"type":7,"fileIdx":0,"blockIdx":2,"reason":"missing"}`},
+		{"pause", NewControl(ControlPause), `{"type":8,"op":"pause"}`},
+		{"resume", NewControl(ControlResume), `{"type":8,"op":"resume"}`},
+		{"cancel", NewControl(ControlCancel), `{"type":8,"op":"cancel"}`},
 		{"complete", NewComplete("deadbeef"), `{"type":9,"fileDigest":"deadbeef"}`},
 		{"done", NewDone(), `{"type":10}`},
 		{"fail", NewFail(FailDigestMismatch), `{"type":11,"reason":"digest_mismatch"}`},
@@ -57,6 +62,12 @@ func TestDecodeControlRoundTrip(t *testing.T) {
 		}}, 10),
 		NewBlockHash(0, 1, "ff"),
 		NewBlockRecv(0, 1),
+		NewAck(0, 1),
+		NewNack(0, 2, NackMissing),
+		NewNack(0, 3, NackTimeout),
+		NewControl(ControlPause),
+		NewControl(ControlResume),
+		NewControl(ControlCancel),
 		NewComplete("deadbeef"),
 		NewDone(),
 		NewFail(FailDigestMismatch),
@@ -82,25 +93,28 @@ func TestDecodeControlRoundTrip(t *testing.T) {
 
 // A payload the TS decoder produced must decode here to the same values (decode-side interop).
 func TestDecodeControlFromTSShapes(t *testing.T) {
-	m, err := DecodeControl([]byte(`{"type":5,"fileIdx":2,"blockIdx":7}`))
+	m, err := DecodeControl([]byte(`{"type":7,"fileIdx":2,"blockIdx":7,"reason":"timeout"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	br, ok := m.(*BlockRecv)
-	if !ok || br.FileIdx != 2 || br.BlockIdx != 7 {
-		t.Fatalf("decoded block_recv = %#v", m)
+	nack, ok := m.(*Nack)
+	if !ok || nack.FileIdx != 2 || nack.BlockIdx != 7 || nack.Reason != NackTimeout {
+		t.Fatalf("decoded nack = %#v", m)
 	}
 }
 
 func TestDecodeControlRejectsMalformed(t *testing.T) {
 	bad := []string{
-		`{{`,                                  // invalid JSON
-		`{"type":999}`,                        // unknown type
-		`{"type":11,"reason":"nope"}`,         // bad fail reason
-		`{"type":9}`,                          // complete missing fileDigest
-		`{"type":2,"files":[],"totalSize":0}`, // empty manifest files
-		`{"type":4,"fileIdx":0}`,              // block_hash missing sha256/blockIdx
-		`{"fileIdx":0}`,                       // missing type
+		`{{`,           // invalid JSON
+		`{"type":999}`, // out-of-range type
+		`{"type":263,"fileIdx":0,"blockIdx":1,"reason":"missing"}`, // must not wrap to nack
+		`{"type":11,"reason":"nope"}`,                              // bad fail reason
+		`{"type":7,"fileIdx":0,"blockIdx":1,"reason":"bad"}`,       // bad nack reason
+		`{"type":8,"op":"stop"}`,                                   // bad control operation
+		`{"type":9}`,                                               // complete missing fileDigest
+		`{"type":2,"files":[],"totalSize":0}`,                      // empty manifest files
+		`{"type":4,"fileIdx":0}`,                                   // block_hash missing sha256/blockIdx
+		`{"fileIdx":0}`,                                            // missing type
 	}
 	for _, s := range bad {
 		if _, err := DecodeControl([]byte(s)); err == nil {

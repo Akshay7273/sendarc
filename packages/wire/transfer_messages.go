@@ -54,6 +54,49 @@ type BlockRecv struct {
 	BlockIdx int   `json:"blockIdx"`
 }
 
+// Ack confirms that a block was verified and committed to the destination sink.
+type Ack struct {
+	Type     uint8 `json:"type"`
+	FileIdx  int   `json:"fileIdx"`
+	BlockIdx int   `json:"blockIdx"`
+}
+
+// Nack requests a fresh transmission of a block that did not arrive.
+type Nack struct {
+	Type     uint8      `json:"type"`
+	FileIdx  int        `json:"fileIdx"`
+	BlockIdx int        `json:"blockIdx"`
+	Reason   NackReason `json:"reason"`
+}
+
+// NackReason describes why a block is being requested again.
+type NackReason string
+
+const (
+	// NackMissing means a later block exposed a gap in the ordered block sequence.
+	NackMissing NackReason = "missing"
+	// NackTimeout means the acknowledgement deadline expired.
+	NackTimeout NackReason = "timeout"
+)
+
+// Control changes the live transfer state in either direction.
+type Control struct {
+	Type uint8     `json:"type"`
+	Op   ControlOp `json:"op"`
+}
+
+// ControlOp is one bidirectional transfer action.
+type ControlOp string
+
+const (
+	// ControlPause stops creation of new outbound data frames.
+	ControlPause ControlOp = "pause"
+	// ControlResume allows outbound data frames again.
+	ControlResume ControlOp = "resume"
+	// ControlCancel terminates the transfer.
+	ControlCancel ControlOp = "cancel"
+)
+
 // Complete tells the receiver every block was sent and gives the canonical digest to verify.
 type Complete struct {
 	Type       uint8  `json:"type"`
@@ -81,6 +124,15 @@ func (m BlockHash) FrameType() uint8 { return m.Type }
 // FrameType reports the block_recv frame tag.
 func (m BlockRecv) FrameType() uint8 { return m.Type }
 
+// FrameType reports the ack frame tag.
+func (m Ack) FrameType() uint8 { return m.Type }
+
+// FrameType reports the nack frame tag.
+func (m Nack) FrameType() uint8 { return m.Type }
+
+// FrameType reports the control frame tag.
+func (m Control) FrameType() uint8 { return m.Type }
+
 // FrameType reports the complete frame tag.
 func (m Complete) FrameType() uint8 { return m.Type }
 
@@ -104,6 +156,19 @@ func NewBlockHash(fileIdx, blockIdx int, sha256 string) *BlockHash {
 func NewBlockRecv(fileIdx, blockIdx int) *BlockRecv {
 	return &BlockRecv{Type: FrameBlockRecv, FileIdx: fileIdx, BlockIdx: blockIdx}
 }
+
+// NewAck builds a verified-block acknowledgement.
+func NewAck(fileIdx, blockIdx int) *Ack {
+	return &Ack{Type: FrameAck, FileIdx: fileIdx, BlockIdx: blockIdx}
+}
+
+// NewNack builds a missing-block request.
+func NewNack(fileIdx, blockIdx int, reason NackReason) *Nack {
+	return &Nack{Type: FrameNack, FileIdx: fileIdx, BlockIdx: blockIdx, Reason: reason}
+}
+
+// NewControl builds a bidirectional transfer control message.
+func NewControl(op ControlOp) *Control { return &Control{Type: FrameControl, Op: op} }
 
 // NewComplete builds a complete message carrying the canonical file digest.
 func NewComplete(fileDigest string) *Complete {
@@ -140,6 +205,9 @@ func DecodeControl(payload []byte) (ControlMsg, error) {
 	if head.Type == nil {
 		return nil, errors.New("control frame: missing type")
 	}
+	if *head.Type < 0 || *head.Type > 0xff {
+		return nil, fmt.Errorf("control frame: invalid type %d", *head.Type)
+	}
 	switch uint8(*head.Type) {
 	case FrameManifest:
 		return decodeManifest(payload)
@@ -147,6 +215,12 @@ func DecodeControl(payload []byte) (ControlMsg, error) {
 		return decodeBlockHash(payload)
 	case FrameBlockRecv:
 		return decodeBlockRecv(payload)
+	case FrameAck:
+		return decodeAck(payload)
+	case FrameNack:
+		return decodeNack(payload)
+	case FrameControl:
+		return decodeControlMessage(payload)
 	case FrameComplete:
 		return decodeComplete(payload)
 	case FrameDone:
@@ -237,6 +311,56 @@ func decodeBlockRecv(payload []byte) (ControlMsg, error) {
 	return &BlockRecv{Type: FrameBlockRecv, FileIdx: *raw.FileIdx, BlockIdx: *raw.BlockIdx}, nil
 }
 
+func decodeAck(payload []byte) (ControlMsg, error) {
+	var raw struct {
+		FileIdx  *int `json:"fileIdx"`
+		BlockIdx *int `json:"blockIdx"`
+	}
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return nil, errors.New("control frame: invalid ack")
+	}
+	if raw.FileIdx == nil || raw.BlockIdx == nil {
+		return nil, errors.New("control frame: incomplete ack")
+	}
+	return &Ack{Type: FrameAck, FileIdx: *raw.FileIdx, BlockIdx: *raw.BlockIdx}, nil
+}
+
+func decodeNack(payload []byte) (ControlMsg, error) {
+	var raw struct {
+		FileIdx  *int    `json:"fileIdx"`
+		BlockIdx *int    `json:"blockIdx"`
+		Reason   *string `json:"reason"`
+	}
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return nil, errors.New("control frame: invalid nack")
+	}
+	if raw.FileIdx == nil || raw.BlockIdx == nil || raw.Reason == nil {
+		return nil, errors.New("control frame: incomplete nack")
+	}
+	reason := NackReason(*raw.Reason)
+	if reason != NackMissing && reason != NackTimeout {
+		return nil, fmt.Errorf("control frame: bad nack reason %q", *raw.Reason)
+	}
+	return &Nack{Type: FrameNack, FileIdx: *raw.FileIdx, BlockIdx: *raw.BlockIdx, Reason: reason}, nil
+}
+
+func decodeControlMessage(payload []byte) (ControlMsg, error) {
+	var raw struct {
+		Op *string `json:"op"`
+	}
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return nil, errors.New("control frame: invalid control")
+	}
+	if raw.Op == nil {
+		return nil, errors.New("control frame: control.op missing")
+	}
+	op := ControlOp(*raw.Op)
+	if op != ControlPause && op != ControlResume && op != ControlCancel {
+		return nil, fmt.Errorf("control frame: bad control op %q", *raw.Op)
+	}
+	return &Control{Type: FrameControl, Op: op}, nil
+}
+
 func decodeComplete(payload []byte) (ControlMsg, error) {
 	var raw struct {
 		FileDigest *string `json:"fileDigest"`
@@ -261,7 +385,7 @@ func decodeFail(payload []byte) (ControlMsg, error) {
 		return nil, errors.New("control frame: fail.reason missing")
 	}
 	switch FailReason(*raw.Reason) {
-	case FailDigestMismatch, FailIntegrity, FailSinkError, FailCanceled, FailQuota:
+	case FailDigestMismatch, FailIntegrity, FailSinkError, FailCanceled, FailQuota, FailRetryExhausted:
 		return &Fail{Type: FrameFail, Reason: FailReason(*raw.Reason)}, nil
 	default:
 		return nil, fmt.Errorf("control frame: bad fail reason %q", *raw.Reason)
