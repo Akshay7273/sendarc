@@ -138,13 +138,18 @@ func (s *Sender) Run(ctx context.Context) (string, error) {
 
 	blocks := 0
 	if meta.Size > 0 {
-		blocks = int((meta.Size + int64(s.blockSize) - 1) / int64(s.blockSize))
+		blocks = int((meta.Size-1)/int64(s.blockSize) + 1)
 	}
-	if err := s.sendControl(NewManifest([]FileEntry{{
+	manifest, err := ValidateManifest(*NewManifest([]FileEntry{{
 		Idx: 0, Name: meta.Name, Size: meta.Size, Mime: meta.Mime,
 		LastModified: meta.LastModified, BlockSize: s.blockSize, Blocks: blocks,
 		FileDigest: fileDigest,
-	}}, meta.Size)); err != nil {
+	}}, meta.Size))
+	if err != nil {
+		s.fail(err)
+		return "", err
+	}
+	if err := s.sendControl(&manifest); err != nil {
 		s.fail(err)
 		return "", err
 	}

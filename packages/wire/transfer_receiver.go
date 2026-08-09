@@ -176,17 +176,14 @@ func (r *Receiver) applyManifest(payload []byte) error {
 	if !ok {
 		return NewTransferError(FailIntegrity, "expected manifest")
 	}
-	if len(m.Files) != 1 {
+	validated, err := ValidateManifest(*m)
+	if err != nil {
+		return NewTransferError(FailIntegrity, err.Error())
+	}
+	if len(validated.Files) != 1 {
 		return NewTransferError(FailIntegrity, "single-file manifest required")
 	}
-	f := m.Files[0]
-	wantBlocks := 0
-	if f.Size > 0 && f.BlockSize > 0 {
-		wantBlocks = int((f.Size + int64(f.BlockSize) - 1) / int64(f.BlockSize))
-	}
-	if f.Idx != 0 || f.Size < 0 || f.BlockSize <= 0 || f.Blocks != wantBlocks {
-		return NewTransferError(FailIntegrity, "invalid manifest geometry")
-	}
+	f := validated.Files[0]
 	r.file = &f
 	if r.o.OnManifest != nil {
 		if err := r.o.OnManifest(f); err != nil {
