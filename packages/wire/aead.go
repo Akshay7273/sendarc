@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/binary"
+	"errors"
 	"fmt"
 )
 
@@ -37,13 +38,13 @@ func gcmFor(key []byte) (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
-// Seal encrypts plaintext into a frame: header(16) || ciphertext || tag(16). The header's
-// Len field is set to the plaintext length and authenticated as GCM additional data.
+// Seal encrypts plaintext into counter(8) || header(16) || ciphertext || tag(16). Counter and
+// header are authenticated as GCM additional data.
 func Seal(dir DirectionalKey, counter uint64, h FrameHeaderInput, plaintext []byte) ([]byte, error) {
 	if len(plaintext) > u16Max {
 		return nil, fmt.Errorf("frame payload %d exceeds u16 max %d", len(plaintext), u16Max)
 	}
-	aad := encodeFrameHeader(FrameHeader{
+	header := encodeFrameHeader(FrameHeader{
 		Version:  h.Version,
 		Type:     h.Type,
 		Flags:    h.Flags,
@@ -52,6 +53,9 @@ func Seal(dir DirectionalKey, counter uint64, h FrameHeaderInput, plaintext []by
 		FrameOff: h.FrameOff,
 		Len:      uint16(len(plaintext)),
 	})
+	aad := make([]byte, frameCounterBytes+len(header))
+	binary.BigEndian.PutUint64(aad[:frameCounterBytes], counter)
+	copy(aad[frameCounterBytes:], header)
 	gcm, err := gcmFor(dir.Key)
 	if err != nil {
 		return nil, err
@@ -62,6 +66,7 @@ func Seal(dir DirectionalKey, counter uint64, h FrameHeaderInput, plaintext []by
 
 // OpenedFrame is a decrypted frame: its parsed header and recovered plaintext.
 type OpenedFrame struct {
+	Counter   uint64
 	Header    FrameHeader
 	Plaintext []byte
 }
@@ -70,15 +75,48 @@ type OpenedFrame struct {
 // the expected nonce, and fails if authentication fails, the frame is truncated, or the
 // header Len disagrees with the ciphertext length.
 func Open(dir DirectionalKey, counter uint64, frame []byte) (*OpenedFrame, error) {
-	if len(frame) < frameHeaderBytes+aeadTagBytes {
-		return nil, fmt.Errorf("frame too short: %d bytes", len(frame))
-	}
-	aad := frame[:frameHeaderBytes]
-	header, err := decodeFrameHeader(aad)
+	embedded, err := frameCounter(frame)
 	if err != nil {
 		return nil, err
 	}
-	body := frame[frameHeaderBytes:]
+	if embedded != counter {
+		return nil, fmt.Errorf("frame counter %d does not match expected %d", embedded, counter)
+	}
+	return openEmbedded(dir, embedded, frame)
+}
+
+// ErrFrameReplay identifies an already-consumed counter. Transfer engines ignore it while
+// keeping all forward counters authenticated, which makes transport replacement replay-safe.
+var ErrFrameReplay = errors.New("frame counter replay")
+
+// OpenSequenced opens a transfer frame using its authenticated wire counter. Forward gaps are
+// accepted after a transport loses a suffix; counters below minimum return ErrFrameReplay.
+func OpenSequenced(dir DirectionalKey, minimum uint64, frame []byte) (*OpenedFrame, error) {
+	embedded, err := frameCounter(frame)
+	if err != nil {
+		return nil, err
+	}
+	if embedded < minimum {
+		return nil, fmt.Errorf("%w: counter %d below %d", ErrFrameReplay, embedded, minimum)
+	}
+	return openEmbedded(dir, embedded, frame)
+}
+
+func frameCounter(frame []byte) (uint64, error) {
+	if len(frame) < frameCounterBytes+frameHeaderBytes+aeadTagBytes {
+		return 0, fmt.Errorf("frame too short: %d bytes", len(frame))
+	}
+	return binary.BigEndian.Uint64(frame[:frameCounterBytes]), nil
+}
+
+func openEmbedded(dir DirectionalKey, counter uint64, frame []byte) (*OpenedFrame, error) {
+	aadBytes := frameCounterBytes + frameHeaderBytes
+	aad := frame[:aadBytes]
+	header, err := decodeFrameHeader(aad[frameCounterBytes:])
+	if err != nil {
+		return nil, err
+	}
+	body := frame[aadBytes:]
 	if len(body) != int(header.Len)+aeadTagBytes {
 		return nil, fmt.Errorf("frame len field %d disagrees with body %d", header.Len, len(body))
 	}
@@ -90,5 +128,5 @@ func Open(dir DirectionalKey, counter uint64, frame []byte) (*OpenedFrame, error
 	if err != nil {
 		return nil, err
 	}
-	return &OpenedFrame{Header: header, Plaintext: plaintext}, nil
+	return &OpenedFrame{Counter: counter, Header: header, Plaintext: plaintext}, nil
 }

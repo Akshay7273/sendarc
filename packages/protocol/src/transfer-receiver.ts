@@ -7,7 +7,7 @@
  * without being written or hashed twice. Any AEAD or block-hash failure aborts immediately.
  */
 
-import { open, seal, type FrameHeaderInput } from './aead.js';
+import { FrameReplayError, openSequenced, seal, type FrameHeaderInput } from './aead.js';
 import type { DirectionalKey } from './keyschedule.js';
 import { FrameType, type ControlOp, type FileEntry, type Manifest } from './transfer.js';
 import { DEFAULT_INFLIGHT_BLOCKS, FRAME_VERSION } from './constants.js';
@@ -144,8 +144,10 @@ export class TransferReceiver {
     if (this.settled) return;
     let opened;
     try {
-      opened = await open(this.o.recvDir, this.recvCounter++, frame);
+      opened = await openSequenced(this.o.recvDir, this.recvCounter, frame);
+      this.recvCounter = opened.counter + 1;
     } catch (e) {
+      if (e instanceof FrameReplayError) return;
       throw new TransferError(
         'integrity',
         e instanceof Error ? e.message : 'unable to authenticate transfer frame',

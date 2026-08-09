@@ -3,6 +3,7 @@ package wire
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"testing"
 )
 
@@ -98,6 +99,21 @@ func TestAeadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAeadSequencedGapAndReplay(t *testing.T) {
+	keys := testKeys(t)
+	frame, err := Seal(keys.O2J, 9, FrameHeaderInput{Version: 1, Type: FrameBlockData}, []byte("after switch"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := OpenSequenced(keys.O2J, 4, frame)
+	if err != nil || opened.Counter != 9 {
+		t.Fatalf("OpenSequenced gap = counter %d, err %v", opened.Counter, err)
+	}
+	if _, err := OpenSequenced(keys.O2J, 10, frame); !errors.Is(err, ErrFrameReplay) {
+		t.Fatalf("old counter error = %v, want ErrFrameReplay", err)
+	}
+}
+
 func TestAeadRejectsTampering(t *testing.T) {
 	keys := testKeys(t)
 	in := FrameHeaderInput{Version: 1, Type: FrameBlockData}
@@ -118,20 +134,20 @@ func TestAeadRejectsTampering(t *testing.T) {
 	})
 	t.Run("tampered ciphertext", func(t *testing.T) {
 		bad := bytes.Clone(frame)
-		bad[frameHeaderBytes] ^= 0x01
+		bad[frameCounterBytes+frameHeaderBytes] ^= 0x01
 		if _, err := Open(keys.O2J, 0, bad); err == nil {
 			t.Error("expected auth failure on flipped ciphertext byte")
 		}
 	})
 	t.Run("tampered header", func(t *testing.T) {
 		bad := bytes.Clone(frame)
-		bad[1] ^= 0x01 // flip the Type field, which is authenticated as AAD
+		bad[frameCounterBytes+1] ^= 0x01 // flip the Type field, which is authenticated as AAD
 		if _, err := Open(keys.O2J, 0, bad); err == nil {
 			t.Error("expected auth failure on flipped header byte")
 		}
 	})
 	t.Run("truncated", func(t *testing.T) {
-		if _, err := Open(keys.O2J, 0, frame[:frameHeaderBytes+aeadTagBytes-1]); err == nil {
+		if _, err := Open(keys.O2J, 0, frame[:frameCounterBytes+frameHeaderBytes+aeadTagBytes-1]); err == nil {
 			t.Error("expected failure on truncated frame")
 		}
 	})
