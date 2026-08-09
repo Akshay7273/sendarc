@@ -60,6 +60,18 @@ func (d *sha256Digest) HexDigest() string { return hex.EncodeToString(d.h.Sum(ni
 // message. The set mirrors the TypeScript Fail['reason'] union exactly.
 type FailReason string
 
+// TransferState is the user-visible live state shared by sender and receiver controls.
+type TransferState string
+
+const (
+	// TransferRunning means new data frames may be produced.
+	TransferRunning TransferState = "running"
+	// TransferPaused means new data frames are halted while buffered transport bytes drain.
+	TransferPaused TransferState = "paused"
+	// TransferCanceled means one peer terminated the transfer.
+	TransferCanceled TransferState = "canceled"
+)
+
 // Transfer sizing defaults, mirroring packages/protocol/src/constants.ts. They are the
 // negotiation starting point; a caps exchange may lower them within the header field widths.
 const (
@@ -67,8 +79,8 @@ const (
 	DefaultBlockBytes = 1024 * 1024
 	// DefaultFrameBytes is the default DataChannel/relay payload size.
 	DefaultFrameBytes = 16 * 1024
-	// DefaultInflightBlocks bounds how many blocks the sender may run ahead of the
-	// receiver's block_recv, capping receiver memory regardless of sink speed.
+	// DefaultInflightBlocks bounds how many unacknowledged blocks the sender retains,
+	// capping receiver pressure and retry memory regardless of sink speed.
 	DefaultInflightBlocks = 8
 )
 

@@ -7,28 +7,24 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
-// Sender is the sending half of the transport-agnostic transfer engine (design §5). It
-// streams a file without ever buffering it whole:
-//
-//	Pass 1  read the file once → whole-file streaming digest → manifest (with fileDigest).
-//	Pass 2  re-chunk into block_data frames; at each block boundary send block_hash.
-//	Finish  send complete{fileDigest}; return when the receiver replies done.
-//
-// Outbound frames are AES-GCM sealed with a per-direction counter that continues from the
-// handshake and is never reset. The sender never runs more than Window blocks ahead of the
-// receiver's block_recv signal, bounding the outbound queue. It is the Go twin of
-// packages/protocol/src/transfer-sender.ts.
-//
-// Run executes on the caller's goroutine; Handle is called from the transport's read loop as
-// inbound frames (block_recv / done / fail) arrive. Shared state is guarded by a mutex and a
-// condition variable: window-gating in Run waits on the receiver's acks delivered by Handle.
+// Sender streams one file while retaining only a bounded window of unacknowledged blocks.
+// A block leaves the window after the receiver has verified and committed it. NACK and timeout
+// retransmissions are sealed under fresh AEAD counters; integrity failures remain terminal.
 
-// FrameFlagLastInBlock is the header flag marking a frame as the last of its block.
+// FrameFlagLastInBlock marks the final data frame in a logical block.
 const FrameFlagLastInBlock uint8 = 0x01
 
-// SenderOptions configures a Sender. Zero-valued sizing fields select the protocol defaults.
+const (
+	// DefaultAckTimeout is the acknowledgement deadline before a block is retransmitted.
+	DefaultAckTimeout = 15 * time.Second
+	// DefaultMaxBlockRetries bounds retransmissions after the initial block send.
+	DefaultMaxBlockRetries = 3
+)
+
+// SenderOptions configures a Sender. Zero-valued sizing and retry fields select defaults.
 type SenderOptions struct {
 	File             FileSource
 	Send             func(frame []byte) error
@@ -36,36 +32,51 @@ type SenderOptions struct {
 	RecvDir          DirectionalKey
 	SendCounterStart uint64
 	RecvCounterStart uint64
-	CreateDigest     func() Digest // nil selects a streaming SHA-256 digest
-	BlockSize        int           // 0 selects DefaultBlockBytes
-	FrameSize        int           // 0 selects DefaultFrameBytes
-	Window           int           // 0 selects DefaultInflightBlocks
-	OnProgress       func(sentBytes int64)
+	CreateDigest     func() Digest
+	BlockSize        int
+	FrameSize        int
+	Window           int
+	AckTimeout       time.Duration
+	MaxRetries       int
+	// OnProgress reports bytes acknowledged after verify-and-sink.
+	OnProgress    func(acknowledgedBytes int64)
+	OnStateChange func(TransferState)
+}
+
+type inflightBlock struct {
+	bytes   []byte
+	retries int
+	timer   *time.Timer
 }
 
 // Sender drives one file send. Construct it with NewSender.
 type Sender struct {
-	o         SenderOptions
-	blockSize int
-	frameSize int
-	window    int
+	o          SenderOptions
+	blockSize  int
+	frameSize  int
+	window     int
+	ackTimeout time.Duration
+	maxRetries int
 
-	sendCounter uint64 // touched only by Run's goroutine
-	sent        int64  // touched only by Run's goroutine
+	sendMu      sync.Mutex
+	sendCounter uint64
 
-	mu            sync.Mutex
-	cond          *sync.Cond
-	recvCounter   uint64
-	lastRecvBlock int
-	settled       bool
-	err           error // non-nil once a fail has been observed
+	mu           sync.Mutex
+	cond         *sync.Cond
+	recvCounter  uint64
+	inflight     map[int]*inflightBlock
+	retryQueue   []int
+	retryQueued  map[int]bool
+	acknowledged int64
+	paused       bool
+	completeSent bool
+	settled      bool
+	err          error
 }
 
-// errSenderSettled breaks out of the pass-2 stream when the transfer settles mid-flight; it
-// never escapes Run, which converts it into the stored fail (or nil on an early done).
 var errSenderSettled = errors.New("sender settled")
 
-// NewSender builds a Sender, applying protocol defaults for any zero-valued sizing option.
+// NewSender builds a Sender and applies protocol defaults.
 func NewSender(opts SenderOptions) *Sender {
 	if opts.BlockSize <= 0 {
 		opts.BlockSize = DefaultBlockBytes
@@ -76,108 +87,98 @@ func NewSender(opts SenderOptions) *Sender {
 	if opts.Window <= 0 {
 		opts.Window = DefaultInflightBlocks
 	}
+	if opts.AckTimeout == 0 {
+		opts.AckTimeout = DefaultAckTimeout
+	}
+	if opts.MaxRetries <= 0 {
+		opts.MaxRetries = DefaultMaxBlockRetries
+	}
 	if opts.CreateDigest == nil {
 		opts.CreateDigest = NewSHA256Digest
 	}
 	s := &Sender{
-		o:             opts,
-		blockSize:     opts.BlockSize,
-		frameSize:     opts.FrameSize,
-		window:        opts.Window,
-		sendCounter:   opts.SendCounterStart,
-		recvCounter:   opts.RecvCounterStart,
-		lastRecvBlock: -1,
+		o:           opts,
+		blockSize:   opts.BlockSize,
+		frameSize:   opts.FrameSize,
+		window:      opts.Window,
+		ackTimeout:  opts.AckTimeout,
+		maxRetries:  opts.MaxRetries,
+		sendCounter: opts.SendCounterStart,
+		recvCounter: opts.RecvCounterStart,
+		inflight:    make(map[int]*inflightBlock),
+		retryQueued: make(map[int]bool),
 	}
 	s.cond = sync.NewCond(&s.mu)
 	return s
 }
 
-// Run drives the whole send. It returns the canonical whole-file digest (hex) once the
-// receiver confirms done, or an error on fail or an IO failure. The digest is the same value
-// carried in the manifest and complete, so a host can report it without recomputing. Canceling
-// ctx aborts the transfer in bounded time.
+// Run sends the file and returns its canonical digest after every block is acknowledged and the
+// receiver confirms the whole-file digest.
 func (s *Sender) Run(ctx context.Context) (string, error) {
-	// Watch ctx so a canceled transfer (peer dropped, host aborted) settles in bounded time
-	// rather than parking forever on the window gate or waitDone. stop retires the watcher when
-	// Run returns so it never outlives the send.
 	stop := make(chan struct{})
 	defer close(stop)
 	go func() {
 		select {
 		case <-ctx.Done():
-			s.cancel(ctx.Err())
+			s.cancelLocal(ctx.Err())
 		case <-stop:
 		}
 	}()
 
 	meta := s.o.File.Meta()
-
-	// Pass 1: whole-file digest, streamed so the file is never held.
 	digest := s.o.CreateDigest()
 	if err := s.o.File.Stream(func(chunk []byte) error {
 		digest.Update(chunk)
 		return nil
 	}); err != nil {
+		s.fail(err)
 		return "", err
 	}
 	fileDigest := digest.HexDigest()
 
 	blocks := 0
 	if meta.Size > 0 {
-		blocks = int((meta.Size + int64(s.blockSize) - 1) / int64(s.blockSize)) // ceil
+		blocks = int((meta.Size + int64(s.blockSize) - 1) / int64(s.blockSize))
 	}
 	if err := s.sendControl(NewManifest([]FileEntry{{
 		Idx: 0, Name: meta.Name, Size: meta.Size, Mime: meta.Mime,
 		LastModified: meta.LastModified, BlockSize: s.blockSize, Blocks: blocks,
 		FileDigest: fileDigest,
 	}}, meta.Size)); err != nil {
+		s.fail(err)
 		return "", err
 	}
 
-	// Pass 2: block data + per-block hash, gated to the in-flight window.
-	var blockParts []byte
-	streamErr := ReChunk(StreamFunc(s.o.File.Stream), s.blockSize, s.frameSize, func(p FramePiece) error {
-		s.gate(p.BlockIdx)
-		if s.isSettled() {
-			return errSenderSettled // aborted by an inbound fail (or early done)
-		}
-		flags := uint8(0)
-		if p.LastInBlock {
-			flags = FrameFlagLastInBlock
-		}
-		if err := s.sendFrame(FrameHeaderInput{
-			Version:  FrameVersion,
-			Type:     FrameBlockData,
-			Flags:    flags,
-			FileIdx:  0,
-			BlockIdx: uint32(p.BlockIdx),
-			FrameOff: uint32(p.FrameOff),
-		}, p.Payload); err != nil {
+	streamErr := ReChunk(StreamFunc(s.o.File.Stream), s.blockSize, s.blockSize, func(p FramePiece) error {
+		if err := s.beforeNewBlock(); err != nil {
 			return err
 		}
-		s.sent += int64(len(p.Payload))
-		if s.o.OnProgress != nil {
-			s.o.OnProgress(s.sent)
+		block := append([]byte(nil), p.Payload...)
+		s.mu.Lock()
+		if s.settled {
+			s.mu.Unlock()
+			return errSenderSettled
 		}
-		blockParts = append(blockParts, p.Payload...)
-		if p.LastInBlock {
-			sum := sha256.Sum256(blockParts)
-			blockParts = blockParts[:0]
-			if err := s.sendControl(NewBlockHash(0, p.BlockIdx, hex.EncodeToString(sum[:]))); err != nil {
-				return err
-			}
+		s.inflight[p.BlockIdx] = &inflightBlock{bytes: block}
+		s.mu.Unlock()
+		if err := s.sendBlock(p.BlockIdx, block); err != nil {
+			return err
 		}
+		s.armTimeout(p.BlockIdx)
 		return nil
 	})
-	if streamErr != nil {
-		if errors.Is(streamErr, errSenderSettled) {
-			// Settled mid-stream: propagate the fail, or return the digest on an early done.
-			return fileDigest, s.waitDone()
-		}
+	if streamErr != nil && !errors.Is(streamErr, errSenderSettled) {
+		s.fail(streamErr)
 		return "", streamErr
 	}
-
+	if err := s.waitInflight(); err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	s.completeSent = true
+	s.mu.Unlock()
 	if err := s.sendControl(NewComplete(fileDigest)); err != nil {
+		s.fail(err)
 		return "", err
 	}
 	if err := s.waitDone(); err != nil {
@@ -186,62 +187,300 @@ func (s *Sender) Run(ctx context.Context) (string, error) {
 	return fileDigest, nil
 }
 
-// Handle feeds one inbound frame from the receiver (block_recv / done / fail). It must be
-// called serially — the ordered DataChannel read loop satisfies this — because each frame
-// consumes the next receive counter.
+// Handle consumes one encrypted receiver control frame. Calls must remain ordered.
 func (s *Sender) Handle(frame []byte) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.settled {
+		s.mu.Unlock()
 		return
 	}
 	ctr := s.recvCounter
 	s.recvCounter++
+	s.mu.Unlock()
+
 	opened, err := Open(s.o.RecvDir, ctr, frame)
 	if err != nil {
-		s.failLocked(err)
+		s.fail(NewTransferError(FailIntegrity, err.Error()))
 		return
 	}
 	msg, err := DecodeControl(opened.Plaintext)
 	if err != nil {
-		s.failLocked(err)
+		s.fail(NewTransferError(FailIntegrity, err.Error()))
 		return
 	}
+	if opened.Header.Type != msg.FrameType() {
+		s.fail(NewTransferError(FailIntegrity, "control frame header/payload type mismatch"))
+		return
+	}
+
 	switch m := msg.(type) {
-	case *BlockRecv:
-		if m.BlockIdx > s.lastRecvBlock {
-			s.lastRecvBlock = m.BlockIdx
+	case *Ack:
+		s.onAck(m)
+	case *Nack:
+		if m.FileIdx != 0 {
+			s.fail(NewTransferError(FailIntegrity, "nack for unknown file"))
+			return
 		}
-		s.cond.Broadcast()
+		s.queueRetry(m.BlockIdx)
+	case *Control:
+		s.applyRemoteControl(m.Op)
 	case *Done:
-		s.settleLocked()
+		s.mu.Lock()
+		premature := !s.completeSent || len(s.inflight) != 0
+		s.mu.Unlock()
+		if premature {
+			s.fail(NewTransferError(FailIntegrity, "done before every block was acknowledged"))
+			return
+		}
+		s.settle()
 	case *Fail:
-		s.failLocked(NewTransferError(m.Reason, "receiver failed: "+string(m.Reason)))
+		s.fail(NewTransferError(m.Reason, "receiver failed: "+string(m.Reason)))
 	default:
-		s.failLocked(NewTransferError(FailIntegrity,
+		s.fail(NewTransferError(FailIntegrity,
 			fmt.Sprintf("unexpected sender-inbound type %d", msg.FrameType())))
 	}
 }
 
-// --- internal ---------------------------------------------------------------
+// Pause stops new data frames locally and notifies the peer.
+func (s *Sender) Pause() error {
+	if !s.setPaused(true) {
+		return nil
+	}
+	return s.sendControl(NewControl(ControlPause))
+}
 
-// gate blocks until the block is within the in-flight window of the receiver's last ack, or
-// the transfer settles.
-func (s *Sender) gate(blockIdx int) {
+// Resume reopens the data path and notifies the peer.
+func (s *Sender) Resume() error {
+	if !s.setPaused(false) {
+		return nil
+	}
+	return s.sendControl(NewControl(ControlResume))
+}
+
+// Cancel notifies the peer and terminates the sender. It is idempotent.
+func (s *Sender) Cancel(reason string) error {
+	s.mu.Lock()
+	settled := s.settled
+	s.mu.Unlock()
+	if settled {
+		return nil
+	}
+	err := s.sendControl(NewControl(ControlCancel))
+	s.fail(NewTransferError(FailCanceled, reason))
+	return err
+}
+
+func (s *Sender) onAck(ack *Ack) {
+	if ack.FileIdx != 0 {
+		s.fail(NewTransferError(FailIntegrity, "ack for unknown file"))
+		return
+	}
+	s.mu.Lock()
+	state := s.inflight[ack.BlockIdx]
+	if state == nil {
+		s.mu.Unlock()
+		return
+	}
+	if state.timer != nil {
+		state.timer.Stop()
+	}
+	delete(s.inflight, ack.BlockIdx)
+	delete(s.retryQueued, ack.BlockIdx)
+	s.acknowledged += int64(len(state.bytes))
+	acknowledged := s.acknowledged
+	s.cond.Broadcast()
+	s.mu.Unlock()
+	if s.o.OnProgress != nil {
+		s.o.OnProgress(acknowledged)
+	}
+}
+
+func (s *Sender) applyRemoteControl(op ControlOp) {
+	switch op {
+	case ControlPause:
+		s.setPaused(true)
+	case ControlResume:
+		s.setPaused(false)
+	case ControlCancel:
+		if s.o.OnStateChange != nil {
+			s.o.OnStateChange(TransferCanceled)
+		}
+		s.fail(NewTransferError(FailCanceled, "peer canceled the transfer"))
+	}
+}
+
+func (s *Sender) setPaused(paused bool) bool {
+	s.mu.Lock()
+	if s.settled || s.paused == paused {
+		s.mu.Unlock()
+		return false
+	}
+	s.paused = paused
+	for idx, state := range s.inflight {
+		if state.timer != nil {
+			state.timer.Stop()
+			state.timer = nil
+		}
+		if !paused {
+			s.armTimeoutLocked(idx, state)
+		}
+	}
+	s.cond.Broadcast()
+	s.mu.Unlock()
+	if s.o.OnStateChange != nil {
+		if paused {
+			s.o.OnStateChange(TransferPaused)
+		} else {
+			s.o.OnStateChange(TransferRunning)
+		}
+	}
+	return true
+}
+
+func (s *Sender) beforeNewBlock() error {
+	for {
+		idx, state, err := s.nextRetryOrWait(true)
+		if err != nil {
+			return err
+		}
+		if state == nil {
+			return nil
+		}
+		if err := s.resend(idx, state); err != nil {
+			return err
+		}
+	}
+}
+
+func (s *Sender) waitInflight() error {
+	for {
+		idx, state, err := s.nextRetryOrWait(false)
+		if err != nil {
+			return err
+		}
+		if state == nil {
+			return nil
+		}
+		if err := s.resend(idx, state); err != nil {
+			return err
+		}
+	}
+}
+
+// nextRetryOrWait returns one queued retry. With capacity=true it returns nil once a new block
+// may enter the window; otherwise it returns nil once the entire window is acknowledged.
+func (s *Sender) nextRetryOrWait(capacity bool) (int, *inflightBlock, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for !s.settled && blockIdx-s.lastRecvBlock > s.window {
+	for {
+		if s.settled {
+			if s.err != nil {
+				return 0, nil, s.err
+			}
+			return 0, nil, errSenderSettled
+		}
+		if s.paused {
+			s.cond.Wait()
+			continue
+		}
+		for len(s.retryQueue) > 0 {
+			idx := s.retryQueue[0]
+			s.retryQueue = s.retryQueue[1:]
+			delete(s.retryQueued, idx)
+			if state := s.inflight[idx]; state != nil {
+				return idx, state, nil
+			}
+		}
+		if capacity && len(s.inflight) < s.window {
+			return 0, nil, nil
+		}
+		if !capacity && len(s.inflight) == 0 {
+			return 0, nil, nil
+		}
 		s.cond.Wait()
 	}
 }
 
-func (s *Sender) isSettled() bool {
+func (s *Sender) resend(blockIdx int, state *inflightBlock) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.settled
+	current := s.inflight[blockIdx]
+	if current == nil || current != state {
+		s.mu.Unlock()
+		return nil
+	}
+	if state.retries >= s.maxRetries {
+		s.mu.Unlock()
+		err := NewTransferError(FailRetryExhausted,
+			fmt.Sprintf("block %d remained unacknowledged", blockIdx))
+		_ = s.sendControl(NewFail(FailRetryExhausted))
+		s.fail(err)
+		return err
+	}
+	state.retries++
+	s.mu.Unlock()
+	if err := s.sendBlock(blockIdx, state.bytes); err != nil {
+		s.fail(err)
+		return err
+	}
+	s.armTimeout(blockIdx)
+	return nil
 }
 
-// waitDone blocks until the transfer settles and returns the fail error, or nil on done.
+func (s *Sender) queueRetry(blockIdx int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.inflight[blockIdx]
+	if state == nil || s.retryQueued[blockIdx] || s.settled {
+		return
+	}
+	if state.timer != nil {
+		state.timer.Stop()
+		state.timer = nil
+	}
+	s.retryQueued[blockIdx] = true
+	s.retryQueue = append(s.retryQueue, blockIdx)
+	s.cond.Broadcast()
+}
+
+func (s *Sender) armTimeout(blockIdx int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if state := s.inflight[blockIdx]; state != nil {
+		s.armTimeoutLocked(blockIdx, state)
+	}
+}
+
+func (s *Sender) armTimeoutLocked(blockIdx int, state *inflightBlock) {
+	if s.paused || s.ackTimeout < 0 || s.settled {
+		return
+	}
+	if state.timer != nil {
+		state.timer.Stop()
+	}
+	state.timer = time.AfterFunc(s.ackTimeout, func() { s.queueRetry(blockIdx) })
+}
+
+func (s *Sender) sendBlock(blockIdx int, block []byte) error {
+	for off := 0; off < len(block); off += s.frameSize {
+		end := off + s.frameSize
+		if end > len(block) {
+			end = len(block)
+		}
+		flags := uint8(0)
+		if end == len(block) {
+			flags = FrameFlagLastInBlock
+		}
+		if err := s.sendFrame(FrameHeaderInput{
+			Version: FrameVersion, Type: FrameBlockData, Flags: flags,
+			FileIdx: 0, BlockIdx: uint32(blockIdx), FrameOff: uint32(off),
+		}, block[off:end]); err != nil {
+			return err
+		}
+	}
+	sum := sha256.Sum256(block)
+	return s.sendControl(NewBlockHash(0, blockIdx, hex.EncodeToString(sum[:])))
+}
+
 func (s *Sender) waitDone() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -251,50 +490,53 @@ func (s *Sender) waitDone() error {
 	return s.err
 }
 
-// settleLocked marks a successful finish; the caller holds the mutex.
-func (s *Sender) settleLocked() {
+func (s *Sender) settle() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.settled {
 		return
 	}
 	s.settled = true
+	s.clearTimersLocked()
 	s.cond.Broadcast()
 }
 
-// failLocked records the first failure and wakes every waiter; the caller holds the mutex.
-func (s *Sender) failLocked(err error) {
+func (s *Sender) fail(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.settled {
 		return
 	}
 	s.settled = true
 	s.err = err
+	s.clearTimersLocked()
 	s.cond.Broadcast()
 }
 
-// cancel settles the send as canceled unless it has already finished. It is the ctx-cancellation
-// path: it only touches local state and wakes the waiters (gate/waitDone), never the transport,
-// so it cannot block on a peer that has already gone away.
-func (s *Sender) cancel(cause error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.failLocked(NewTransferError(FailCanceled, cause.Error()))
+func (s *Sender) cancelLocal(cause error) {
+	s.fail(NewTransferError(FailCanceled, cause.Error()))
 }
 
-// sendControl seals and sends a control message; its frame-header type is the message's tag.
+func (s *Sender) clearTimersLocked() {
+	for _, state := range s.inflight {
+		if state.timer != nil {
+			state.timer.Stop()
+		}
+	}
+}
+
 func (s *Sender) sendControl(msg ControlMsg) error {
 	payload, err := EncodeControl(msg)
 	if err != nil {
 		return err
 	}
-	return s.sendFrame(FrameHeaderInput{
-		Version: FrameVersion,
-		Type:    msg.FrameType(),
-		Flags:   0,
-		FileIdx: 0, BlockIdx: 0, FrameOff: 0,
-	}, payload)
+	return s.sendFrame(FrameHeaderInput{Version: FrameVersion, Type: msg.FrameType()}, payload)
 }
 
-// sendFrame seals payload under the next send counter and hands the frame to the transport.
+// sendFrame serializes sealing and transport writes so controls cannot race data for a nonce.
 func (s *Sender) sendFrame(header FrameHeaderInput, payload []byte) error {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
 	frame, err := Seal(s.o.SendDir, s.sendCounter, header, payload)
 	if err != nil {
 		return err

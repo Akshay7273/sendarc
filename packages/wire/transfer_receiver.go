@@ -9,21 +9,11 @@ import (
 	"sync"
 )
 
-// Receiver is the receiving half of the transfer engine (design §5, §6). Frames arrive over an
-// ordered, reliable channel, so blocks assemble one at a time, in order. For each block the
-// receiver verifies its SHA-256 (from block_hash) BEFORE writing to the sink, feeds the verified
-// bytes into the whole-file streaming digest, then signals block_recv (the in-flight window). On
-// complete it compares the recomputed digest to the sender's and replies done, or
-// fail{digest_mismatch}. A GCM open failure or any hash mismatch yields fail{integrity} and an
-// abort — never a silent retry (design §5.5). It is the Go twin of
-// packages/protocol/src/transfer-receiver.ts.
-//
-// Handle is called from the transport read loop and MUST be called serially — the ordered
-// DataChannel satisfies this, and each frame consumes the next receive counter. Wait blocks a
-// separate goroutine until the transfer settles.
+// Receiver verifies and commits blocks before acknowledging them. A valid block that arrives
+// ahead of the next required index exposes a gap: it is not committed, and the missing block is
+// requested. Duplicate retransmissions are reverified and acknowledged without a second write.
 
-// ReceiveResult is the outcome of a successful receive: the manifest entry and the verified
-// whole-file digest (hex).
+// ReceiveResult is the successful manifest entry and canonical whole-file digest.
 type ReceiveResult struct {
 	File   FileEntry
 	Digest string
@@ -36,60 +26,63 @@ type ReceiverOptions struct {
 	RecvDir          DirectionalKey
 	SendCounterStart uint64
 	RecvCounterStart uint64
-	CreateDigest     func() Digest // nil selects a streaming SHA-256 digest
+	CreateDigest     func() Digest
 	Sink             Sink
-	OnProgress       func(receivedBytes int64)
-	// OnManifest is called once when the manifest decodes, before any block is written — it lets
-	// the host open a destination named after the file without the engine knowing about it. A
-	// non-nil error aborts the transfer.
-	OnManifest func(file FileEntry) error
+	// OnProgress reports bytes only after verify-and-sink.
+	OnProgress    func(acknowledgedBytes int64)
+	OnStateChange func(TransferState)
+	OnManifest    func(file FileEntry) error
 }
 
-// Receiver drives one file receive. Construct it with NewReceiver.
+// Receiver drives one file receive. Handle calls must remain ordered.
 type Receiver struct {
 	o      ReceiverOptions
 	digest Digest
 
-	// Counters and assembly state are touched only by Handle's (serial) goroutine.
+	sendMu      sync.Mutex
 	sendCounter uint64
-	recvCounter uint64
-	file        *FileEntry
-	curBlock    int
-	blockBuf    []byte
-	blockLen    int
-	received    int
+
+	// Assembly state belongs to the serial Handle path.
+	recvCounter     uint64
+	file            *FileEntry
+	nextBlock       int
+	assembling      int
+	blockBuf        []byte
+	blockReceived   int
+	seenAhead       map[int]bool
+	nackOutstanding int
 
 	mu      sync.Mutex
 	done    chan struct{}
 	settled bool
+	paused  bool
 	result  ReceiveResult
 	err     error
 }
 
-// NewReceiver builds a Receiver, defaulting to a streaming SHA-256 digest when none is given.
+// NewReceiver builds a Receiver.
 func NewReceiver(opts ReceiverOptions) *Receiver {
 	if opts.CreateDigest == nil {
 		opts.CreateDigest = NewSHA256Digest
 	}
 	return &Receiver{
-		o:           opts,
-		digest:      opts.CreateDigest(),
-		sendCounter: opts.SendCounterStart,
-		recvCounter: opts.RecvCounterStart,
-		done:        make(chan struct{}),
+		o:               opts,
+		digest:          opts.CreateDigest(),
+		sendCounter:     opts.SendCounterStart,
+		recvCounter:     opts.RecvCounterStart,
+		assembling:      -1,
+		seenAhead:       make(map[int]bool),
+		nackOutstanding: -1,
+		done:            make(chan struct{}),
 	}
 }
 
-// Wait blocks until the transfer settles, returning the result on done or the error on fail.
-// Canceling ctx aborts the receive with FailCanceled in bounded time, so a dropped peer never
-// parks Wait forever.
+// Wait blocks until completion or cancellation.
 func (r *Receiver) Wait(ctx context.Context) (ReceiveResult, error) {
 	select {
 	case <-r.done:
 	case <-ctx.Done():
-		// abortWith is idempotent and closes r.done; if the receive already settled it is a
-		// no-op and the <-r.done below returns immediately with the real result.
-		r.abortWith(NewTransferError(FailCanceled, ctx.Err().Error()))
+		r.abortWith(NewTransferError(FailCanceled, ctx.Err().Error()), true)
 		<-r.done
 	}
 	r.mu.Lock()
@@ -97,20 +90,48 @@ func (r *Receiver) Wait(ctx context.Context) (ReceiveResult, error) {
 	return r.result, r.err
 }
 
-// Handle feeds one inbound frame from the sender (manifest / block_data / block_hash / complete).
-// Any error aborts the transfer with the appropriate fail reason (integrity unless the error
-// already carries one).
+// Handle consumes one encrypted sender frame. Any malformed or unauthenticated frame aborts.
 func (r *Receiver) Handle(frame []byte) {
 	if err := r.process(frame); err != nil {
 		var te *TransferError
 		if !errors.As(err, &te) {
 			te = NewTransferError(FailIntegrity, err.Error())
 		}
-		r.abortWith(te)
+		r.abortWith(te, true)
 	}
 }
 
-// --- internal ---------------------------------------------------------------
+// Pause asks the sender to stop producing data frames.
+func (r *Receiver) Pause() error {
+	if !r.setPaused(true) {
+		return nil
+	}
+	return r.sendControl(NewControl(ControlPause))
+}
+
+// Resume asks the sender to continue.
+func (r *Receiver) Resume() error {
+	if !r.setPaused(false) {
+		return nil
+	}
+	return r.sendControl(NewControl(ControlResume))
+}
+
+// Cancel notifies the sender and terminates the receive.
+func (r *Receiver) Cancel(reason string) error {
+	r.mu.Lock()
+	settled := r.settled
+	r.mu.Unlock()
+	if settled {
+		return nil
+	}
+	if r.o.OnStateChange != nil {
+		r.o.OnStateChange(TransferCanceled)
+	}
+	err := r.sendControl(NewControl(ControlCancel))
+	r.abortWith(NewTransferError(FailCanceled, reason), false)
+	return err
+}
 
 func (r *Receiver) process(frame []byte) error {
 	if r.isSettled() {
@@ -118,7 +139,7 @@ func (r *Receiver) process(frame []byte) error {
 	}
 	ctr := r.recvCounter
 	r.recvCounter++
-	opened, err := Open(r.o.RecvDir, ctr, frame) // open failure → integrity abort
+	opened, err := Open(r.o.RecvDir, ctr, frame)
 	if err != nil {
 		return NewTransferError(FailIntegrity, err.Error())
 	}
@@ -126,11 +147,16 @@ func (r *Receiver) process(frame []byte) error {
 	case FrameManifest:
 		return r.applyManifest(opened.Plaintext)
 	case FrameBlockData:
-		return r.onBlockData(opened.Header.BlockIdx, opened.Header.FrameOff, opened.Plaintext)
+		return r.onBlockData(opened.Header.FileIdx, opened.Header.BlockIdx,
+			opened.Header.FrameOff, opened.Plaintext)
 	case FrameBlockHash:
 		return r.onBlockHash(opened.Plaintext)
+	case FrameControl:
+		return r.onControl(opened.Plaintext)
 	case FrameComplete:
 		return r.onComplete(opened.Plaintext)
+	case FrameFail:
+		return r.onPeerFail(opened.Plaintext)
 	default:
 		return NewTransferError(FailIntegrity,
 			fmt.Sprintf("unexpected receiver-inbound type %d", opened.Header.Type))
@@ -138,6 +164,9 @@ func (r *Receiver) process(frame []byte) error {
 }
 
 func (r *Receiver) applyManifest(payload []byte) error {
+	if r.file != nil {
+		return NewTransferError(FailIntegrity, "duplicate manifest")
+	}
 	msg, err := DecodeControl(payload)
 	if err != nil {
 		return NewTransferError(FailIntegrity, err.Error())
@@ -146,35 +175,55 @@ func (r *Receiver) applyManifest(payload []byte) error {
 	if !ok {
 		return NewTransferError(FailIntegrity, "expected manifest")
 	}
-	if len(m.Files) == 0 {
-		return NewTransferError(FailIntegrity, "manifest has no files")
+	if len(m.Files) != 1 {
+		return NewTransferError(FailIntegrity, "single-file manifest required")
 	}
 	f := m.Files[0]
+	wantBlocks := 0
+	if f.Size > 0 && f.BlockSize > 0 {
+		wantBlocks = int((f.Size + int64(f.BlockSize) - 1) / int64(f.BlockSize))
+	}
+	if f.Idx != 0 || f.Size < 0 || f.BlockSize <= 0 || f.Blocks != wantBlocks {
+		return NewTransferError(FailIntegrity, "invalid manifest geometry")
+	}
 	r.file = &f
 	if r.o.OnManifest != nil {
-		return r.o.OnManifest(f)
+		if err := r.o.OnManifest(f); err != nil {
+			return asTransferError(err, FailSinkError)
+		}
 	}
 	return nil
 }
 
-func (r *Receiver) onBlockData(blockIdx uint32, frameOff uint32, payload []byte) error {
+func (r *Receiver) onBlockData(fileIdx uint16, blockIdx uint32, frameOff uint32, payload []byte) error {
 	if r.file == nil {
 		return NewTransferError(FailIntegrity, "block_data before manifest")
 	}
-	if int(blockIdx) != r.curBlock {
-		return NewTransferError(FailIntegrity, fmt.Sprintf("out-of-order block %d", blockIdx))
+	idx := int(blockIdx)
+	if fileIdx != 0 || idx < 0 || idx >= r.file.Blocks {
+		return NewTransferError(FailIntegrity, fmt.Sprintf("block_data outside manifest: %d", idx))
 	}
 	if frameOff == 0 {
-		// The final block is short: cap its buffer at the file's remaining bytes.
-		r.blockLen = r.file.BlockSize
-		if rem := r.file.Size - int64(blockIdx)*int64(r.file.BlockSize); int64(r.blockLen) > rem {
-			r.blockLen = int(rem)
+		if r.blockBuf != nil {
+			return NewTransferError(FailIntegrity, "new block before block_hash")
 		}
-		r.blockBuf = make([]byte, r.blockLen)
-		r.received = 0
+		blockLen := r.file.BlockSize
+		if rem := r.file.Size - int64(idx)*int64(r.file.BlockSize); int64(blockLen) > rem {
+			blockLen = int(rem)
+		}
+		r.assembling = idx
+		r.blockBuf = make([]byte, blockLen)
+		r.blockReceived = 0
 	}
-	copy(r.blockBuf[frameOff:], payload)
-	r.received += len(payload)
+	if r.blockBuf == nil || r.assembling != idx {
+		return NewTransferError(FailIntegrity, fmt.Sprintf("unexpected block fragment %d", idx))
+	}
+	off := int(frameOff)
+	if off != r.blockReceived || off+len(payload) > len(r.blockBuf) {
+		return NewTransferError(FailIntegrity, fmt.Sprintf("invalid frame offset in block %d", idx))
+	}
+	copy(r.blockBuf[off:], payload)
+	r.blockReceived += len(payload)
 	return nil
 }
 
@@ -190,7 +239,10 @@ func (r *Receiver) onBlockHash(payload []byte) error {
 	if !ok {
 		return NewTransferError(FailIntegrity, "expected block_hash")
 	}
-	if r.received != r.blockLen {
+	if bh.FileIdx != 0 || bh.BlockIdx != r.assembling {
+		return NewTransferError(FailIntegrity, "block_hash does not match assembled block")
+	}
+	if r.blockReceived != len(r.blockBuf) {
 		return NewTransferError(FailIntegrity, "short block")
 	}
 	sum := sha256.Sum256(r.blockBuf)
@@ -198,21 +250,82 @@ func (r *Receiver) onBlockHash(payload []byte) error {
 		return NewTransferError(FailIntegrity, fmt.Sprintf("block %d hash mismatch", bh.BlockIdx))
 	}
 
-	// Verified: write, fold into the whole-file digest, then open the window one more block. A
-	// sink error propagates as-is, so a sink returning a TransferError keeps its reason.
-	offset := int64(r.curBlock) * int64(r.file.BlockSize)
-	if err := r.o.Sink.Write(offset, r.blockBuf); err != nil {
-		return err
-	}
-	r.digest.Update(r.blockBuf)
-	if r.o.OnProgress != nil {
-		r.o.OnProgress(offset + int64(r.blockLen))
-	}
-	if err := r.sendControl(NewBlockRecv(0, r.curBlock)); err != nil {
-		return err
-	}
-	r.curBlock++
+	block := r.blockBuf
 	r.blockBuf = nil
+	r.blockReceived = 0
+	r.assembling = -1
+
+	if bh.BlockIdx < r.nextBlock {
+		return r.sendControl(NewAck(0, bh.BlockIdx))
+	}
+	if bh.BlockIdx > r.nextBlock {
+		if len(r.seenAhead) < DefaultInflightBlocks {
+			r.seenAhead[bh.BlockIdx] = true
+		}
+		return r.requestMissing()
+	}
+
+	offset := int64(r.nextBlock) * int64(r.file.BlockSize)
+	if err := r.o.Sink.Write(offset, block); err != nil {
+		return asTransferError(err, FailSinkError)
+	}
+	r.digest.Update(block)
+	r.nextBlock++
+	r.nackOutstanding = -1
+	if r.o.OnProgress != nil {
+		r.o.OnProgress(offset + int64(len(block)))
+	}
+	if err := r.sendControl(NewAck(0, bh.BlockIdx)); err != nil {
+		return err
+	}
+	if r.seenAhead[r.nextBlock] {
+		delete(r.seenAhead, r.nextBlock)
+		return r.requestMissing()
+	}
+	return nil
+}
+
+func (r *Receiver) requestMissing() error {
+	if r.nackOutstanding == r.nextBlock {
+		return nil
+	}
+	r.nackOutstanding = r.nextBlock
+	return r.sendControl(NewNack(0, r.nextBlock, NackMissing))
+}
+
+func (r *Receiver) onControl(payload []byte) error {
+	msg, err := DecodeControl(payload)
+	if err != nil {
+		return NewTransferError(FailIntegrity, err.Error())
+	}
+	control, ok := msg.(*Control)
+	if !ok {
+		return NewTransferError(FailIntegrity, "expected control")
+	}
+	switch control.Op {
+	case ControlPause:
+		r.setPaused(true)
+	case ControlResume:
+		r.setPaused(false)
+	case ControlCancel:
+		if r.o.OnStateChange != nil {
+			r.o.OnStateChange(TransferCanceled)
+		}
+		r.abortWith(NewTransferError(FailCanceled, "peer canceled the transfer"), false)
+	}
+	return nil
+}
+
+func (r *Receiver) onPeerFail(payload []byte) error {
+	msg, err := DecodeControl(payload)
+	if err != nil {
+		return NewTransferError(FailIntegrity, err.Error())
+	}
+	fail, ok := msg.(*Fail)
+	if !ok {
+		return NewTransferError(FailIntegrity, "expected fail")
+	}
+	r.abortWith(NewTransferError(fail.Reason, "sender failed: "+string(fail.Reason)), false)
 	return nil
 }
 
@@ -224,16 +337,19 @@ func (r *Receiver) onComplete(payload []byte) error {
 	if err != nil {
 		return NewTransferError(FailIntegrity, err.Error())
 	}
-	c, ok := msg.(*Complete)
+	complete, ok := msg.(*Complete)
 	if !ok {
 		return NewTransferError(FailIntegrity, "expected complete")
 	}
+	if r.nextBlock != r.file.Blocks {
+		return r.requestMissing()
+	}
 	got := r.digest.HexDigest()
-	if got != c.FileDigest {
+	if complete.FileDigest != r.file.FileDigest || got != complete.FileDigest {
 		return NewTransferError(FailDigestMismatch, "whole-file digest mismatch")
 	}
 	if err := r.o.Sink.Close(); err != nil {
-		return err
+		return asTransferError(err, FailSinkError)
 	}
 	if err := r.sendControl(NewDone()); err != nil {
 		return err
@@ -242,9 +358,25 @@ func (r *Receiver) onComplete(payload []byte) error {
 	return nil
 }
 
-// abortWith settles the transfer as failed and, best-effort, tells the peer and the sink. Only
-// the first abort (or a prior settle) takes effect.
-func (r *Receiver) abortWith(err *TransferError) {
+func (r *Receiver) setPaused(paused bool) bool {
+	r.mu.Lock()
+	if r.settled || r.paused == paused {
+		r.mu.Unlock()
+		return false
+	}
+	r.paused = paused
+	r.mu.Unlock()
+	if r.o.OnStateChange != nil {
+		if paused {
+			r.o.OnStateChange(TransferPaused)
+		} else {
+			r.o.OnStateChange(TransferRunning)
+		}
+	}
+	return true
+}
+
+func (r *Receiver) abortWith(err *TransferError, notifyPeer bool) {
 	r.mu.Lock()
 	if r.settled {
 		r.mu.Unlock()
@@ -253,21 +385,21 @@ func (r *Receiver) abortWith(err *TransferError) {
 	r.settled = true
 	r.err = err
 	r.mu.Unlock()
-
-	_ = r.sendControl(NewFail(err.Reason)) // best-effort — the channel may already be gone
-	_ = r.o.Sink.Abort(string(err.Reason)) // best-effort
+	if notifyPeer {
+		_ = r.sendControl(NewFail(err.Reason))
+	}
+	_ = r.o.Sink.Abort(string(err.Reason))
 	close(r.done)
 }
 
-// settle records a successful finish; only the first settle (or a prior abort) takes effect.
-func (r *Receiver) settle(res ReceiveResult) {
+func (r *Receiver) settle(result ReceiveResult) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.settled {
 		return
 	}
 	r.settled = true
-	r.result = res
+	r.result = result
 	close(r.done)
 }
 
@@ -277,18 +409,26 @@ func (r *Receiver) isSettled() bool {
 	return r.settled
 }
 
-// sendControl seals and sends a control message under the next send counter.
 func (r *Receiver) sendControl(msg ControlMsg) error {
 	payload, err := EncodeControl(msg)
 	if err != nil {
 		return err
 	}
-	frame, err := Seal(r.o.SendDir, r.sendCounter, FrameHeaderInput{
-		Version: FrameVersion, Type: msg.FrameType(),
-	}, payload)
+	r.sendMu.Lock()
+	defer r.sendMu.Unlock()
+	frame, err := Seal(r.o.SendDir, r.sendCounter,
+		FrameHeaderInput{Version: FrameVersion, Type: msg.FrameType()}, payload)
 	if err != nil {
 		return err
 	}
 	r.sendCounter++
 	return r.o.Send(frame)
+}
+
+func asTransferError(err error, fallback FailReason) *TransferError {
+	var transferErr *TransferError
+	if errors.As(err, &transferErr) {
+		return transferErr
+	}
+	return NewTransferError(fallback, err.Error())
 }
