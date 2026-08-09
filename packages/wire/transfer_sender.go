@@ -36,11 +36,17 @@ type SenderOptions struct {
 	SendCounterStart uint64
 	RecvCounterStart uint64
 	CreateDigest     func() Digest
-	BlockSize        int
-	FrameSize        int
-	Window           int
-	AckTimeout       time.Duration
-	MaxRetries       int
+	// TransferID, when set, is advertised in the manifest so a reloaded receiver can prove it is
+	// resuming this transfer. It enables the resume handshake: the sender waits for the receiver's
+	// resume_state and restarts each file at the reported high-water mark. NewTransferID mints one
+	// when TransferID is empty; leaving both unset disables resumption.
+	TransferID    string
+	NewTransferID func() string
+	BlockSize     int
+	FrameSize     int
+	Window        int
+	AckTimeout    time.Duration
+	MaxRetries    int
 	// OnProgress reports bytes acknowledged after verify-and-sink.
 	OnProgress     func(acknowledgedBytes int64)
 	OnFileProgress func(fileIdx int, fileBytes, acknowledgedBytes int64)
@@ -66,6 +72,8 @@ type Sender struct {
 	sendMu      sync.Mutex
 	sendCounter uint64
 
+	transferID string
+
 	mu                     sync.Mutex
 	cond                   *sync.Cond
 	recvCounter            uint64
@@ -79,6 +87,10 @@ type Sender struct {
 	completeSent           bool
 	settled                bool
 	err                    error
+	// resumePlan maps file index to the receiver's high-water mark; each file restarts there.
+	resumePlan map[int]int
+	// resumeReceived is set once a valid resume_state has been applied (resume mode only).
+	resumeReceived bool
 }
 
 var errSenderSettled = errors.New("sender settled")
@@ -103,6 +115,10 @@ func NewSender(opts SenderOptions) *Sender {
 	if opts.CreateDigest == nil {
 		opts.CreateDigest = NewSHA256Digest
 	}
+	transferID := opts.TransferID
+	if transferID == "" && opts.NewTransferID != nil {
+		transferID = opts.NewTransferID()
+	}
 	files := opts.Files
 	if len(files) == 0 && opts.File != nil {
 		files = []FileSource{opts.File}
@@ -120,6 +136,8 @@ func NewSender(opts SenderOptions) *Sender {
 		inflight:      make(map[int]*inflightBlock),
 		retryQueued:   make(map[int]bool),
 		activeFileIdx: -1,
+		transferID:    transferID,
+		resumePlan:    make(map[int]int),
 	}
 	s.cond = sync.NewCond(&s.mu)
 	return s
@@ -171,7 +189,9 @@ func (s *Sender) Run(ctx context.Context) (string, error) {
 		}
 		totalSize += meta.Size
 	}
-	manifest, err := ValidateManifest(*NewManifest(entries, totalSize))
+	base := NewManifest(entries, totalSize)
+	base.TransferID = s.transferID
+	manifest, err := ValidateManifest(*base)
 	if err != nil {
 		s.fail(err)
 		return "", err
@@ -182,12 +202,37 @@ func (s *Sender) Run(ctx context.Context) (string, error) {
 		return "", err
 	}
 
+	// A transfer id opts into resumption: wait for the receiver's resume_state (all zero on a
+	// first attempt) before streaming so blocks it already holds are never sent. Fresh transfers
+	// skip the wait entirely.
+	if s.transferID != "" {
+		if err := s.waitResume(); err != nil {
+			return "", err
+		}
+	}
+
 	for fileIdx, source := range s.files {
 		s.mu.Lock()
 		s.activeFileIdx = fileIdx
-		s.activeFileAcknowledged = 0
+		haveBlocks := s.resumePlan[fileIdx]
+		if haveBlocks > entries[fileIdx].Blocks {
+			haveBlocks = entries[fileIdx].Blocks
+		}
+		// Bytes the receiver already holds count as acknowledged up front so progress is continuous
+		// across a resume. Only a file's final block may be partial, so a full prefix is N blocks.
+		committed := int64(haveBlocks) * int64(s.blockSize)
+		if haveBlocks >= entries[fileIdx].Blocks {
+			committed = entries[fileIdx].Size
+		}
+		s.activeFileAcknowledged = committed
+		s.acknowledged += committed
 		s.mu.Unlock()
 		streamErr := ReChunk(StreamFunc(source.Stream), s.blockSize, s.blockSize, func(p FramePiece) error {
+			// Held blocks are read past (the source is streamed for the digest regardless) but
+			// never sent.
+			if p.BlockIdx < haveBlocks {
+				return nil
+			}
 			if err := s.beforeNewBlock(); err != nil {
 				return err
 			}
@@ -274,6 +319,8 @@ func (s *Sender) Handle(frame []byte) {
 			return
 		}
 		s.queueRetry(m.BlockIdx)
+	case *ResumeState:
+		s.onResumeState(m)
 	case *Control:
 		s.applyRemoteControl(m.Op)
 	case *Done:
@@ -378,6 +425,68 @@ func (s *Sender) onAck(ack *Ack) {
 	if s.o.OnFileProgress != nil {
 		s.o.OnFileProgress(fileIdx, fileAcknowledged, acknowledged)
 	}
+}
+
+// waitResume blocks until a valid resume_state has been applied or the sender settles.
+func (s *Sender) waitResume() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for !s.resumeReceived && !s.settled {
+		s.cond.Wait()
+	}
+	if s.settled {
+		if s.err != nil {
+			return s.err
+		}
+		return errSenderSettled
+	}
+	return nil
+}
+
+// onResumeState validates the receiver's resume_state against the manifest and records each
+// file's high-water mark, then unblocks the driver. Any inconsistency fails the transfer closed.
+func (s *Sender) onResumeState(m *ResumeState) {
+	s.mu.Lock()
+	plan, failErr := s.buildResumePlanLocked(m)
+	if failErr == nil {
+		s.resumePlan = plan
+		s.resumeReceived = true
+		s.cond.Broadcast()
+	}
+	s.mu.Unlock()
+	if failErr != nil {
+		s.fail(failErr)
+	}
+}
+
+func (s *Sender) buildResumePlanLocked(m *ResumeState) (map[int]int, *TransferError) {
+	if s.transferID == "" {
+		return nil, NewTransferError(FailIntegrity, "unexpected resume_state")
+	}
+	if s.resumeReceived {
+		return nil, NewTransferError(FailIntegrity, "duplicate resume_state")
+	}
+	if m.TransferID != s.transferID {
+		return nil, NewTransferError(FailIntegrity, "resume_state transfer id mismatch")
+	}
+	plan := make(map[int]int, len(m.Files))
+	for _, f := range m.Files {
+		if f.Idx < 0 || f.Idx >= len(s.files) {
+			return nil, NewTransferError(FailIntegrity, "resume_state references an unknown file")
+		}
+		if _, dup := plan[f.Idx]; dup {
+			return nil, NewTransferError(FailIntegrity, "resume_state references an unknown file")
+		}
+		blocks := 0
+		if size := s.files[f.Idx].Meta().Size; size > 0 {
+			blocks = int((size-1)/int64(s.blockSize) + 1)
+		}
+		if f.HaveBlocks < 0 || f.HaveBlocks > blocks {
+			return nil, NewTransferError(FailIntegrity, "resume_state haveBlocks out of range")
+		}
+		plan[f.Idx] = f.HaveBlocks
+	}
+	return plan, nil
 }
 
 func (s *Sender) applyRemoteControl(op ControlOp) {
