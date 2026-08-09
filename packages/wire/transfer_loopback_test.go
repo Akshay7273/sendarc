@@ -123,6 +123,125 @@ func TestLoopbackStreamsVariousSizes(t *testing.T) {
 	}
 }
 
+// runResumeLoopback wires a resumable sender to a reloaded receiver whose sink and digest are
+// pre-seeded with the first haveBlocks blocks, mirroring a real reload from durable storage.
+func runResumeLoopback(t *testing.T, data []byte, blockSize, haveBlocks int, senderID, resumeID string) (loopbackResult, int) {
+	t.Helper()
+	keys, err := DeriveTransferKeys(loopbackMaster())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := haveBlocks * blockSize
+	if prefix > len(data) {
+		prefix = len(data)
+	}
+	sink := &MemorySink{}
+	if resumeID == senderID && prefix > 0 {
+		_ = sink.Write(0, data[:prefix])
+	}
+	seed := NewSHA256Digest()
+	if resumeID == senderID {
+		seed.Update(data[:prefix])
+	}
+
+	s2r := make(chan []byte, 4096)
+	r2s := make(chan []byte, 4096)
+	cp := func(f []byte) []byte { return append([]byte(nil), f...) }
+
+	sender := NewSender(SenderOptions{
+		File:       BytesSource(data, FileMeta{Name: "f", Size: int64(len(data)), Mime: "application/octet-stream", LastModified: 1}, 0),
+		Send:       func(f []byte) error { s2r <- cp(f); return nil },
+		SendDir:    keys.O2J,
+		RecvDir:    keys.J2O,
+		BlockSize:  blockSize,
+		FrameSize:  256,
+		Window:     4,
+		TransferID: senderID,
+	})
+	var commits int
+	receiver := NewReceiver(ReceiverOptions{
+		Send:       func(f []byte) error { r2s <- cp(f); return nil },
+		SendDir:    keys.J2O,
+		RecvDir:    keys.O2J,
+		Sink:       sink,
+		OnProgress: func(int64) { commits++ },
+		Resume: &ReceiverResume{
+			TransferID: resumeID,
+			Files:      map[int]ResumeFileProgress{0: {HaveBlocks: haveBlocks, SeedDigest: seed}},
+		},
+	})
+
+	go func() {
+		for f := range s2r {
+			receiver.Handle(f)
+		}
+	}()
+	go func() {
+		for f := range r2s {
+			sender.Handle(f)
+		}
+	}()
+	runErrCh := make(chan error, 1)
+	go func() { _, e := sender.Run(context.Background()); runErrCh <- e }()
+	recvRes, recvErr := receiver.Wait(context.Background())
+	var runErr error
+	select {
+	case runErr = <-runErrCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sender.Run did not return after the receiver settled")
+	}
+	close(s2r)
+	close(r2s)
+	return loopbackResult{runErr: runErr, recvRes: recvRes, recvErr: recvErr, sink: sink}, commits
+}
+
+func TestLoopbackResumesFromHighWaterMark(t *testing.T) {
+	blockSize := 1024
+	data := make([]byte, 100_000)
+	for i := range data {
+		data[i] = byte((i*131 + 7) & 0xff)
+	}
+	blocks := (len(data)-1)/blockSize + 1
+	haveBlocks := 10
+	id := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	res, commits := runResumeLoopback(t, data, blockSize, haveBlocks, id, id)
+	if res.runErr != nil || res.recvErr != nil {
+		t.Fatalf("send=%v receive=%v", res.runErr, res.recvErr)
+	}
+	if string(res.sink.Bytes()) != string(data) {
+		t.Fatal("resumed transfer did not reassemble the full file")
+	}
+	want := sha256.Sum256(data)
+	if res.recvRes.Digest != hex.EncodeToString(want[:]) {
+		t.Errorf("digest = %s, want %s", res.recvRes.Digest, hex.EncodeToString(want[:]))
+	}
+	if commits != blocks-haveBlocks {
+		t.Errorf("committed %d blocks, want %d (only the missing suffix)", commits, blocks-haveBlocks)
+	}
+}
+
+func TestLoopbackIgnoresResumeOnTransferIDMismatch(t *testing.T) {
+	blockSize := 1024
+	data := make([]byte, 20_000)
+	for i := range data {
+		data[i] = byte((i*131 + 7) & 0xff)
+	}
+	blocks := (len(data)-1)/blockSize + 1
+
+	// The seed carries a stale id, so the receiver must discard it and receive every block fresh.
+	res, commits := runResumeLoopback(t, data, blockSize, 5, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if res.runErr != nil || res.recvErr != nil {
+		t.Fatalf("send=%v receive=%v", res.runErr, res.recvErr)
+	}
+	if string(res.sink.Bytes()) != string(data) {
+		t.Fatal("mismatched-resume transfer did not reassemble the full file")
+	}
+	if commits != blocks {
+		t.Errorf("committed %d blocks, want %d (a full fresh receive)", commits, blocks)
+	}
+}
+
 func TestLoopbackAbortsOnCorruptedFrame(t *testing.T) {
 	data := make([]byte, 4096)
 	for i := range data {

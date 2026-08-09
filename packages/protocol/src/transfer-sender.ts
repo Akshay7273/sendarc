@@ -40,6 +40,16 @@ export interface TransferSenderOptions {
   sendCounterStart: number;
   recvCounterStart: number;
   createDigest(): Digest;
+  /**
+   * A stable transfer id (hex) advertised in the manifest so a reloaded receiver can prove it is
+   * resuming *this* transfer. Supply it when the caller controls the id across attempts; otherwise
+   * {@link newTransferId} mints one. Either enables the resume handshake: the manifest carries the
+   * id and the sender waits for the receiver's `resume_state` before streaming, restarting each
+   * file at the acknowledged high-water mark.
+   */
+  transferId?: string;
+  /** Mint a fresh transfer id when {@link transferId} is not supplied. */
+  newTransferId?(): string;
   blockSize?: number;
   frameSize?: number;
   window?: number;
@@ -81,6 +91,16 @@ export class TransferSender {
   private activeFileIdx = -1;
   private activeFileAcknowledged = 0;
 
+  /** Set when a transfer id is advertised: the manifest carries it and a resume handshake runs. */
+  private readonly transferId: string | undefined;
+  /** Per-file high-water marks the receiver reported; each file restarts at its value. */
+  private readonly resumePlan = new Map<number, number>();
+  /** Resolves when the receiver's `resume_state` has been validated (resume mode only). */
+  private resolveResumeReady!: () => void;
+  private rejectResumeReady!: (e: Error) => void;
+  private readonly resumeReady: Promise<void>;
+  private resumeSettled = false;
+
   private readonly inflight = new Map<number, InflightBlock>();
   private readonly retryQueue: number[] = [];
   private readonly retryQueued = new Set<number>();
@@ -107,11 +127,17 @@ export class TransferSender {
     this.maxRetries = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.sendCounter = opts.sendCounterStart;
     this.recvCounter = opts.recvCounterStart;
+    this.transferId = opts.transferId ?? opts.newTransferId?.();
     this.done = new Promise<void>((res, rej) => {
       this.resolveDone = res;
       this.rejectDone = rej;
     });
     this.done.catch(() => {});
+    this.resumeReady = new Promise<void>((res, rej) => {
+      this.resolveResumeReady = res;
+      this.rejectResumeReady = rej;
+    });
+    this.resumeReady.catch(() => {});
   }
 
   /**
@@ -195,6 +221,7 @@ export class TransferSender {
     }
     const manifest = validateManifest({
       type: FrameType.Manifest,
+      ...(this.transferId !== undefined ? { transferId: this.transferId } : {}),
       files: entries,
       totalSize,
     });
@@ -202,12 +229,27 @@ export class TransferSender {
     this.o.onManifest?.(manifest);
     await this.sendControl(FrameType.Manifest, manifest);
 
+    // A transfer id opts into resumption: the receiver answers the manifest with a resume_state
+    // carrying each file's high-water mark (all zero on a first attempt). Wait for it before
+    // streaming so skipped blocks are never sent. Fresh transfers never take this branch.
+    if (this.transferId !== undefined) {
+      await this.resumeReady;
+    }
+
     for (const [fileIdx, source] of this.files.entries()) {
       this.activeFileIdx = fileIdx;
-      this.activeFileAcknowledged = 0;
+      const file = manifest.files[fileIdx]!;
+      const haveBlocks = Math.min(this.resumePlan.get(fileIdx) ?? 0, file.blocks);
+      // Bytes the receiver already holds count as acknowledged up front so progress is continuous
+      // across a resume. Only the final block may be partial, so a full prefix is haveBlocks blocks.
+      const committed = haveBlocks >= file.blocks ? file.size : haveBlocks * this.blockSize;
+      this.activeFileAcknowledged = committed;
+      this.acknowledged += committed;
       // Asking reChunk for block-sized pieces yields one retained buffer per logical block. The
-      // block is then split into transport-sized frames by sendBlock.
+      // block is then split into transport-sized frames by sendBlock. Blocks the receiver already
+      // holds are read past (the source is streamed for the digest regardless) but never sent.
       for await (const piece of reChunk(source.stream(), this.blockSize, this.blockSize)) {
+        if (piece.blockIdx < haveBlocks) continue;
         await this.beforeNewBlock();
         await this.propagateSettlement();
         const bytes = piece.payload.slice();
@@ -273,6 +315,31 @@ export class TransferSender {
         }
         this.queueRetry(msg.blockIdx);
         return;
+      case FrameType.ResumeState: {
+        if (this.transferId === undefined) {
+          throw new TransferError('integrity', 'unexpected resume_state');
+        }
+        if (this.resumeSettled) {
+          throw new TransferError('integrity', 'duplicate resume_state');
+        }
+        if (msg.transferId !== this.transferId) {
+          throw new TransferError('integrity', 'resume_state transfer id mismatch');
+        }
+        for (const entry of msg.files) {
+          const file = this.files[entry.idx];
+          const blocks = file ? Math.ceil(file.meta.size / this.blockSize) : -1;
+          if (blocks < 0 || this.resumePlan.has(entry.idx)) {
+            throw new TransferError('integrity', 'resume_state references an unknown file');
+          }
+          if (entry.haveBlocks < 0 || entry.haveBlocks > blocks) {
+            throw new TransferError('integrity', 'resume_state haveBlocks out of range');
+          }
+          this.resumePlan.set(entry.idx, entry.haveBlocks);
+        }
+        this.resumeSettled = true;
+        this.resolveResumeReady();
+        return;
+      }
       case FrameType.Control:
         this.applyRemoteControl(msg.op);
         return;
@@ -457,6 +524,7 @@ export class TransferSender {
     if (this.settled) return;
     this.settled = true;
     this.clearTimers();
+    this.rejectResumeReady(err);
     this.rejectDone(err);
     this.wake();
   }

@@ -167,4 +167,107 @@ describe('transfer loopback (no browser)', () => {
     expect(progress.at(-1)).toBe(contents.reduce((total, bytes) => total + bytes.length, 0));
     expect(committed).toBe(true);
   });
+
+  it('resumes a partially received transfer from the committed high-water mark', async () => {
+    const keys = await deriveTransferKeys(master);
+    const blockSize = 1024;
+    const data = new Uint8Array(100_000).map((_, i) => (i * 131 + 7) & 0xff);
+    const blocks = Math.ceil(data.length / blockSize);
+    const stop = 10;
+    const prefixLen = stop * blockSize;
+    const transferId = 'a'.repeat(32);
+
+    // Model a reloaded receiver: the first `stop` blocks are already persisted, so restore a
+    // prefilled sink and a digest already fed exactly those bytes.
+    const sink = new MemorySink();
+    sink.write(0, data.subarray(0, prefixLen));
+    const seed = nodeDigest();
+    seed.update(data.subarray(0, prefixLen));
+
+    let commits = 0;
+    const box: { receiver?: TransferReceiver } = {};
+    const sender = new TransferSender({
+      file: bytesSource(data, { name: 'f', size: data.length, mime: '', lastModified: 1 }),
+      send: (f) => queueMicrotask(() => box.receiver!.handle(f)),
+      sendDir: keys.o2j,
+      recvDir: keys.j2o,
+      sendCounterStart: 0,
+      recvCounterStart: 0,
+      createDigest: nodeDigest,
+      blockSize,
+      frameSize: 256,
+      window: 4,
+      transferId,
+    });
+    const receiver = new TransferReceiver({
+      send: (f) => queueMicrotask(() => sender.handle(f)),
+      sendDir: keys.j2o,
+      recvDir: keys.o2j,
+      sendCounterStart: 0,
+      recvCounterStart: 0,
+      createDigest: nodeDigest,
+      sink,
+      resume: { transferId, files: new Map([[0, { haveBlocks: stop, seedDigest: seed }]]) },
+      onProgress: () => void commits++,
+    });
+    box.receiver = receiver;
+
+    const [digest, result] = await Promise.all([sender.run(), receiver.done]);
+    expect([...sink.bytes()]).toEqual([...data]);
+    expect(result.digest).toBe(createHash('sha256').update(data).digest('hex'));
+    expect(digest).toBe(result.digest);
+    // Only the blocks the receiver lacked are streamed and committed on resume.
+    expect(commits).toBe(blocks - stop);
+  });
+
+  it('ignores a resume seed whose transferId does not match the manifest', async () => {
+    const keys = await deriveTransferKeys(master);
+    const blockSize = 1024;
+    const data = new Uint8Array(20_000).map((_, i) => (i * 131 + 7) & 0xff);
+    const blocks = Math.ceil(data.length / blockSize);
+
+    // A seed for a *different* transfer must be discarded: wrong high-water and a poisoned digest.
+    // If it were wrongly applied, the whole-file digest would fail and receiver.done would reject.
+    const staleSeed = nodeDigest();
+    staleSeed.update(new Uint8Array(blockSize).fill(0xff));
+
+    let commits = 0;
+    const sink = new MemorySink();
+    const box: { receiver?: TransferReceiver } = {};
+    const sender = new TransferSender({
+      file: bytesSource(data, { name: 'f', size: data.length, mime: '', lastModified: 1 }),
+      send: (f) => queueMicrotask(() => box.receiver!.handle(f)),
+      sendDir: keys.o2j,
+      recvDir: keys.j2o,
+      sendCounterStart: 0,
+      recvCounterStart: 0,
+      createDigest: nodeDigest,
+      blockSize,
+      frameSize: 256,
+      window: 4,
+      transferId: 'b'.repeat(32),
+    });
+    const receiver = new TransferReceiver({
+      send: (f) => queueMicrotask(() => sender.handle(f)),
+      sendDir: keys.j2o,
+      recvDir: keys.o2j,
+      sendCounterStart: 0,
+      recvCounterStart: 0,
+      createDigest: nodeDigest,
+      sink,
+      resume: {
+        transferId: 'a'.repeat(32),
+        files: new Map([[0, { haveBlocks: 1, seedDigest: staleSeed }]]),
+      },
+      onProgress: () => void commits++,
+    });
+    box.receiver = receiver;
+
+    const [digest, result] = await Promise.all([sender.run(), receiver.done]);
+    expect([...sink.bytes()]).toEqual([...data]);
+    expect(result.digest).toBe(createHash('sha256').update(data).digest('hex'));
+    expect(digest).toBe(result.digest);
+    // Fresh receive: every block is streamed because the stale seed was rejected.
+    expect(commits).toBe(blocks);
+  });
 });
