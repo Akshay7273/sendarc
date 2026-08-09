@@ -21,3 +21,4 @@ export * from './transfer-chunker.js';
 export * from './transfer-messages.js';
 export * from './transfer-sender.js';
 export * from './transfer-receiver.js';
+export * from './safe-path.js';
