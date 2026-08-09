@@ -22,6 +22,7 @@ import { TransferError, type Digest, type FileSource } from './transfer-ports.js
 import { reChunk } from './transfer-chunker.js';
 import { decodeControl, encodeControl } from './transfer-messages.js';
 import { validateManifest } from './safe-path.js';
+import { completionDigest } from './transfer-set.js';
 
 /** Header flag: this frame is the last of its block. */
 export const FRAME_FLAG_LAST_IN_BLOCK = 0x01;
@@ -29,7 +30,10 @@ export const FRAME_FLAG_LAST_IN_BLOCK = 0x01;
 export type TransferRunState = 'running' | 'paused' | 'canceled';
 
 export interface TransferSenderOptions {
-  file: FileSource;
+  /** One file (compatibility shorthand). Exactly one of file/files must be supplied. */
+  file?: FileSource;
+  /** Ordered file set with canonical relative paths in each source's meta.name. */
+  files?: readonly FileSource[];
   send(frame: Uint8Array): void | Promise<void>;
   sendDir: DirectionalKey;
   recvDir: DirectionalKey;
@@ -45,6 +49,8 @@ export interface TransferSenderOptions {
   maxRetries?: number;
   /** Reports bytes acknowledged after verify-and-sink. */
   onProgress?(acknowledgedBytes: number): void;
+  /** Reports verified progress for the active file plus aggregate acknowledged bytes. */
+  onFileProgress?(fileIdx: number, fileBytes: number, acknowledgedBytes: number): void;
   onStateChange?(state: TransferRunState): void;
 }
 
@@ -64,12 +70,15 @@ export class TransferSender {
   private readonly window: number;
   private readonly ackTimeoutMs: number;
   private readonly maxRetries: number;
+  private readonly files: readonly FileSource[];
 
   private sendCounter: number;
   private recvCounter: number;
   private acknowledged = 0;
   private paused = false;
   private completeSent = false;
+  private activeFileIdx = -1;
+  private activeFileAcknowledged = 0;
 
   private readonly inflight = new Map<number, InflightBlock>();
   private readonly retryQueue: number[] = [];
@@ -85,6 +94,11 @@ export class TransferSender {
 
   constructor(opts: TransferSenderOptions) {
     this.o = opts;
+    if ((opts.file === undefined) === (opts.files === undefined)) {
+      throw new Error('exactly one of file or files is required');
+    }
+    this.files = opts.files ?? [opts.file!];
+    if (this.files.length === 0) throw new Error('at least one file is required');
     this.blockSize = opts.blockSize ?? DEFAULT_BLOCK_BYTES;
     this.frameSize = opts.frameSize ?? DEFAULT_FRAME_BYTES;
     this.window = opts.window ?? DEFAULT_INFLIGHT_BLOCKS;
@@ -150,51 +164,59 @@ export class TransferSender {
   }
 
   private async drive(): Promise<string> {
-    const { meta } = this.o.file;
-
-    const digest = this.o.createDigest();
-    for await (const chunk of this.o.file.stream()) digest.update(chunk);
-    const fileDigest = await digest.hexDigest();
-
-    const blocks = Math.ceil(meta.size / this.blockSize);
+    const entries = [];
+    let totalSize = 0;
+    for (const [idx, source] of this.files.entries()) {
+      const digest = this.o.createDigest();
+      for await (const chunk of source.stream()) digest.update(chunk);
+      const { meta } = source;
+      totalSize += meta.size;
+      entries.push({
+        idx,
+        name: meta.name,
+        size: meta.size,
+        mime: meta.mime,
+        lastModified: meta.lastModified,
+        blockSize: this.blockSize,
+        blocks: Math.ceil(meta.size / this.blockSize),
+        fileDigest: await digest.hexDigest(),
+      });
+    }
     const manifest = validateManifest({
       type: FrameType.Manifest,
-      files: [
-        {
-          idx: 0,
-          name: meta.name,
-          size: meta.size,
-          mime: meta.mime,
-          lastModified: meta.lastModified,
-          blockSize: this.blockSize,
-          blocks,
-          fileDigest,
-        },
-      ],
-      totalSize: meta.size,
+      files: entries,
+      totalSize,
     });
+    const transferDigest = await completionDigest(manifest.files);
     await this.sendControl(FrameType.Manifest, manifest);
 
-    // Asking reChunk for block-sized pieces yields one retained buffer per logical block. The
-    // block is then split into transport-sized frames by sendBlock.
-    for await (const piece of reChunk(this.o.file.stream(), this.blockSize, this.blockSize)) {
-      await this.beforeNewBlock();
-      await this.propagateSettlement();
-      const bytes = piece.payload.slice();
-      this.inflight.set(piece.blockIdx, { bytes, retries: 0, timer: undefined });
-      await this.sendBlock(piece.blockIdx, bytes);
-      this.armTimeout(piece.blockIdx);
-    }
-
-    while (this.inflight.size > 0) {
-      await this.propagateSettlement();
-      await this.serviceRetriesOrWait();
+    for (const [fileIdx, source] of this.files.entries()) {
+      this.activeFileIdx = fileIdx;
+      this.activeFileAcknowledged = 0;
+      // Asking reChunk for block-sized pieces yields one retained buffer per logical block. The
+      // block is then split into transport-sized frames by sendBlock.
+      for await (const piece of reChunk(source.stream(), this.blockSize, this.blockSize)) {
+        await this.beforeNewBlock();
+        await this.propagateSettlement();
+        const bytes = piece.payload.slice();
+        this.inflight.set(piece.blockIdx, { bytes, retries: 0, timer: undefined });
+        await this.sendBlock(piece.blockIdx, bytes);
+        this.armTimeout(piece.blockIdx);
+      }
+      while (this.inflight.size > 0) {
+        await this.propagateSettlement();
+        await this.serviceRetriesOrWait();
+      }
+      this.o.onFileProgress?.(fileIdx, this.activeFileAcknowledged, this.acknowledged);
     }
 
     this.completeSent = true;
-    await this.sendControl(FrameType.Complete, { type: FrameType.Complete, fileDigest });
+    await this.sendControl(FrameType.Complete, {
+      type: FrameType.Complete,
+      fileDigest: transferDigest,
+    });
     await this.done;
-    return fileDigest;
+    return transferDigest;
   }
 
   private async processInbound(frame: Uint8Array): Promise<void> {
@@ -214,19 +236,27 @@ export class TransferSender {
     }
     switch (msg.type) {
       case FrameType.Ack: {
-        if (msg.fileIdx !== 0) throw new TransferError('integrity', 'ack for unknown file');
+        if (msg.fileIdx < this.activeFileIdx) return;
+        if (msg.fileIdx !== this.activeFileIdx) {
+          throw new TransferError('integrity', 'ack for unknown file');
+        }
         const state = this.inflight.get(msg.blockIdx);
         if (!state) return; // duplicate acknowledgement
         if (state.timer) clearTimeout(state.timer);
         this.inflight.delete(msg.blockIdx);
         this.retryQueued.delete(msg.blockIdx);
         this.acknowledged += state.bytes.length;
+        this.activeFileAcknowledged += state.bytes.length;
         this.o.onProgress?.(this.acknowledged);
+        this.o.onFileProgress?.(this.activeFileIdx, this.activeFileAcknowledged, this.acknowledged);
         this.wake();
         return;
       }
       case FrameType.Nack:
-        if (msg.fileIdx !== 0) throw new TransferError('integrity', 'nack for unknown file');
+        if (msg.fileIdx < this.activeFileIdx) return;
+        if (msg.fileIdx !== this.activeFileIdx) {
+          throw new TransferError('integrity', 'nack for unknown file');
+        }
         this.queueRetry(msg.blockIdx);
         return;
       case FrameType.Control:
@@ -337,7 +367,7 @@ export class TransferSender {
           version: FRAME_VERSION,
           type: FrameType.BlockData,
           flags: end === bytes.length ? FRAME_FLAG_LAST_IN_BLOCK : 0,
-          fileIdx: 0,
+          fileIdx: this.activeFileIdx,
           blockIdx,
           frameOff: off,
         },
@@ -346,7 +376,7 @@ export class TransferSender {
     }
     await this.sendControl(FrameType.BlockHash, {
       type: FrameType.BlockHash,
-      fileIdx: 0,
+      fileIdx: this.activeFileIdx,
       blockIdx,
       sha256: bytesToHex(await sha256(bytes)),
     });

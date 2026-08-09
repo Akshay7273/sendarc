@@ -18,16 +18,24 @@ type progressSample struct {
 	bytes int64
 }
 
+type progressFile struct {
+	name string
+	size int64
+}
+
 // progress renders acknowledged bytes, a five-second rolling rate, and ETA on stderr.
 type progress struct {
-	mu       sync.Mutex
-	total    int64
-	bytes    int64
-	lastPct  int
-	reported bool
-	paused   bool
-	samples  []progressSample
-	now      func() time.Time
+	mu        sync.Mutex
+	total     int64
+	bytes     int64
+	lastPct   int
+	reported  bool
+	paused    bool
+	samples   []progressSample
+	now       func() time.Time
+	files     []progressFile
+	fileIdx   int
+	fileBytes int64
 }
 
 func newProgress(total int64) *progress {
@@ -35,12 +43,26 @@ func newProgress(total int64) *progress {
 }
 
 func newProgressWithClock(total int64, now func() time.Time) *progress {
-	return &progress{total: total, lastPct: -1, now: now}
+	return &progress{total: total, lastPct: -1, fileIdx: -1, now: now}
 }
 
 func (p *progress) setTotal(total int64) {
 	p.mu.Lock()
 	p.total = total
+	p.mu.Unlock()
+}
+
+func (p *progress) setFiles(files []progressFile) {
+	p.mu.Lock()
+	p.files = append([]progressFile(nil), files...)
+	p.mu.Unlock()
+}
+
+func (p *progress) reportFile(fileIdx int, fileBytes, acknowledgedBytes int64) {
+	p.mu.Lock()
+	p.fileIdx = fileIdx
+	p.fileBytes = fileBytes
+	p.reportLocked(acknowledgedBytes)
 	p.mu.Unlock()
 }
 
@@ -60,6 +82,10 @@ func (p *progress) setState(state wire.TransferState) {
 func (p *progress) report(n int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.reportLocked(n)
+}
+
+func (p *progress) reportLocked(n int64) {
 	if n < p.bytes {
 		return
 	}
@@ -79,6 +105,10 @@ func (p *progress) report(n int64) {
 	detail := "calculating speed"
 	if rate > 0 {
 		detail = fmt.Sprintf("%s · %s", formatRate(rate), formatETA(eta))
+	}
+	if p.fileIdx >= 0 && p.fileIdx < len(p.files) {
+		file := p.files[p.fileIdx]
+		detail = fmt.Sprintf("%s: %s / %s · %s", file.name, humanBytes(p.fileBytes), humanBytes(file.size), detail)
 	}
 	fmt.Fprintf(os.Stderr, "\r  %s / %s (%d%%) · %s", humanBytes(n), humanBytes(p.total), pct, detail)
 }

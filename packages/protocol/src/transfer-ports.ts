@@ -5,7 +5,7 @@
  * in the host; this module defines the contracts plus in-memory helpers for tests.
  */
 
-import type { Fail } from './transfer.js';
+import type { Fail, FileEntry, Manifest } from './transfer.js';
 
 /** Minimal file metadata carried in the manifest. */
 export interface FileMeta {
@@ -29,6 +29,37 @@ export interface Sink {
   write(offset: number, bytes: Uint8Array): void | Promise<void>;
   close(): void | Promise<void>;
   abort(reason?: string): void | Promise<void>;
+}
+
+/** A complete transfer destination that owns one streaming sink per manifest file. */
+export interface Destination {
+  /** Validate capacity and prepare the destination before the first file is opened. */
+  prepare(manifest: Manifest): void | Promise<void>;
+  /** Open one canonical manifest path. Files are opened in ascending index order. */
+  open(file: FileEntry): Sink | Promise<Sink>;
+  /** Commit destination-wide metadata after every file has independently verified. */
+  close(): void | Promise<void>;
+  /** Discard all partial output, including files already completed in this transfer. */
+  abort(reason?: string): void | Promise<void>;
+}
+
+/** Adapt the original one-file sink contract to the destination API. */
+export function singleSinkDestination(sink: Sink): Destination {
+  let opened = false;
+  return {
+    prepare(manifest): void {
+      if (manifest.files.length !== 1) throw new Error('single sink cannot receive multiple files');
+    },
+    open(): Sink {
+      if (opened) throw new Error('single sink opened more than once');
+      opened = true;
+      return sink;
+    },
+    close(): void {},
+    abort(reason?: string): void | Promise<void> {
+      return sink.abort(reason);
+    },
+  };
 }
 
 /** A streaming whole-file hasher producing a `sha256sum`-identical hex string. */
