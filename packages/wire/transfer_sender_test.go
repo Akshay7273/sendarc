@@ -62,7 +62,7 @@ func waitStable(t *testing.T, o *outbox, want int) {
 	t.Fatalf("outbox never stabilized at %d frames (saw %d)", want, o.len())
 }
 
-func TestSenderEmitsGrammarGatedByBlockRecv(t *testing.T) {
+func TestSenderEmitsGrammarGatedByAck(t *testing.T) {
 	keys, err := DeriveTransferKeys(senderMaster())
 	if err != nil {
 		t.Fatal(err)
@@ -107,14 +107,14 @@ func TestSenderEmitsGrammarGatedByBlockRecv(t *testing.T) {
 		peek++
 	}
 
-	// Ack every block so the window drains, then send done.
+	// Ack every verified block so the window drains, then send done.
 	ackCtr := uint64(0)
 	ack := func(blockIdx int) {
-		payload, err := EncodeControl(NewBlockRecv(0, blockIdx))
+		payload, err := EncodeControl(NewAck(0, blockIdx))
 		if err != nil {
 			t.Fatal(err)
 		}
-		frame, err := Seal(keys.J2O, ackCtr, FrameHeaderInput{Version: FrameVersion, Type: FrameBlockRecv}, payload)
+		frame, err := Seal(keys.J2O, ackCtr, FrameHeaderInput{Version: FrameVersion, Type: FrameAck}, payload)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -122,15 +122,14 @@ func TestSenderEmitsGrammarGatedByBlockRecv(t *testing.T) {
 		s.Handle(frame)
 	}
 	ack(0)
+	waitStable(t, &out, 7)
 	ack(1)
+	waitStable(t, &out, 9)
 	ack(2)
 
-	// Let pass 2 drain all blocks and send complete before we confirm done — otherwise done
-	// would settle the sender mid-stream and complete would never be sent. The final 4-byte
-	// block lands on a frame boundary, so like the TS reference it carries no block_hash:
-	// manifest + (block0: 2 data + hash) + (block1: 2 data + hash) + (block2: 1 data) +
-	// complete = 9 frames.
-	waitStable(t, &out, 9)
+	// Every block, including the short final block, carries a hash. The sender emits complete
+	// only after all three verified acknowledgements arrive.
+	waitStable(t, &out, 10)
 
 	donePayload, err := EncodeControl(NewDone())
 	if err != nil {
@@ -222,5 +221,158 @@ func TestSenderRejectsOnReceiverFail(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after receiver fail")
+	}
+}
+
+func TestSenderRetransmitsNackWithFreshCounterAndAckedProgress(t *testing.T) {
+	keys, err := DeriveTransferKeys(senderMaster())
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte{1, 2, 3, 4}
+	var out outbox
+	var progress []int64
+	s := NewSender(SenderOptions{
+		File:       BytesSource(data, FileMeta{Name: "f", Size: int64(len(data))}, 0),
+		Send:       out.push,
+		SendDir:    keys.O2J,
+		RecvDir:    keys.J2O,
+		BlockSize:  8,
+		FrameSize:  4,
+		Window:     1,
+		AckTimeout: time.Second,
+		OnProgress: func(n int64) { progress = append(progress, n) },
+	})
+
+	res := make(chan error, 1)
+	go func() { _, runErr := s.Run(context.Background()); res <- runErr }()
+	waitStable(t, &out, 3)
+	if len(progress) != 0 {
+		t.Fatalf("progress before ack = %v", progress)
+	}
+
+	peerCounter := uint64(0)
+	feed := func(msg ControlMsg) {
+		payload, encodeErr := EncodeControl(msg)
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+		frame, sealErr := Seal(keys.J2O, peerCounter,
+			FrameHeaderInput{Version: FrameVersion, Type: msg.FrameType()}, payload)
+		if sealErr != nil {
+			t.Fatal(sealErr)
+		}
+		peerCounter++
+		s.Handle(frame)
+	}
+	feed(NewNack(0, 0, NackMissing))
+	waitStable(t, &out, 5)
+	feed(NewAck(0, 0))
+	waitStable(t, &out, 6)
+	feed(NewDone())
+	if runErr := <-res; runErr != nil {
+		t.Fatalf("Run: %v", runErr)
+	}
+	if len(progress) != 1 || progress[0] != int64(len(data)) {
+		t.Fatalf("progress = %v, want [%d]", progress, len(data))
+	}
+
+	frames := out.snapshot()
+	wantTypes := []uint8{FrameManifest, FrameBlockData, FrameBlockHash,
+		FrameBlockData, FrameBlockHash, FrameComplete}
+	for i, frame := range frames {
+		opened, openErr := Open(keys.O2J, uint64(i), frame)
+		if openErr != nil {
+			t.Fatalf("open frame %d: %v", i, openErr)
+		}
+		if opened.Header.Type != wantTypes[i] {
+			t.Errorf("frame %d type = %d, want %d", i, opened.Header.Type, wantTypes[i])
+		}
+	}
+	if string(frames[1]) == string(frames[3]) {
+		t.Error("retransmitted ciphertext reused the original nonce")
+	}
+}
+
+func TestSenderPauseResumeStopsNewData(t *testing.T) {
+	keys, err := DeriveTransferKeys(senderMaster())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out outbox
+	var states []TransferState
+	s := NewSender(SenderOptions{
+		File:          BytesSource([]byte{1, 2, 3, 4}, FileMeta{Name: "f", Size: 4}, 0),
+		Send:          out.push,
+		SendDir:       keys.O2J,
+		RecvDir:       keys.J2O,
+		BlockSize:     8,
+		FrameSize:     4,
+		OnStateChange: func(state TransferState) { states = append(states, state) },
+	})
+	if err := s.Pause(); err != nil {
+		t.Fatal(err)
+	}
+	res := make(chan error, 1)
+	go func() { _, runErr := s.Run(context.Background()); res <- runErr }()
+	waitStable(t, &out, 2) // pause control + manifest
+	if err := s.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	waitStable(t, &out, 5) // resume control + data + hash
+
+	peerCounter := uint64(0)
+	for _, msg := range []ControlMsg{NewAck(0, 0), NewDone()} {
+		if _, ok := msg.(*Done); ok {
+			waitStable(t, &out, 6) // complete precedes done
+		}
+		payload, encodeErr := EncodeControl(msg)
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+		frame, sealErr := Seal(keys.J2O, peerCounter,
+			FrameHeaderInput{Version: FrameVersion, Type: msg.FrameType()}, payload)
+		if sealErr != nil {
+			t.Fatal(sealErr)
+		}
+		peerCounter++
+		s.Handle(frame)
+	}
+	if runErr := <-res; runErr != nil {
+		t.Fatalf("Run: %v", runErr)
+	}
+	if len(states) != 2 || states[0] != TransferPaused || states[1] != TransferRunning {
+		t.Fatalf("states = %v, want [paused running]", states)
+	}
+}
+
+func TestSenderBoundsTimeoutRetries(t *testing.T) {
+	keys, err := DeriveTransferKeys(senderMaster())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out outbox
+	s := NewSender(SenderOptions{
+		File:       BytesSource([]byte{1, 2, 3, 4}, FileMeta{Name: "f", Size: 4}, 0),
+		Send:       out.push,
+		SendDir:    keys.O2J,
+		RecvDir:    keys.J2O,
+		BlockSize:  8,
+		FrameSize:  4,
+		AckTimeout: 5 * time.Millisecond,
+		MaxRetries: 1,
+	})
+	res := make(chan error, 1)
+	go func() { _, runErr := s.Run(context.Background()); res <- runErr }()
+	select {
+	case runErr := <-res:
+		if runErr == nil || !strings.Contains(runErr.Error(), string(FailRetryExhausted)) {
+			t.Fatalf("Run error = %v, want retry_exhausted", runErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not stop after bounded retries")
+	}
+	if out.len() != 6 { // manifest + initial data/hash + one retry data/hash + fail
+		t.Fatalf("outbox has %d frames, want 6", out.len())
 	}
 }
