@@ -18,14 +18,19 @@ const FrameVersion uint8 = 1
 // Layout (big-endian):
 //
 //	version(u8) type(u8) flags(u8) reserved(u8)
-//	fileIdx(u16) blockIdx(u32) frameOff(u16) len(u16) reserved(u16)
+//	fileIdx(u16) blockIdx(u32) frameOff(u32) len(u16)
+//
+// FrameOff is a byte offset within the block, so it must span the whole block: at the
+// default 1 MiB block a 16 KiB frame reaches offset ~1 MiB, far past u16. It is u32
+// (not u16, as an earlier draft miscalculated), which the header absorbs by dropping the
+// former trailing reserved(u16) — the header stays a fixed 16 bytes.
 type FrameHeader struct {
 	Version  uint8
 	Type     uint8
 	Flags    uint8
 	FileIdx  uint16
 	BlockIdx uint32
-	FrameOff uint16 // byte offset within the block, not the file
+	FrameOff uint32 // byte offset within the block, not the file
 	Len      uint16 // ciphertext payload length
 }
 
@@ -53,9 +58,8 @@ func encodeFrameHeader(h FrameHeader) []byte {
 	buf[3] = 0 // reserved
 	binary.BigEndian.PutUint16(buf[4:6], h.FileIdx)
 	binary.BigEndian.PutUint32(buf[6:10], h.BlockIdx)
-	binary.BigEndian.PutUint16(buf[10:12], h.FrameOff)
-	binary.BigEndian.PutUint16(buf[12:14], h.Len)
-	// buf[14:16] reserved tail — keeps the header at a fixed 16 bytes
+	binary.BigEndian.PutUint32(buf[10:14], h.FrameOff)
+	binary.BigEndian.PutUint16(buf[14:16], h.Len)
 	return buf
 }
 
@@ -70,7 +74,7 @@ func decodeFrameHeader(buf []byte) (FrameHeader, error) {
 		Flags:    buf[2],
 		FileIdx:  binary.BigEndian.Uint16(buf[4:6]),
 		BlockIdx: binary.BigEndian.Uint32(buf[6:10]),
-		FrameOff: binary.BigEndian.Uint16(buf[10:12]),
-		Len:      binary.BigEndian.Uint16(buf[12:14]),
+		FrameOff: binary.BigEndian.Uint32(buf[10:14]),
+		Len:      binary.BigEndian.Uint16(buf[14:16]),
 	}, nil
 }
