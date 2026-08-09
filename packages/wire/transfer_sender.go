@@ -120,7 +120,7 @@ func (s *Sender) Run(ctx context.Context) (string, error) {
 	go func() {
 		select {
 		case <-ctx.Done():
-			s.cancelLocal(ctx.Err())
+			s.cancelFromContext(ctx.Err())
 		case <-stop:
 		}
 	}()
@@ -515,6 +515,19 @@ func (s *Sender) fail(err error) {
 
 func (s *Sender) cancelLocal(cause error) {
 	s.fail(NewTransferError(FailCanceled, cause.Error()))
+}
+
+func (s *Sender) cancelFromContext(cause error) {
+	sent := make(chan struct{})
+	go func() {
+		_ = s.sendControl(NewControl(ControlCancel))
+		close(sent)
+	}()
+	select {
+	case <-sent:
+	case <-time.After(250 * time.Millisecond):
+	}
+	s.cancelLocal(cause)
 }
 
 func (s *Sender) clearTimersLocked() {

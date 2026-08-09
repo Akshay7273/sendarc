@@ -22,6 +22,8 @@ WebRTC connection, and streams the file without loading it all into memory.
   instead of being uploaded to server-side storage.
 - **Streams large files with bounded memory.** Fixed-size blocks, transport backpressure,
   and a bounded in-flight window keep memory use independent of file size.
+- **Reliable and controllable.** Verified block acknowledgements drive progress and recovery;
+  missing blocks are retried, and either peer can pause, resume, or cancel a transfer.
 - **Verifiable completion.** Every block is authenticated and hashed; the final streaming
   SHA-256 digest is compatible with `sha256sum`.
 - **Browser and CLI interoperability.** Send or receive with either client using the same

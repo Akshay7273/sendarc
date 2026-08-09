@@ -1,0 +1,171 @@
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"math"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	clitransfer "github.com/sendarc/cli/internal/transfer"
+	"github.com/sendarc/wire"
+)
+
+type progressSample struct {
+	at    time.Time
+	bytes int64
+}
+
+// progress renders acknowledged bytes, a five-second rolling rate, and ETA on stderr.
+type progress struct {
+	mu       sync.Mutex
+	total    int64
+	bytes    int64
+	lastPct  int
+	reported bool
+	paused   bool
+	samples  []progressSample
+	now      func() time.Time
+}
+
+func newProgress(total int64) *progress {
+	return newProgressWithClock(total, time.Now)
+}
+
+func newProgressWithClock(total int64, now func() time.Time) *progress {
+	return &progress{total: total, lastPct: -1, now: now}
+}
+
+func (p *progress) setTotal(total int64) {
+	p.mu.Lock()
+	p.total = total
+	p.mu.Unlock()
+}
+
+func (p *progress) setState(state wire.TransferState) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.paused = state == wire.TransferPaused
+	if state == wire.TransferRunning {
+		p.samples = nil
+	}
+	if state == wire.TransferPaused {
+		p.reported = true
+		fmt.Fprintln(os.Stderr, "\n  Paused — buffered network data may still drain.")
+	}
+}
+
+func (p *progress) report(n int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if n < p.bytes {
+		return
+	}
+	p.bytes = n
+	p.reported = true
+	p.recordSample()
+	if p.total <= 0 {
+		fmt.Fprintf(os.Stderr, "\r  %s", humanBytes(n))
+		return
+	}
+	pct := int(n * 100 / p.total)
+	if pct == p.lastPct {
+		return
+	}
+	p.lastPct = pct
+	rate, eta := p.rateAndETA()
+	detail := "calculating speed"
+	if rate > 0 {
+		detail = fmt.Sprintf("%s · %s", formatRate(rate), formatETA(eta))
+	}
+	fmt.Fprintf(os.Stderr, "\r  %s / %s (%d%%) · %s", humanBytes(n), humanBytes(p.total), pct, detail)
+}
+
+func (p *progress) recordSample() {
+	if p.paused {
+		return
+	}
+	now := p.now()
+	p.samples = append(p.samples, progressSample{at: now, bytes: p.bytes})
+	cutoff := now.Add(-5 * time.Second)
+	for len(p.samples) > 2 && !p.samples[1].at.After(cutoff) {
+		p.samples = p.samples[1:]
+	}
+}
+
+func (p *progress) rateAndETA() (float64, time.Duration) {
+	if len(p.samples) < 2 {
+		return 0, 0
+	}
+	first := p.samples[0]
+	last := p.samples[len(p.samples)-1]
+	elapsed := last.at.Sub(first.at).Seconds()
+	if elapsed <= 0 || last.bytes <= first.bytes {
+		return 0, 0
+	}
+	rate := float64(last.bytes-first.bytes) / elapsed
+	remaining := p.total - p.bytes
+	if remaining < 0 {
+		remaining = 0
+	}
+	return rate, time.Duration(float64(time.Second) * float64(remaining) / rate)
+}
+
+func (p *progress) finish() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.reported {
+		fmt.Fprintln(os.Stderr)
+	}
+}
+
+func formatRate(bytesPerSecond float64) string {
+	switch {
+	case bytesPerSecond >= 1<<20:
+		return fmt.Sprintf("%.1f MiB/s", bytesPerSecond/(1<<20))
+	case bytesPerSecond >= 1<<10:
+		return fmt.Sprintf("%.1f KiB/s", bytesPerSecond/(1<<10))
+	default:
+		return fmt.Sprintf("%.0f B/s", bytesPerSecond)
+	}
+}
+
+func formatETA(eta time.Duration) string {
+	seconds := int64(math.Ceil(eta.Seconds()))
+	if seconds < 60 {
+		return fmt.Sprintf("%ds remaining", seconds)
+	}
+	return fmt.Sprintf("%dm %ds remaining", seconds/60, seconds%60)
+}
+
+// terminalControls enables line-oriented controls only for an interactive stdin. Piped CLI use
+// stays quiet and non-blocking.
+func terminalControls() func(clitransfer.Controls) {
+	return func(controls clitransfer.Controls) {
+		info, err := os.Stdin.Stat()
+		if err != nil || info.Mode()&os.ModeCharDevice == 0 {
+			return
+		}
+		fmt.Fprintln(os.Stderr, "Controls: p + Enter pause · r + Enter resume · c + Enter cancel")
+		go func() {
+			scanner := bufio.NewScanner(os.Stdin)
+			for scanner.Scan() {
+				switch strings.ToLower(strings.TrimSpace(scanner.Text())) {
+				case "p", "pause":
+					if err := controls.Pause(); err != nil {
+						fmt.Fprintf(os.Stderr, "\nPause failed: %v\n", err)
+					}
+				case "r", "resume":
+					if err := controls.Resume(); err != nil {
+						fmt.Fprintf(os.Stderr, "\nResume failed: %v\n", err)
+					}
+				case "c", "cancel":
+					_ = controls.Cancel("canceled from terminal")
+					return
+				}
+			}
+		}()
+	}
+}

@@ -15,6 +15,7 @@ import type { SignalChannel } from '../signaling/client.js';
 import { SignalAuthenticator } from '../transfer/authed-signaling.js';
 import { createPeer, type Peer } from '../transfer/peer.js';
 import { ChannelWriter } from '../transfer/channel-writer.js';
+import { ProgressTracker, type TransferSnapshot } from '../transfer/progress.js';
 import { readOpfsFile } from '../transfer/sink.js';
 import type { HostToWorker, SessionCrypto, WorkerToHost } from '../transfer/wire.js';
 
@@ -32,8 +33,14 @@ export interface TransferController {
   progress(): number;
   /** The declared total size in bytes, once known (immediately when sending, on manifest when receiving). */
   total(): number | undefined;
+  /** A coherent acknowledged-byte, smoothed-rate, ETA, and run-state snapshot. */
+  snapshot(): TransferSnapshot;
   /** Resolves when the transfer completes and verifies; rejects on any failure. */
   readonly done: Promise<TransferOutcome>;
+  /** Stop producing new data frames; already-buffered transport bytes may drain. */
+  pause(): void;
+  /** Continue a paused transfer. */
+  resume(): void;
   /** Abort the transfer and tear down the worker, peer, and socket. Idempotent. */
   cancel(reason?: string): void;
 }
@@ -78,11 +85,13 @@ function run(
   signaling: SignalChannel,
   spec: RunSpec,
 ): TransferController {
-  let done = 0;
   let total = spec.total;
+  const progress = new ProgressTracker(total);
   let settled = false;
   let peer: Peer | undefined;
   let worker: Worker | undefined;
+  let writer: ChannelWriter | undefined;
+  let cancelTimer: ReturnType<typeof setTimeout> | undefined;
 
   let resolveDone!: (o: TransferOutcome) => void;
   let rejectDone!: (err: Error) => void;
@@ -92,6 +101,7 @@ function run(
   });
 
   const cleanup = (): void => {
+    clearTimeout(cancelTimer);
     worker?.terminate();
     peer?.close();
     signaling.close();
@@ -131,7 +141,7 @@ function run(
       const ready = workerReady(w);
 
       const channel = await p.channel;
-      const writer = new ChannelWriter(channel);
+      writer = new ChannelWriter(channel);
       await ready;
 
       // Worker → host events.
@@ -139,19 +149,30 @@ function run(
         const msg = ev.data as WorkerToHost;
         switch (msg.kind) {
           case 'outbound-frame':
-            writer.write(msg.frame);
+            writer?.write(msg.frame);
             return;
           case 'progress':
-            done = msg.bytes;
+            progress.update(msg.bytes);
             return;
           case 'manifest':
             total = msg.size;
+            progress.setTotal(msg.size);
+            return;
+          case 'state':
+            progress.setState(msg.state);
             return;
           case 'done':
             void completeReceive(msg.name, msg.size, msg.digest);
             return;
           case 'error':
-            fail(new Error(msg.message));
+            if (msg.reason === 'canceled') {
+              void (async () => {
+                await writer?.drain();
+                fail(new Error(msg.message));
+              })();
+            } else {
+              fail(new Error(msg.message));
+            }
             return;
           case 'ready':
             return;
@@ -185,12 +206,29 @@ function run(
   }
 
   return {
-    progress: () => done,
+    progress: () => progress.snapshot().bytes,
     total: () => total,
+    snapshot: () => progress.snapshot(),
     done: donePromise,
+    pause: () => {
+      if (settled || progress.snapshot().state === 'paused') return;
+      progress.setState('paused');
+      worker?.postMessage({ kind: 'control', op: 'pause' } satisfies HostToWorker);
+    },
+    resume: () => {
+      if (settled || progress.snapshot().state !== 'paused') return;
+      progress.setState('running');
+      worker?.postMessage({ kind: 'control', op: 'resume' } satisfies HostToWorker);
+    },
     cancel: (reason = 'cancelled') => {
-      worker?.postMessage({ kind: 'cancel', reason } satisfies HostToWorker);
-      fail(new Error(reason));
+      if (settled) return;
+      progress.setState('canceled');
+      if (!worker) {
+        fail(new Error(reason));
+        return;
+      }
+      worker.postMessage({ kind: 'control', op: 'cancel' } satisfies HostToWorker);
+      cancelTimer = setTimeout(() => fail(new Error(reason)), 1000);
     },
   };
 }

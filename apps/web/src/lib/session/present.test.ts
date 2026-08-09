@@ -6,9 +6,11 @@ import {
   describeError,
   humanBytes,
   inviteLinkFor,
+  etaLabel,
   phaseLabel,
   progressLabel,
   progressPercent,
+  rateLabel,
   sasFingerprint,
 } from './present.js';
 
@@ -118,5 +120,13 @@ describe('progressLabel', () => {
   });
   it('shows 100% at completion', () => {
     expect(progressLabel(4_194_304, 4_194_304)).toBe('4 MiB / 4 MiB (100%)');
+  });
+});
+
+describe('transfer rate and ETA labels', () => {
+  it('formats acknowledged throughput and remaining time', () => {
+    expect(rateLabel(1024)).toBe('1.0 KiB/s');
+    expect(etaLabel(42)).toBe('42s remaining');
+    expect(etaLabel(125)).toBe('2m 5s remaining');
   });
 });

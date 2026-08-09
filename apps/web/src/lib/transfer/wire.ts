@@ -5,7 +5,7 @@
  * this protocol are exercised end-to-end by the Node loopback test, so the shapes are the contract.
  */
 
-import type { DirectionalKey } from '@sendarc/protocol';
+import type { ControlOp, DirectionalKey, TransferRunState } from '@sendarc/protocol';
 
 /** Session crypto state handed to the worker at start — counters continue, never reset. */
 export interface SessionCrypto {
@@ -33,7 +33,12 @@ export interface CancelMsg {
   kind: 'cancel';
   reason?: string;
 }
-export type HostToWorker = StartSendMsg | StartRecvMsg | InboundFrameMsg | CancelMsg;
+export interface TransferControlMsg {
+  kind: 'control';
+  op: ControlOp;
+}
+export type HostToWorker =
+  StartSendMsg | StartRecvMsg | InboundFrameMsg | TransferControlMsg | CancelMsg;
 
 export interface OutboundFrameMsg {
   kind: 'outbound-frame';
@@ -53,6 +58,10 @@ export interface ProgressMsg {
   kind: 'progress';
   bytes: number;
 }
+export interface StateMsg {
+  kind: 'state';
+  state: TransferRunState;
+}
 export interface DoneMsg {
   kind: 'done';
   name: string;
@@ -65,7 +74,7 @@ export interface ErrorMsg {
   message: string;
 }
 export type WorkerToHost =
-  ReadyMsg | OutboundFrameMsg | ManifestMsg | ProgressMsg | DoneMsg | ErrorMsg;
+  ReadyMsg | OutboundFrameMsg | ManifestMsg | ProgressMsg | StateMsg | DoneMsg | ErrorMsg;
 
 /** The slice of Worker / DedicatedWorkerGlobalScope the core needs, so a test can inject a fake. */
 export interface DuplexPort<In, Out> {
