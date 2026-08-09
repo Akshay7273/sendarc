@@ -3,6 +3,7 @@ package rtc
 import (
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/pion/webrtc/v4"
 )
@@ -99,8 +100,23 @@ func (c *DataConn) OnData(handler func(frame []byte)) {
 	close(c.handlerReady)
 }
 
-// Close closes the underlying channel. It is idempotent and unblocks any waiting Send.
+// Close closes the underlying channel. It drains the SCTP send buffer (bounded) so a final
+// frame reaches the wire before teardown, then closes the channel. It is idempotent and unblocks
+// any waiting Send.
 func (c *DataConn) Close() error {
+	// Drain the SCTP send buffer so the final frame (receiver's done, or sender's complete)
+	// actually flushes to the wire before pc.Close() aborts the association — otherwise a
+	// graceful close from the first-finishing peer can starve the last frame. Wait for
+	// BufferedAmount→0 with a timeout so a genuinely stalled transport cannot block forever.
+	deadline := time.Now().Add(5 * time.Second)
+	c.mu.Lock()
+	for !c.closed && c.dc.BufferedAmount() > 0 && time.Now().Before(deadline) {
+		c.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+		c.mu.Lock()
+	}
+	c.mu.Unlock()
+
 	c.shutdown()
 	return c.dc.Close()
 }
