@@ -249,9 +249,6 @@ func (p *peer) tryEnqueue(typ websocket.MessageType, data []byte) bool {
 	case <-p.done:
 		p.releaseQueued(size)
 		return false
-	default:
-		p.releaseQueued(size)
-		return false
 	}
 }
 
