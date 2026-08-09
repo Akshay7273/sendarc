@@ -11,6 +11,7 @@
  */
 
 import type { RendezvousResult } from '@sendarc/protocol';
+import { WakeLockManager } from './wake-lock.js';
 import type { SignalChannel } from '../signaling/client.js';
 import { SignalAuthenticator } from '../transfer/authed-signaling.js';
 import { createPeer, type Peer } from '../transfer/peer.js';
@@ -100,6 +101,7 @@ function run(
 ): TransferController {
   let total = spec.total;
   const progress = new ProgressTracker(total);
+  const wakeLock = new WakeLockManager();
   let settled = false;
   let peer: Peer | undefined;
   let worker: Worker | undefined;
@@ -118,6 +120,7 @@ function run(
 
   const cleanup = (): void => {
     clearTimeout(cancelTimer);
+    wakeLock.setActive(false);
     worker?.terminate();
     peer?.close();
     relay?.close();
@@ -273,6 +276,7 @@ function run(
       // Kick off the transfer in the worker.
       const startMsg = spec.start();
       w.postMessage(startMsg);
+      wakeLock.setActive(true);
     } catch (err) {
       fail(err instanceof Error ? err : new Error(String(err)));
     }
@@ -325,11 +329,13 @@ function run(
       if (settled || progress.snapshot().state === 'paused') return;
       progress.setState('paused');
       worker?.postMessage({ kind: 'control', op: 'pause' } satisfies HostToWorker);
+      wakeLock.setActive(false);
     },
     resume: () => {
       if (settled || progress.snapshot().state !== 'paused') return;
       progress.setState('running');
       worker?.postMessage({ kind: 'control', op: 'resume' } satisfies HostToWorker);
+      wakeLock.setActive(true);
     },
     cancel: (reason = 'cancelled') => {
       if (settled) return;
