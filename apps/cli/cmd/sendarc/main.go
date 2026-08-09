@@ -101,9 +101,11 @@ func runSend(args []string) int {
 			OnCode:    codePrinter(*server),
 			OnPhase:   phasePrinter(rendezvous.RoleOfferer),
 		},
-		Source:     src,
-		OnConnect:  connectPrinter(fmt.Sprintf("Sending %s (%s) …", meta.Name, humanBytes(meta.Size))),
-		OnProgress: progress.report,
+		Source:        src,
+		OnConnect:     connectPrinter(fmt.Sprintf("Sending %s (%s) …", meta.Name, humanBytes(meta.Size))),
+		OnProgress:    progress.report,
+		OnControls:    terminalControls(),
+		OnStateChange: progress.setState,
 	})
 	progress.finish()
 	if err != nil {
@@ -159,7 +161,9 @@ func runReceive(args []string) int {
 			progress.setTotal(file.Size)
 			connectPrinter(fmt.Sprintf("Receiving %s (%s) …", file.Name, humanBytes(file.Size)))()
 		},
-		OnProgress: progress.report,
+		OnProgress:    progress.report,
+		OnControls:    terminalControls(),
+		OnStateChange: progress.setState,
 	})
 	progress.finish()
 	if err != nil {
@@ -229,43 +233,6 @@ func phasePrinter(role rendezvous.Role) func(rendezvous.Phase) {
 // open, just before the bytes begin to move.
 func connectPrinter(line string) func() {
 	return func() { fmt.Fprintln(os.Stderr, line) }
-}
-
-// progress renders a single, rewriting transfer-progress line on stderr. The total may be
-// unknown at first (the receiver learns it from the manifest), in which case only the byte
-// count is shown until setTotal is called.
-type progress struct {
-	total    int64
-	lastPct  int
-	reported bool
-}
-
-func newProgress(total int64) *progress { return &progress{total: total, lastPct: -1} }
-
-func (p *progress) setTotal(total int64) { p.total = total }
-
-// report prints cumulative bytes. It is invoked from the engine goroutine while the main
-// goroutine blocks in transfer.Run, so it needs no locking; it throttles to whole-percent
-// changes to keep the terminal quiet.
-func (p *progress) report(n int64) {
-	p.reported = true
-	if p.total <= 0 {
-		fmt.Fprintf(os.Stderr, "\r  %s", humanBytes(n))
-		return
-	}
-	pct := int(n * 100 / p.total)
-	if pct == p.lastPct {
-		return
-	}
-	p.lastPct = pct
-	fmt.Fprintf(os.Stderr, "\r  %s / %s (%d%%)", humanBytes(n), humanBytes(p.total), pct)
-}
-
-// finish terminates the progress line with a newline if anything was printed on it.
-func (p *progress) finish() {
-	if p.reported {
-		fmt.Fprintln(os.Stderr)
-	}
 }
 
 // handshakeError renders a transfer failure as a human-readable line, translating the

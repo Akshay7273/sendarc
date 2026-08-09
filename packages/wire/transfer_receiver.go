@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // Receiver verifies and commits blocks before acknowledging them. A valid block that arrives
@@ -82,7 +83,7 @@ func (r *Receiver) Wait(ctx context.Context) (ReceiveResult, error) {
 	select {
 	case <-r.done:
 	case <-ctx.Done():
-		r.abortWith(NewTransferError(FailCanceled, ctx.Err().Error()), true)
+		r.cancelFromContext(ctx.Err())
 		<-r.done
 	}
 	r.mu.Lock()
@@ -390,6 +391,19 @@ func (r *Receiver) abortWith(err *TransferError, notifyPeer bool) {
 	}
 	_ = r.o.Sink.Abort(string(err.Reason))
 	close(r.done)
+}
+
+func (r *Receiver) cancelFromContext(cause error) {
+	sent := make(chan struct{})
+	go func() {
+		_ = r.sendControl(NewControl(ControlCancel))
+		close(sent)
+	}()
+	select {
+	case <-sent:
+	case <-time.After(250 * time.Millisecond):
+	}
+	r.abortWith(NewTransferError(FailCanceled, cause.Error()), false)
 }
 
 func (r *Receiver) settle(result ReceiveResult) {

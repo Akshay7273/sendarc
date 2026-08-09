@@ -24,6 +24,14 @@ class FakePort implements DuplexPort<HostToWorker, WorkerToHost> {
   }
 }
 
+async function waitFor(check: () => boolean): Promise<void> {
+  const deadline = Date.now() + 1000;
+  while (!check()) {
+    if (Date.now() >= deadline) throw new Error('timed out waiting for worker state');
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+}
+
 describe('transfer-core loopback', () => {
   it('completes a transfer through the worker message protocol', async () => {
     const keys = await deriveTransferKeys(new Uint8Array(32).fill(7));
@@ -37,10 +45,12 @@ describe('transfer-core loopback', () => {
     let senderDone: (WorkerToHost & { kind: 'done' }) | undefined;
     let receiverDone: (WorkerToHost & { kind: 'done' }) | undefined;
     let manifest: (WorkerToHost & { kind: 'manifest' }) | undefined;
+    const senderStates: string[] = [];
 
     sendPort.onWorkerOut = (m) => {
       if (m.kind === 'outbound-frame') recvPort.toWorker({ kind: 'inbound-frame', frame: m.frame });
       else if (m.kind === 'done') senderDone = m;
+      else if (m.kind === 'state') senderStates.push(m.state);
     };
     recvPort.onWorkerOut = (m) => {
       if (m.kind === 'outbound-frame') sendPort.toWorker({ kind: 'inbound-frame', frame: m.frame });
@@ -73,6 +83,9 @@ describe('transfer-core loopback', () => {
       sendCounter: 1,
       recvCounter: 1,
     });
+    // Controls may arrive while WebRTC is still negotiating, before the engine is bound. The
+    // worker retains this pause and applies it before the first data block.
+    sendPort.toWorker({ kind: 'control', op: 'pause' });
     sendPort.toWorker({
       kind: 'start-send',
       file,
@@ -83,6 +96,11 @@ describe('transfer-core loopback', () => {
       blockSize: 64 * 1024,
       frameSize: 16 * 1024,
     });
+
+    await waitFor(() => senderStates.includes('paused'));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(senderDone).toBeUndefined();
+    sendPort.toWorker({ kind: 'control', op: 'resume' });
 
     await Promise.all([recvP, sendP]);
 
@@ -95,6 +113,7 @@ describe('transfer-core loopback', () => {
     expect(receiverDone?.size).toBe(bytes.length);
     expect(manifest?.name).toBe('loop.bin');
     expect(manifest?.size).toBe(bytes.length);
+    expect(senderStates).toEqual(['running', 'paused', 'running']);
   });
 
   it('surfaces an integrity failure when a data frame is corrupted in flight', async () => {

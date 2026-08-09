@@ -18,6 +18,8 @@
     phaseLabel,
     progressLabel,
     progressPercent,
+    rateLabel,
+    etaLabel,
     sasFingerprint,
     type ErrorLike,
   } from './lib/session/present.js';
@@ -44,6 +46,9 @@
   let transfer = $state.raw<TransferController | null>(null);
   let sentBytes = $state(0);
   let totalBytes = $state(0);
+  let rateBps = $state(0);
+  let etaSeconds = $state<number | undefined>(undefined);
+  let transferState = $state<'running' | 'paused' | 'canceled'>('running');
   let outcome = $state<TransferOutcome | null>(null);
   let downloadUrl = $state<string | null>(null);
 
@@ -141,9 +146,16 @@
     transfer = ctrl;
     sentBytes = 0;
     totalBytes = ctrl.total() ?? 0;
+    rateBps = 0;
+    etaSeconds = undefined;
+    transferState = 'running';
     progressTimer = setInterval(() => {
-      sentBytes = ctrl.progress();
-      totalBytes = ctrl.total() ?? totalBytes;
+      const snapshot = ctrl.snapshot();
+      sentBytes = snapshot.bytes;
+      totalBytes = snapshot.total ?? totalBytes;
+      rateBps = snapshot.rateBps;
+      etaSeconds = snapshot.etaSeconds;
+      transferState = snapshot.state;
     }, 100);
     ctrl.done.then(
       (result) => {
@@ -190,6 +202,9 @@
     pickedFile = null;
     sentBytes = 0;
     totalBytes = 0;
+    rateBps = 0;
+    etaSeconds = undefined;
+    transferState = 'running';
     outcome = null;
     phase = 'idle';
     code = '';
@@ -280,6 +295,19 @@
           <div class="bar-fill" style={`width:${progressPercent(sentBytes, totalBytes)}%`}></div>
         </div>
         <p class="status" aria-live="polite">{progressLabel(sentBytes, totalBytes)}</p>
+        <p class="transfer-detail" aria-live="polite">
+          {transferState === 'paused'
+            ? 'Paused'
+            : `${rateLabel(rateBps)} · ${etaLabel(etaSeconds)}`}
+        </p>
+        <div class="transfer-controls">
+          {#if transferState === 'paused'}
+            <button class="ghost" onclick={() => transfer?.resume()}>Resume</button>
+          {:else}
+            <button class="ghost" onclick={() => transfer?.pause()}>Pause</button>
+          {/if}
+          <button class="cancel" onclick={() => transfer?.cancel()}>Cancel transfer</button>
+        </div>
       {:else if role === 'offerer'}
         <label class="filepick">
           <span>Choose a file to send</span>
@@ -423,6 +451,20 @@
   .status {
     color: #555;
     margin: 0;
+  }
+  .transfer-detail {
+    color: #666;
+    font-size: 0.9rem;
+    margin: -0.5rem 0 0;
+  }
+  .transfer-controls {
+    display: flex;
+    gap: 0.5rem;
+  }
+  .cancel {
+    background: #fff5f5;
+    border-color: #ffc9c9;
+    color: #c92a2a;
   }
 
   .result h2 {

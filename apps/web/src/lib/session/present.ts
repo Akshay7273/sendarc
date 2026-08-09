@@ -86,6 +86,23 @@ export function progressLabel(done: number, total: number): string {
   return `${humanBytes(done)} / ${humanBytes(total)} (${progressPercent(done, total)}%)`;
 }
 
+/** Smoothed acknowledged throughput for the transfer detail line. */
+export function rateLabel(bytesPerSecond: number): string {
+  if (bytesPerSecond <= 0) return 'Calculating speed…';
+  if (bytesPerSecond >= 2 ** 20) return `${(bytesPerSecond / 2 ** 20).toFixed(1)} MiB/s`;
+  if (bytesPerSecond >= 2 ** 10) return `${(bytesPerSecond / 2 ** 10).toFixed(1)} KiB/s`;
+  return `${Math.round(bytesPerSecond)} B/s`;
+}
+
+/** Compact remaining-time label. */
+export function etaLabel(seconds: number | undefined): string {
+  if (seconds === undefined) return 'Estimating time remaining…';
+  if (seconds < 60) return `${seconds}s remaining`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return `${minutes}m ${rest}s remaining`;
+}
+
 /** Turn a rendezvous failure into a plain-language line, translating the stable codes. */
 export function describeError(e: ErrorLike): string {
   switch (e.code) {
@@ -108,6 +125,7 @@ export function describeError(e: ErrorLike): string {
     case 'rate_limited':
       return 'Too many attempts. Wait a moment and try again.';
     case 'aborted':
+    case 'canceled':
       return 'Cancelled.';
     default:
       return e.message || 'The connection failed.';

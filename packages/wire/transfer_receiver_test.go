@@ -335,6 +335,37 @@ func TestReceiverRequestsMissingAndRecoversReorderedBlocks(t *testing.T) {
 	}
 }
 
+func TestReceiverContextCancellationNotifiesPeer(t *testing.T) {
+	keys, err := DeriveTransferKeys(senderMaster())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back outbox
+	sink := &MemorySink{}
+	r := NewReceiver(ReceiverOptions{
+		Send: back.push, SendDir: keys.J2O, RecvDir: keys.O2J, Sink: sink,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = r.Wait(ctx)
+	if err == nil || !strings.Contains(err.Error(), string(FailCanceled)) {
+		t.Fatalf("Wait error = %v, want canceled", err)
+	}
+	frames := back.snapshot()
+	if len(frames) != 1 {
+		t.Fatalf("back-channel has %d frames, want cancel control", len(frames))
+	}
+	opened, openErr := Open(keys.J2O, 0, frames[0])
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	msg, decodeErr := DecodeControl(opened.Plaintext)
+	control, ok := msg.(*Control)
+	if decodeErr != nil || !ok || control.Op != ControlCancel {
+		t.Fatalf("cancellation frame = %#v, err=%v", msg, decodeErr)
+	}
+}
+
 func idxOf(xs []string, want string) int {
 	for i, x := range xs {
 		if x == want {
