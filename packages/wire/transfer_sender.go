@@ -236,15 +236,19 @@ func (s *Sender) Handle(frame []byte) {
 		s.mu.Unlock()
 		return
 	}
-	ctr := s.recvCounter
-	s.recvCounter++
 	s.mu.Unlock()
 
-	opened, err := Open(s.o.RecvDir, ctr, frame)
+	opened, err := OpenSequenced(s.o.RecvDir, s.recvCounter, frame)
 	if err != nil {
+		if errors.Is(err, ErrFrameReplay) {
+			return
+		}
 		s.fail(NewTransferError(FailIntegrity, err.Error()))
 		return
 	}
+	s.mu.Lock()
+	s.recvCounter = opened.Counter + 1
+	s.mu.Unlock()
 	msg, err := DecodeControl(opened.Plaintext)
 	if err != nil {
 		s.fail(NewTransferError(FailIntegrity, err.Error()))

@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { deriveMaster, deriveTransferKeys } from './keyschedule.js';
-import { seal, open, type FrameHeaderInput } from './aead.js';
+import { FrameReplayError, open, openSequenced, seal, type FrameHeaderInput } from './aead.js';
+import { FRAME_COUNTER_BYTES } from './constants.js';
 import { FrameType } from './transfer.js';
 import { bytesToHex, hexToBytes, utf8 } from './bytes.js';
 
@@ -65,7 +66,9 @@ describe('AEAD frame codec — SendArc deterministic vector', () => {
   it('seals the caps payload to the committed frame bytes', async () => {
     const { o2j } = await deriveTransferKeys(hexToBytes(sa.keyschedule.master));
     const frame = await seal(o2j, sa.aead.counter, CAPS_HEADER, utf8(sa.aead.plaintextUtf8));
-    expect(bytesToHex(frame.slice(0, 16))).toBe(sa.aead.headerHex);
+    expect(bytesToHex(frame.slice(FRAME_COUNTER_BYTES, FRAME_COUNTER_BYTES + 16))).toBe(
+      sa.aead.headerHex,
+    );
     expect(bytesToHex(frame)).toBe(sa.aead.frameHex);
   });
 
@@ -95,6 +98,14 @@ describe('AEAD frame codec — round-trip and tamper detection', () => {
     await expect(open(o2j, 2, frame)).rejects.toThrow();
   });
 
+  it('accepts an authenticated forward gap and reports an old counter as replay', async () => {
+    const { o2j } = await deriveTransferKeys(hexToBytes(sa.keyschedule.master));
+    const frame = await seal(o2j, 9, CAPS_HEADER, utf8('after switch'));
+    const opened = await openSequenced(o2j, 4, frame);
+    expect(opened.counter).toBe(9);
+    await expect(openSequenced(o2j, 10, frame)).rejects.toBeInstanceOf(FrameReplayError);
+  });
+
   it('rejects a frame opened under the other direction key', async () => {
     const { o2j, j2o } = await deriveTransferKeys(hexToBytes(sa.keyschedule.master));
     const frame = await seal(o2j, 0, CAPS_HEADER, utf8('payload'));
@@ -111,7 +122,7 @@ describe('AEAD frame codec — round-trip and tamper detection', () => {
   it('rejects a frame with a tampered header (AAD) byte', async () => {
     const { o2j } = await deriveTransferKeys(hexToBytes(sa.keyschedule.master));
     const frame = await seal(o2j, 0, CAPS_HEADER, utf8('payload'));
-    frame[1] ^= 0x01; // flip the type byte inside the authenticated header
+    frame[FRAME_COUNTER_BYTES + 1] ^= 0x01; // flip the type byte inside authenticated AAD
     await expect(open(o2j, 0, frame)).rejects.toThrow();
   });
 
