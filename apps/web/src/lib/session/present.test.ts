@@ -59,6 +59,11 @@ describe('humanBytes', () => {
     expect(humanBytes(1500)).toBe('1500 B');
     expect(humanBytes(0)).toBe('0 B');
   });
+
+  it('does not overflow at or above the signed 32-bit boundary', () => {
+    expect(humanBytes(2 * 2 ** 30)).toBe('2048 MiB');
+    expect(humanBytes(5 * 2 ** 30)).toBe('5120 MiB');
+  });
 });
 
 describe('describeCaps', () => {
