@@ -36,17 +36,18 @@ type FrameHeader struct {
 
 // Frame type tags (the Type byte). Mirrors FrameType in transfer.ts.
 const (
-	FrameCaps      uint8 = 1
-	FrameManifest  uint8 = 2
-	FrameBlockData uint8 = 3
-	FrameBlockHash uint8 = 4
-	FrameBlockRecv uint8 = 5
-	FrameAck       uint8 = 6
-	FrameNack      uint8 = 7
-	FrameControl   uint8 = 8
-	FrameComplete  uint8 = 9
-	FrameDone      uint8 = 10
-	FrameFail      uint8 = 11
+	FrameCaps        uint8 = 1
+	FrameManifest    uint8 = 2
+	FrameBlockData   uint8 = 3
+	FrameBlockHash   uint8 = 4
+	FrameBlockRecv   uint8 = 5
+	FrameAck         uint8 = 6
+	FrameNack        uint8 = 7
+	FrameControl     uint8 = 8
+	FrameComplete    uint8 = 9
+	FrameDone        uint8 = 10
+	FrameFail        uint8 = 11
+	FrameResumeState uint8 = 12
 )
 
 // encodeFrameHeader encodes h into a fresh 16-byte buffer.
