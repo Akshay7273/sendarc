@@ -13,17 +13,28 @@ import {
   TransferReceiver,
   TransferError,
   type Digest,
+  type Destination,
   type FileEntry,
   type FileSource,
   type Sink,
 } from '@sendarc/protocol';
-import type { DuplexPort, HostToWorker, StartSendMsg, StartRecvMsg, WorkerToHost } from './wire.js';
+import type {
+  DuplexPort,
+  HostToWorker,
+  ReceiveDestinationSpec,
+  StartSendMsg,
+  StartRecvMsg,
+  WorkerToHost,
+} from './wire.js';
+import type { BrowserDestination } from './sink.js';
 
 export interface TransferCoreDeps {
   /** Fresh streaming whole-file hasher (matches `sha256sum`). One live digest per call. */
   createDigest(): Digest;
   /** Open the receive destination once the manifest names the file. */
   createSink(file: FileEntry): Sink | Promise<Sink>;
+  /** Browser worker destination selection; tests may continue supplying createSink only. */
+  createDestination?(spec: ReceiveDestinationSpec): BrowserDestination;
   /** Adapt the sender's File into a re-callable byte source. */
   fileSource(file: File): FileSource;
 }
@@ -111,9 +122,10 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
 
     async function startSend(msg: StartSendMsg): Promise<void> {
       try {
-        const source = deps.fileSource(msg.file);
+        const sources = msg.files.map((file) => deps.fileSource(file));
+        let manifestFiles: FileEntry[] = [];
         const sender = new TransferSender({
-          file: source,
+          files: sources,
           send,
           sendDir: msg.sendDir,
           recvDir: msg.recvDir,
@@ -121,6 +133,9 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
           recvCounterStart: msg.recvCounter,
           createDigest: deps.createDigest,
           onProgress: (bytes) => post({ kind: 'progress', bytes }),
+          onManifest: (manifest) => {
+            manifestFiles = manifest.files;
+          },
           onStateChange: (state) => post({ kind: 'state', state }),
           ...(msg.blockSize !== undefined ? { blockSize: msg.blockSize } : {}),
           ...(msg.frameSize !== undefined ? { frameSize: msg.frameSize } : {}),
@@ -128,7 +143,16 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
         });
         bind(sender);
         const digest = await sender.run();
-        post({ kind: 'done', name: source.meta.name, size: source.meta.size, digest });
+        post({
+          kind: 'done',
+          files: manifestFiles.map((file) => ({
+            name: file.name,
+            size: file.size,
+            digest: file.fileDigest,
+          })),
+          totalSize: manifestFiles.reduce((total, file) => total + file.size, 0),
+          digest,
+        });
         resolve();
       } catch (e) {
         fail(e);
@@ -137,7 +161,9 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
 
     async function startRecv(_msg: StartRecvMsg): Promise<void> {
       try {
-        const deferred = new DeferredSink();
+        const destination = deps.createDestination
+          ? deps.createDestination(_msg.destination)
+          : sinkFactoryDestination(deps.createSink);
         const receiver = new TransferReceiver({
           send,
           sendDir: _msg.sendDir,
@@ -145,21 +171,34 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
           sendCounterStart: _msg.sendCounter,
           recvCounterStart: _msg.recvCounter,
           createDigest: deps.createDigest,
-          sink: deferred,
+          destination,
           onProgress: (bytes) => post({ kind: 'progress', bytes }),
           onStateChange: (state) => post({ kind: 'state', state }),
-          onManifest: async (file) => {
-            deferred.attach(await deps.createSink(file));
-            post({ kind: 'manifest', name: file.name, size: file.size, mime: file.mime });
+          onManifestSet: (manifest) => {
+            post({
+              kind: 'manifest',
+              files: manifest.files.map((file) => ({
+                name: file.name,
+                size: file.size,
+                mime: file.mime,
+              })),
+              totalSize: manifest.totalSize,
+            });
           },
         });
         bind(receiver);
         const result = await receiver.done;
+        const output = isBrowserDestination(destination) ? destination.result() : undefined;
         post({
           kind: 'done',
-          name: result.file.name,
-          size: result.file.size,
+          files: result.files.map((file, idx) => ({
+            name: file.name,
+            size: file.size,
+            digest: result.digests[idx]!,
+          })),
+          totalSize: result.totalSize,
           digest: result.digest,
+          ...(output?.kind === 'opfs' ? { output } : {}),
         });
         resolve();
       } catch (e) {
@@ -173,21 +212,26 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
  * A Sink whose destination is opened after construction — the receiver builds it before the
  * manifest arrives, then `onManifest` attaches the real sink before the first verified write.
  */
-class DeferredSink implements Sink {
-  private inner: Sink | undefined;
-  attach(sink: Sink): void {
-    this.inner = sink;
-  }
-  write(offset: number, bytes: Uint8Array): void | Promise<void> {
-    if (!this.inner) throw new TransferError('sink_error', 'sink not opened before write');
-    return this.inner.write(offset, bytes);
-  }
-  close(): void | Promise<void> {
-    return this.inner?.close();
-  }
-  abort(reason?: string): void | Promise<void> {
-    return this.inner?.abort(reason);
-  }
+function sinkFactoryDestination(
+  createSink: (file: FileEntry) => Sink | Promise<Sink>,
+): Destination {
+  const sinks: Sink[] = [];
+  return {
+    prepare: () => {},
+    async open(file) {
+      const sink = await createSink(file);
+      sinks.push(sink);
+      return sink;
+    },
+    close: () => {},
+    async abort(reason) {
+      await Promise.allSettled(sinks.map((sink) => sink.abort(reason)));
+    },
+  };
+}
+
+function isBrowserDestination(destination: Destination): destination is BrowserDestination {
+  return 'result' in destination;
 }
 
 /** A sealed frame's own ArrayBuffer when it fits exactly (the common case), else a fresh copy. */

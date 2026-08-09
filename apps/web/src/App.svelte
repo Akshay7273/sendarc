@@ -4,6 +4,7 @@
 
   import { offer, join, type RendezvousController } from './lib/session/rendezvous.js';
   import type { SignalChannel } from './lib/signaling/client.js';
+  import type { ReceiveDestinationSpec } from './lib/transfer/wire.js';
   import {
     runSend,
     runReceive,
@@ -38,7 +39,9 @@
 
   // Transfer state, live once the handshake settles and the socket is adopted.
   let role = $state<Role | undefined>(undefined);
-  let pickedFile = $state<File | null>(null);
+  let pickedFiles = $state.raw<File[]>([]);
+  let receiveTarget = $state<'auto' | 'direct-file' | 'direct-directory'>('auto');
+  let receiveDestination = $state.raw<ReceiveDestinationSpec>({ kind: 'auto' });
   // TransferController is an imperative identity-bearing object (methods + a terminal Promise),
   // not a reactive data model. Deep-proxying it makes `transfer !== ctrl` even immediately after
   // assignment, so the stale-controller guard below discards the real completion callback and
@@ -58,8 +61,28 @@
   let copyTimer: ReturnType<typeof setTimeout> | undefined;
   let progressTimer: ReturnType<typeof setInterval> | undefined;
 
+  interface PickerWindow extends Window {
+    showSaveFilePicker?: () => Promise<FileSystemFileHandle>;
+    showDirectoryPicker?: () => Promise<FileSystemDirectoryHandle>;
+  }
+
   function readHashCode(): string {
     return typeof window === 'undefined' ? '' : codeFromHash(window.location.hash);
+  }
+
+  function browserCaps(): Partial<CapsPayload> {
+    const pickerWindow = window as PickerWindow;
+    const storage = navigator.storage as StorageManager | undefined;
+    const hasOpfs = typeof storage?.getDirectory === 'function';
+    const features: CapsPayload['features'] = [];
+    const sinkHints: CapsPayload['sinkHints'] = [];
+    if (hasOpfs || pickerWindow.showDirectoryPicker) features.push('folders');
+    if (hasOpfs) {
+      features.push('archive');
+      sinkHints.push('opfs', 'archive');
+    }
+    if (pickerWindow.showSaveFilePicker) sinkHints.push('direct-file');
+    return { features, sinkHints };
   }
 
   function startSend() {
@@ -67,6 +90,7 @@
     screen = 'sending';
     track(
       offer({
+        localCaps: browserCaps(),
         onPhase: (p) => (phase = p),
         onCode: (c) => {
           code = c;
@@ -76,14 +100,36 @@
     );
   }
 
-  function startReceive() {
+  async function startReceive() {
     const trimmed = codeInput.trim();
     if (trimmed === '') return;
+    let destination: ReceiveDestinationSpec = { kind: 'auto' };
+    try {
+      const pickerWindow = window as PickerWindow;
+      if (receiveTarget === 'direct-file') {
+        if (!pickerWindow.showSaveFilePicker) throw new Error('Direct file saving is unavailable.');
+        destination = { kind: 'direct-file', handle: await pickerWindow.showSaveFilePicker() };
+      } else if (receiveTarget === 'direct-directory') {
+        if (!pickerWindow.showDirectoryPicker)
+          throw new Error('Direct folder saving is unavailable.');
+        destination = {
+          kind: 'direct-directory',
+          handle: await pickerWindow.showDirectoryPicker(),
+        };
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      errorText = err instanceof Error ? err.message : String(err);
+      screen = 'failed';
+      return;
+    }
     reset();
+    receiveDestination = destination;
     screen = 'receiving';
     track(
       join({
         code: trimmed,
+        localCaps: browserCaps(),
         onPhase: (p) => (phase = p),
       }),
     );
@@ -123,7 +169,7 @@
 
   function onPick(ev: Event) {
     const input = ev.currentTarget as HTMLInputElement;
-    pickedFile = input.files?.[0] ?? null;
+    pickedFiles = Array.from(input.files ?? []);
     startTransferIfReady();
   }
 
@@ -134,10 +180,10 @@
   function startTransferIfReady() {
     if (transfer || handshake === undefined || signaling === undefined) return;
     if (role === 'offerer') {
-      if (pickedFile === null) return; // still waiting for the sender to choose a file
-      beginTransfer(runSend(handshake, signaling, { file: pickedFile }));
+      if (pickedFiles.length === 0) return;
+      beginTransfer(runSend(handshake, signaling, { files: pickedFiles }));
     } else {
-      beginTransfer(runReceive(handshake, signaling));
+      beginTransfer(runReceive(handshake, signaling, receiveDestination));
     }
   }
 
@@ -196,10 +242,12 @@
     progressTimer = undefined;
     if (downloadUrl) URL.revokeObjectURL(downloadUrl);
     downloadUrl = null;
+    void outcome?.cleanup?.();
     handshake = undefined;
     signaling = undefined;
     role = undefined;
-    pickedFile = null;
+    pickedFiles = [];
+    receiveDestination = { kind: 'auto' };
     sentBytes = 0;
     totalBytes = 0;
     rateBps = 0;
@@ -235,7 +283,7 @@
         class="receive"
         onsubmit={(e) => {
           e.preventDefault();
-          startReceive();
+          void startReceive();
         }}
       >
         <label for="code">Have an invite code?</label>
@@ -250,6 +298,12 @@
           />
           <button type="submit" disabled={codeInput.trim() === ''}>Receive</button>
         </div>
+        <label for="destination">Destination</label>
+        <select id="destination" bind:value={receiveTarget}>
+          <option value="auto">Download when verified</option>
+          <option value="direct-file">Save directly to one file</option>
+          <option value="direct-directory">Save directly to a folder</option>
+        </select>
       </form>
     </section>
   {:else if screen === 'sending'}
@@ -283,10 +337,22 @@
 
       {#if outcome}
         {#if downloadUrl}
-          <p class="status">Received <strong>{outcome.name}</strong> — verified.</p>
+          <p class="status">
+            Received <strong
+              >{outcome.files.length === 1 ? outcome.name : `${outcome.files.length} files`}</strong
+            >
+            — verified.
+          </p>
           <a class="primary download" href={downloadUrl} download={outcome.name}>
             Save {outcome.name}
           </a>
+        {:else if outcome.savedDirectly}
+          <p class="status">
+            Received <strong
+              >{outcome.files.length === 1 ? outcome.name : `${outcome.files.length} files`}</strong
+            >
+            — verified and saved.
+          </p>
         {:else}
           <p class="status">Sent <strong>{outcome.name}</strong> — verified by the receiver.</p>
         {/if}
@@ -310,8 +376,12 @@
         </div>
       {:else if role === 'offerer'}
         <label class="filepick">
-          <span>Choose a file to send</span>
-          <input type="file" onchange={onPick} />
+          <span>Choose files to send</span>
+          <input type="file" multiple onchange={onPick} />
+        </label>
+        <label class="filepick">
+          <span>Choose a folder to send</span>
+          <input type="file" multiple webkitdirectory onchange={onPick} />
         </label>
       {:else}
         <p class="status" aria-live="polite">Waiting for the sender to choose a file…</p>

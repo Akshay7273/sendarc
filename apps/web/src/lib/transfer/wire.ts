@@ -17,14 +17,19 @@ export interface SessionCrypto {
 
 export interface StartSendMsg extends SessionCrypto {
   kind: 'start-send';
-  file: File;
+  files: File[];
   blockSize?: number;
   frameSize?: number;
   window?: number;
 }
 export interface StartRecvMsg extends SessionCrypto {
   kind: 'start-recv';
+  destination: ReceiveDestinationSpec;
 }
+export type ReceiveDestinationSpec =
+  | { kind: 'auto' }
+  | { kind: 'direct-file'; handle: FileSystemFileHandle }
+  | { kind: 'direct-directory'; handle: FileSystemDirectoryHandle };
 export interface InboundFrameMsg {
   kind: 'inbound-frame';
   frame: ArrayBuffer;
@@ -50,9 +55,8 @@ export interface ReadyMsg {
 }
 export interface ManifestMsg {
   kind: 'manifest';
-  name: string;
-  size: number;
-  mime: string;
+  files: Array<{ name: string; size: number; mime: string }>;
+  totalSize: number;
 }
 export interface ProgressMsg {
   kind: 'progress';
@@ -64,9 +68,10 @@ export interface StateMsg {
 }
 export interface DoneMsg {
   kind: 'done';
-  name: string;
-  size: number;
+  files: Array<{ name: string; size: number; digest: string }>;
+  totalSize: number;
   digest: string;
+  output?: { kind: 'opfs'; key: string; name: string; mime: string };
 }
 export interface ErrorMsg {
   kind: 'error';

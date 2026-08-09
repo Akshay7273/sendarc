@@ -42,9 +42,9 @@ describe('transfer-core loopback', () => {
     const recvPort = new FakePort();
     const sink = new MemorySink();
 
-    let senderDone: (WorkerToHost & { kind: 'done' }) | undefined;
-    let receiverDone: (WorkerToHost & { kind: 'done' }) | undefined;
-    let manifest: (WorkerToHost & { kind: 'manifest' }) | undefined;
+    let senderDone: Extract<WorkerToHost, { kind: 'done' }> | undefined;
+    let receiverDone: Extract<WorkerToHost, { kind: 'done' }> | undefined;
+    let manifest: Extract<WorkerToHost, { kind: 'manifest' }> | undefined;
     const senderStates: string[] = [];
 
     sendPort.onWorkerOut = (m) => {
@@ -78,6 +78,7 @@ describe('transfer-core loopback', () => {
 
     recvPort.toWorker({
       kind: 'start-recv',
+      destination: { kind: 'auto' },
       sendDir: keys.j2o,
       recvDir: keys.o2j,
       sendCounter: 1,
@@ -88,7 +89,7 @@ describe('transfer-core loopback', () => {
     sendPort.toWorker({ kind: 'control', op: 'pause' });
     sendPort.toWorker({
       kind: 'start-send',
-      file,
+      files: [file],
       sendDir: keys.o2j,
       recvDir: keys.j2o,
       sendCounter: 1,
@@ -109,10 +110,10 @@ describe('transfer-core loopback', () => {
     expect(sink.isClosed).toBe(true);
     expect(receiverDone?.digest).toBe(expected);
     expect(senderDone?.digest).toBe(expected);
-    expect(receiverDone?.name).toBe('loop.bin');
-    expect(receiverDone?.size).toBe(bytes.length);
-    expect(manifest?.name).toBe('loop.bin');
-    expect(manifest?.size).toBe(bytes.length);
+    expect(receiverDone?.files[0]?.name).toBe('loop.bin');
+    expect(receiverDone?.totalSize).toBe(bytes.length);
+    expect(manifest?.files[0]?.name).toBe('loop.bin');
+    expect(manifest?.totalSize).toBe(bytes.length);
     expect(senderStates).toEqual(['running', 'paused', 'running']);
   });
 
@@ -158,6 +159,7 @@ describe('transfer-core loopback', () => {
 
     recvPort.toWorker({
       kind: 'start-recv',
+      destination: { kind: 'auto' },
       sendDir: keys.j2o,
       recvDir: keys.o2j,
       sendCounter: 1,
@@ -165,7 +167,7 @@ describe('transfer-core loopback', () => {
     });
     sendPort.toWorker({
       kind: 'start-send',
-      file,
+      files: [file],
       sendDir: keys.o2j,
       recvDir: keys.j2o,
       sendCounter: 1,
@@ -175,5 +177,66 @@ describe('transfer-core loopback', () => {
     });
 
     await expect(Promise.all([recvP, sendP])).rejects.toThrow(/integrity/);
+  });
+
+  it('carries a nested file set through the worker protocol', async () => {
+    const keys = await deriveTransferKeys(new Uint8Array(32).fill(9));
+    const files = [new File([new Uint8Array([1, 2, 3])], 'a.bin'), new File([], 'empty.txt')];
+    Object.defineProperty(files[0], 'webkitRelativePath', { value: 'folder/a.bin' });
+    Object.defineProperty(files[1], 'webkitRelativePath', { value: 'folder/empty.txt' });
+    const sendPort = new FakePort();
+    const recvPort = new FakePort();
+    const sinks = new Map<string, MemorySink>();
+    let received: Extract<WorkerToHost, { kind: 'done' }> | undefined;
+    sendPort.onWorkerOut = (message) => {
+      if (message.kind === 'outbound-frame') {
+        recvPort.toWorker({ kind: 'inbound-frame', frame: message.frame });
+      }
+    };
+    recvPort.onWorkerOut = (message) => {
+      if (message.kind === 'outbound-frame') {
+        sendPort.toWorker({ kind: 'inbound-frame', frame: message.frame });
+      } else if (message.kind === 'done') received = message;
+    };
+    const receiverDigest = await createSha256DigestFactory();
+    const senderDigest = await createSha256DigestFactory();
+    const recvP = runTransferCore(recvPort, {
+      createDigest: receiverDigest,
+      createSink: (file) => {
+        const sink = new MemorySink();
+        sinks.set(file.name, sink);
+        return sink;
+      },
+      fileSource: blobFileSource,
+    });
+    const sendP = runTransferCore(sendPort, {
+      createDigest: senderDigest,
+      createSink: () => {
+        throw new Error('sender has no sink');
+      },
+      fileSource: blobFileSource,
+    });
+    recvPort.toWorker({
+      kind: 'start-recv',
+      destination: { kind: 'auto' },
+      sendDir: keys.j2o,
+      recvDir: keys.o2j,
+      sendCounter: 1,
+      recvCounter: 1,
+    });
+    sendPort.toWorker({
+      kind: 'start-send',
+      files,
+      sendDir: keys.o2j,
+      recvDir: keys.j2o,
+      sendCounter: 1,
+      recvCounter: 1,
+      blockSize: 8,
+      frameSize: 4,
+    });
+    await Promise.all([recvP, sendP]);
+    expect(received?.files.map((file) => file.name)).toEqual(['folder/a.bin', 'folder/empty.txt']);
+    expect(sinks.get('folder/a.bin')?.bytes()).toEqual(new Uint8Array([1, 2, 3]));
+    expect(sinks.get('folder/empty.txt')?.bytes()).toEqual(new Uint8Array());
   });
 });
