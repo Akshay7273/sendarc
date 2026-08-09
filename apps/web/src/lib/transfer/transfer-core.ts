@@ -46,7 +46,7 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
   return new Promise<void>((resolve, reject) => {
     let engine:
       | {
-          handle(frame: Uint8Array): void;
+          handle(frame: Uint8Array): void | Promise<void>;
           pause(): void;
           resume(): void;
           cancel(reason?: string): void;
@@ -62,14 +62,14 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
       port.postMessage({ kind: 'outbound-frame', frame: buf }, [buf]);
     };
     const bind = (e: {
-      handle(frame: Uint8Array): void;
+      handle(frame: Uint8Array): void | Promise<void>;
       pause(): void;
       resume(): void;
       cancel(reason?: string): void;
     }): void => {
       engine = e;
       post({ kind: 'state', state: 'running' });
-      for (const f of pending) e.handle(f);
+      for (const f of pending) consume(e, f);
       pending.length = 0;
       for (const op of pendingControls) {
         if (op === 'pause') e.pause();
@@ -83,6 +83,14 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
       const message = e instanceof Error ? e.message : String(e);
       post({ kind: 'error', reason, message });
       reject(e instanceof Error ? e : new Error(message));
+    };
+    const consume = (
+      target: { handle(frame: Uint8Array): void | Promise<void> },
+      frame: Uint8Array,
+    ): void => {
+      void Promise.resolve(target.handle(frame)).finally(() =>
+        post({ kind: 'frame-consumed', bytes: frame.byteLength }),
+      );
     };
 
     port.addEventListener('message', (ev) => {
@@ -102,7 +110,7 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
           return;
         case 'inbound-frame': {
           const frame = new Uint8Array(msg.frame);
-          if (engine) engine.handle(frame);
+          if (engine) consume(engine, frame);
           else pending.push(frame);
           return;
         }
