@@ -34,6 +34,28 @@ export interface ReceiveResult {
   digest: string;
 }
 
+/** Per-file seed a reloaded receiver restores so held blocks are neither re-fetched nor re-hashed. */
+export interface ReceiverResumeFile {
+  /** Consecutively-committed blocks already persisted for this file — its restored `nextBlock`. */
+  haveBlocks: number;
+  /**
+   * A digest already fed exactly the persisted bytes `[0, haveBlocks)`. The receiver continues
+   * updating it with the streamed remainder, so the whole-file digest still matches at completion.
+   * The host owns this seam because only it can read the persisted bytes back.
+   */
+  seedDigest: Digest;
+}
+
+/** State a reloaded receiver restores to resume a transfer in place. */
+export interface ReceiverResumeState {
+  /**
+   * Must equal the manifest's `transferId`. A mismatch means the room was reused for a different
+   * file set, so the persisted offsets are ignored and a fresh receive starts.
+   */
+  transferId: string;
+  files: ReadonlyMap<number, ReceiverResumeFile>;
+}
+
 export interface TransferReceiverOptions {
   send(frame: Uint8Array): void | Promise<void>;
   sendDir: DirectionalKey;
@@ -52,6 +74,12 @@ export interface TransferReceiverOptions {
   onManifestSet?(manifest: Manifest): void | Promise<void>;
   /** Called for each file immediately before its sink opens. */
   onManifest?(file: FileEntry): void | Promise<void>;
+  /**
+   * Restored progress for a reloaded receiver. When the arriving manifest carries a matching
+   * `transferId`, each file restarts at its `haveBlocks` high-water mark and the sender is asked to
+   * stream only the missing blocks. Absent (or a `transferId` mismatch) means a fresh receive.
+   */
+  resume?: ReceiverResumeState;
 }
 
 export class TransferReceiver {
@@ -76,6 +104,8 @@ export class TransferReceiver {
   private readonly seenAhead = new Set<number>();
   private nackOutstanding: number | undefined;
   private paused = false;
+  /** The caller's resume seed, kept only once its transferId matches the arriving manifest. */
+  private activeResume: ReceiverResumeState | undefined;
 
   private resolveDone!: (r: ReceiveResult) => void;
   private rejectDone!: (e: Error) => void;
@@ -214,7 +244,28 @@ export class TransferReceiver {
         : new TransferError('sink_error', e instanceof Error ? e.message : String(e));
     }
     this.manifest = manifest;
+    if (manifest.transferId !== undefined) {
+      // The sender opted into resumption. Apply persisted offsets only when they belong to this
+      // exact transfer, then report each file's high-water mark so the sender skips held blocks.
+      this.activeResume =
+        this.o.resume && this.o.resume.transferId === manifest.transferId
+          ? this.o.resume
+          : undefined;
+      await this.sendResumeState(manifest);
+    }
     await this.openNextFile();
+  }
+
+  private async sendResumeState(manifest: Manifest): Promise<void> {
+    const files = manifest.files.map((file) => ({
+      idx: file.idx,
+      haveBlocks: Math.min(this.activeResume?.files.get(file.idx)?.haveBlocks ?? 0, file.blocks),
+    }));
+    await this.sendControl(FrameType.ResumeState, {
+      type: FrameType.ResumeState,
+      transferId: manifest.transferId!,
+      files,
+    });
   }
 
   /** Open the next file and immediately verify/close consecutive empty files. */
@@ -224,10 +275,15 @@ export class TransferReceiver {
     while (this.fileIdx < manifest.files.length) {
       const file = manifest.files[this.fileIdx]!;
       this.file = file;
-      this.nextBlock = 0;
+      const rf = this.activeResume?.files.get(file.idx);
+      this.nextBlock = rf ? Math.min(rf.haveBlocks, file.blocks) : 0;
       this.seenAhead.clear();
       this.nackOutstanding = undefined;
-      this.digest = this.o.createDigest();
+      // The seed digest already holds the persisted prefix; the streamed remainder appends to it.
+      this.digest = rf?.seedDigest ?? this.o.createDigest();
+      // Persisted bytes count as acknowledged so progress resumes without a backwards jump.
+      this.acknowledged +=
+        this.nextBlock >= file.blocks ? file.size : this.nextBlock * file.blockSize;
       try {
         await this.o.onManifest?.(file);
         this.sink = await this.destination.open(file);
@@ -236,7 +292,8 @@ export class TransferReceiver {
           ? e
           : new TransferError('sink_error', e instanceof Error ? e.message : String(e));
       }
-      if (file.blocks > 0) return;
+      // Return to receive blocks only when some remain; empty and fully-held files finish now.
+      if (this.nextBlock < file.blocks) return;
       await this.finishCurrentFile();
     }
     this.file = undefined;

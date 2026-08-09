@@ -23,6 +23,22 @@ type ReceiveResult struct {
 	Digest    string
 }
 
+// ResumeFileProgress is a reloaded receiver's restored seed for one file: the persisted
+// high-water mark and a digest already fed exactly the persisted bytes [0, HaveBlocks). The
+// host owns SeedDigest because only it can read those bytes back from durable storage.
+type ResumeFileProgress struct {
+	HaveBlocks int
+	SeedDigest Digest
+}
+
+// ReceiverResume is the state a reloaded receiver restores to resume a transfer in place. It is
+// applied only when TransferID equals the arriving manifest's; a mismatch means the room was
+// reused for a different file set, so the offsets are ignored and a fresh receive starts.
+type ReceiverResume struct {
+	TransferID string
+	Files      map[int]ResumeFileProgress
+}
+
 // ReceiverOptions configures a Receiver.
 type ReceiverOptions struct {
 	Send             func(frame []byte) error
@@ -39,6 +55,10 @@ type ReceiverOptions struct {
 	OnStateChange  func(TransferState)
 	OnManifestSet  func(manifest Manifest) error
 	OnManifest     func(file FileEntry) error
+	// Resume restores a reloaded receiver's progress. When the arriving manifest carries a matching
+	// TransferID, each file restarts at its HaveBlocks high-water mark and the sender is asked to
+	// stream only the missing blocks. Nil (or a TransferID mismatch) means a fresh receive.
+	Resume *ReceiverResume
 }
 
 // Receiver drives one file receive. Handle calls must remain ordered.
@@ -67,6 +87,8 @@ type Receiver struct {
 	awaitingRestart bool
 	seenAhead       map[int]bool
 	nackOutstanding int
+	// activeResume is the caller's seed, kept only once its TransferID matches the manifest.
+	activeResume *ReceiverResume
 
 	mu      sync.Mutex
 	done    chan struct{}
@@ -231,7 +253,34 @@ func (r *Receiver) applyManifest(payload []byte) error {
 	}
 	r.manifest = &validated
 	r.digests = make([]string, len(validated.Files))
+	if validated.TransferID != "" {
+		// The sender opted into resumption. Apply persisted offsets only when they belong to this
+		// exact transfer, then report each file's high-water mark so the sender skips held blocks.
+		if r.o.Resume != nil && r.o.Resume.TransferID == validated.TransferID {
+			r.activeResume = r.o.Resume
+		}
+		if err := r.sendResumeState(&validated); err != nil {
+			return err
+		}
+	}
 	return r.openNextFile()
+}
+
+func (r *Receiver) sendResumeState(manifest *Manifest) error {
+	files := make([]ResumeFileState, len(manifest.Files))
+	for i, file := range manifest.Files {
+		have := 0
+		if r.activeResume != nil {
+			if p, ok := r.activeResume.Files[file.Idx]; ok {
+				have = p.HaveBlocks
+			}
+		}
+		if have > file.Blocks {
+			have = file.Blocks
+		}
+		files[i] = ResumeFileState{Idx: file.Idx, HaveBlocks: have}
+	}
+	return r.sendControl(NewResumeState(manifest.TransferID, files))
 }
 
 func (r *Receiver) openNextFile() error {
@@ -242,9 +291,27 @@ func (r *Receiver) openNextFile() error {
 		file := r.manifest.Files[r.fileIdx]
 		r.file = &file
 		r.nextBlock = 0
+		r.digest = r.o.CreateDigest()
+		if r.activeResume != nil {
+			if p, ok := r.activeResume.Files[file.Idx]; ok {
+				r.nextBlock = p.HaveBlocks
+				if r.nextBlock > file.Blocks {
+					r.nextBlock = file.Blocks
+				}
+				if p.SeedDigest != nil {
+					// The seed digest already holds the persisted prefix; the remainder appends.
+					r.digest = p.SeedDigest
+				}
+			}
+		}
+		// Persisted bytes count as acknowledged so progress resumes without a backwards jump.
+		if r.nextBlock >= file.Blocks {
+			r.acknowledged += file.Size
+		} else {
+			r.acknowledged += int64(r.nextBlock) * int64(file.BlockSize)
+		}
 		r.seenAhead = make(map[int]bool)
 		r.nackOutstanding = -1
-		r.digest = r.o.CreateDigest()
 		if r.o.OnManifest != nil {
 			if err := r.o.OnManifest(file); err != nil {
 				return asTransferError(err, FailSinkError)
@@ -255,7 +322,8 @@ func (r *Receiver) openNextFile() error {
 			return asTransferError(err, FailSinkError)
 		}
 		r.sink = sink
-		if file.Blocks > 0 {
+		// Return to receive blocks only when some remain; empty and fully-held files finish now.
+		if r.nextBlock < file.Blocks {
 			return nil
 		}
 		if err := r.finishCurrentFile(); err != nil {
