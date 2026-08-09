@@ -37,6 +37,42 @@ type Sink interface {
 	Abort(reason string) error
 }
 
+// Destination owns every per-file Sink in one transfer so a terminal failure can discard the
+// complete partial output rather than leaving already-verified files behind.
+type Destination interface {
+	Prepare(manifest Manifest) error
+	Open(file FileEntry) (Sink, error)
+	Close() error
+	Abort(reason string) error
+}
+
+type singleSinkDestination struct {
+	sink   Sink
+	opened bool
+}
+
+// SingleSinkDestination adapts the original one-file Sink contract for compatibility.
+func SingleSinkDestination(sink Sink) Destination { return &singleSinkDestination{sink: sink} }
+
+func (d *singleSinkDestination) Prepare(manifest Manifest) error {
+	if len(manifest.Files) != 1 {
+		return errors.New("single sink cannot receive multiple files")
+	}
+	return nil
+}
+
+func (d *singleSinkDestination) Open(FileEntry) (Sink, error) {
+	if d.opened {
+		return nil, errors.New("single sink opened more than once")
+	}
+	d.opened = true
+	return d.sink, nil
+}
+
+func (d *singleSinkDestination) Close() error { return nil }
+
+func (d *singleSinkDestination) Abort(reason string) error { return d.sink.Abort(reason) }
+
 // Digest is a streaming whole-file hasher producing a sha256sum-identical hex string. The
 // sender computes it in a first pass so the file is never buffered whole; a fresh Digest is
 // requested per transfer so implementations may be stateful. It is the Go twin of the TS

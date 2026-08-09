@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,6 +37,125 @@ func NewOSFileSink(dir, name string) (*OSFileSink, error) {
 		return nil, err
 	}
 	return &OSFileSink{path: path, f: f}, nil
+}
+
+// OSDestination owns a safe relative file tree for one transfer and removes the complete tree of
+// files it created if any later file fails. Existing files are never overwritten.
+type OSDestination struct {
+	mu     sync.Mutex
+	root   string
+	sinks  []*OSFileSink
+	files  []string
+	dirs   []string
+	paths  map[int]string
+	closed bool
+}
+
+// NewOSDestination prepares a filesystem-rooted multi-file destination.
+func NewOSDestination(root string) (*OSDestination, error) {
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, err
+	}
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, err
+	}
+	abs, err := filepath.Abs(resolved)
+	if err != nil {
+		return nil, err
+	}
+	return &OSDestination{root: abs, paths: make(map[int]string)}, nil
+}
+
+// Prepare validates the already-canonical manifest before any output is created.
+func (d *OSDestination) Prepare(manifest wire.Manifest) error {
+	_, err := wire.ValidateManifest(manifest)
+	return err
+}
+
+// Open creates one manifest path without following symlinked child directories.
+func (d *OSDestination) Open(file wire.FileEntry) (wire.Sink, error) {
+	name, err := wire.NormalizeTransferPath(file.Name)
+	if err != nil {
+		return nil, err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return nil, errSinkClosed
+	}
+	parts := strings.Split(name, "/")
+	parent := d.root
+	for _, part := range parts[:len(parts)-1] {
+		parent = filepath.Join(parent, part)
+		info, statErr := os.Lstat(parent)
+		if errors.Is(statErr, os.ErrNotExist) {
+			if err := os.Mkdir(parent, 0o755); err != nil {
+				return nil, err
+			}
+			d.dirs = append(d.dirs, parent)
+			continue
+		}
+		if statErr != nil {
+			return nil, statErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return nil, fmt.Errorf("transfer: destination component is not a safe directory: %s", parent)
+		}
+	}
+	path := filepath.Join(parent, parts[len(parts)-1])
+	rel, err := filepath.Rel(d.root, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, errors.New("transfer: destination path escaped its root")
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	sink := &OSFileSink{path: path, f: f}
+	d.sinks = append(d.sinks, sink)
+	d.files = append(d.files, path)
+	d.paths[file.Idx] = path
+	return sink, nil
+}
+
+// Close commits the destination. Individual files have already been flushed and closed.
+func (d *OSDestination) Close() error {
+	d.mu.Lock()
+	d.closed = true
+	d.mu.Unlock()
+	return nil
+}
+
+// Abort closes active files and removes every file and empty directory created by this transfer.
+func (d *OSDestination) Abort(reason string) error {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil
+	}
+	d.closed = true
+	sinks := append([]*OSFileSink(nil), d.sinks...)
+	files := append([]string(nil), d.files...)
+	dirs := append([]string(nil), d.dirs...)
+	d.mu.Unlock()
+	for _, sink := range sinks {
+		_ = sink.Abort(reason)
+	}
+	for _, path := range files {
+		_ = os.Remove(path)
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		_ = os.Remove(dirs[i])
+	}
+	return nil
+}
+
+// Path returns the output path assigned to one manifest index.
+func (d *OSDestination) Path(fileIdx int) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.paths[fileIdx]
 }
 
 // Path is the destination path the sink writes to.

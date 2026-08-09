@@ -136,3 +136,106 @@ func TestLoopbackAbortsOnCorruptedFrame(t *testing.T) {
 		t.Error("sink was closed despite a corrupted frame; it must not commit")
 	}
 }
+
+type multiMemoryDestination struct {
+	manifest Manifest
+	sinks    map[string]*MemorySink
+	closed   bool
+}
+
+func (d *multiMemoryDestination) Prepare(manifest Manifest) error {
+	d.manifest = manifest
+	d.sinks = make(map[string]*MemorySink, len(manifest.Files))
+	return nil
+}
+
+func (d *multiMemoryDestination) Open(file FileEntry) (Sink, error) {
+	sink := &MemorySink{}
+	d.sinks[file.Name] = sink
+	return sink, nil
+}
+
+func (d *multiMemoryDestination) Close() error { d.closed = true; return nil }
+
+func (d *multiMemoryDestination) Abort(reason string) error {
+	for _, sink := range d.sinks {
+		_ = sink.Abort(reason)
+	}
+	return nil
+}
+
+func TestLoopbackStreamsNestedMultiFileSet(t *testing.T) {
+	keys, err := DeriveTransferKeys(loopbackMaster())
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := [][]byte{{1, 2, 3}, {}, make([]byte, 3000)}
+	for i := range contents[2] {
+		contents[2][i] = byte(i & 0xff)
+	}
+	names := []string{"folder/a.bin", "folder/empty.txt", "b.bin"}
+	sources := make([]FileSource, len(contents))
+	var total int64
+	for i, content := range contents {
+		sources[i] = BytesSource(content, FileMeta{Name: names[i], Size: int64(len(content)), LastModified: 1}, 0)
+		total += int64(len(content))
+	}
+	s2r := make(chan []byte, 4096)
+	r2s := make(chan []byte, 4096)
+	copyFrame := func(frame []byte) []byte { return append([]byte(nil), frame...) }
+	destination := &multiMemoryDestination{}
+	var progress int64
+	sender := NewSender(SenderOptions{
+		Files: sources, Send: func(frame []byte) error { s2r <- copyFrame(frame); return nil },
+		SendDir: keys.O2J, RecvDir: keys.J2O, BlockSize: 1024, FrameSize: 256, Window: 2,
+		OnProgress: func(bytes int64) { progress = bytes },
+	})
+	receiver := NewReceiver(ReceiverOptions{
+		Send:    func(frame []byte) error { r2s <- copyFrame(frame); return nil },
+		SendDir: keys.J2O, RecvDir: keys.O2J, Destination: destination,
+	})
+	go func() {
+		for frame := range s2r {
+			receiver.Handle(frame)
+		}
+	}()
+	go func() {
+		for frame := range r2s {
+			sender.Handle(frame)
+		}
+	}()
+	sendDone := make(chan struct {
+		digest string
+		err    error
+	}, 1)
+	go func() {
+		digest, runErr := sender.Run(context.Background())
+		sendDone <- struct {
+			digest string
+			err    error
+		}{digest, runErr}
+	}()
+	received, recvErr := receiver.Wait(context.Background())
+	sent := <-sendDone
+	close(s2r)
+	close(r2s)
+	if sent.err != nil || recvErr != nil {
+		t.Fatalf("send=%v receive=%v", sent.err, recvErr)
+	}
+	if sent.digest != received.Digest || progress != total || !destination.closed {
+		t.Fatalf("digest/progress/commit mismatch: sent=%s received=%s progress=%d closed=%v",
+			sent.digest, received.Digest, progress, destination.closed)
+	}
+	if len(received.Files) != len(contents) || len(received.Digests) != len(contents) {
+		t.Fatalf("received %d files and %d digests", len(received.Files), len(received.Digests))
+	}
+	for i, name := range names {
+		if got := destination.sinks[name].Bytes(); string(got) != string(contents[i]) {
+			t.Errorf("%s differs", name)
+		}
+		want := sha256.Sum256(contents[i])
+		if received.Digests[i] != hex.EncodeToString(want[:]) {
+			t.Errorf("%s digest = %s", name, received.Digests[i])
+		}
+	}
+}

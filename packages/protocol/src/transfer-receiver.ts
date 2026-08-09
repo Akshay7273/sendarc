@@ -9,16 +9,27 @@
 
 import { open, seal, type FrameHeaderInput } from './aead.js';
 import type { DirectionalKey } from './keyschedule.js';
-import { FrameType, type ControlOp, type FileEntry } from './transfer.js';
+import { FrameType, type ControlOp, type FileEntry, type Manifest } from './transfer.js';
 import { DEFAULT_INFLIGHT_BLOCKS, FRAME_VERSION } from './constants.js';
 import { sha256 } from './webcrypto.js';
 import { bytesToHex } from './bytes.js';
-import { TransferError, type Digest, type Sink } from './transfer-ports.js';
+import {
+  TransferError,
+  singleSinkDestination,
+  type Destination,
+  type Digest,
+  type Sink,
+} from './transfer-ports.js';
 import { decodeControl, encodeControl } from './transfer-messages.js';
 import type { TransferRunState } from './transfer-sender.js';
 import { validateManifest } from './safe-path.js';
+import { completionDigest } from './transfer-set.js';
 
 export interface ReceiveResult {
+  files: FileEntry[];
+  digests: string[];
+  totalSize: number;
+  /** Compatibility aliases for the first file and transfer completion digest. */
   file: FileEntry;
   digest: string;
 }
@@ -30,23 +41,35 @@ export interface TransferReceiverOptions {
   sendCounterStart: number;
   recvCounterStart: number;
   createDigest(): Digest;
-  sink: Sink;
+  /** One-file compatibility destination. Exactly one of sink/destination is required. */
+  sink?: Sink;
+  destination?: Destination;
   /** Reports bytes only after verify-and-sink. */
   onProgress?(acknowledgedBytes: number): void;
+  onFileProgress?(fileIdx: number, fileBytes: number, acknowledgedBytes: number): void;
   onStateChange?(state: TransferRunState): void;
-  /** Called once after the manifest is validated and before the first sink write. */
+  /** Called once with the validated complete file set before any destination opens. */
+  onManifestSet?(manifest: Manifest): void | Promise<void>;
+  /** Called for each file immediately before its sink opens. */
   onManifest?(file: FileEntry): void | Promise<void>;
 }
 
 export class TransferReceiver {
   private readonly o: TransferReceiverOptions;
-  private readonly digest: Digest;
+  private readonly destination: Destination;
 
   private sendCounter: number;
   private recvCounter: number;
+  private manifest: Manifest | undefined;
+  private fileIdx = 0;
   private file: FileEntry | undefined;
+  private sink: Sink | undefined;
+  private digest: Digest | undefined;
+  private readonly digests: string[] = [];
+  private acknowledged = 0;
   private nextBlock = 0;
   private assemblingBlock = -1;
+  private assemblingFileIdx = -1;
   private blockBuf: Uint8Array | undefined;
   private blockReceived = 0;
   private readonly seenAhead = new Set<number>();
@@ -62,7 +85,10 @@ export class TransferReceiver {
 
   constructor(opts: TransferReceiverOptions) {
     this.o = opts;
-    this.digest = opts.createDigest();
+    if ((opts.sink === undefined) === (opts.destination === undefined)) {
+      throw new Error('exactly one of sink or destination is required');
+    }
+    this.destination = opts.destination ?? singleSinkDestination(opts.sink!);
     this.sendCounter = opts.sendCounterStart;
     this.recvCounter = opts.recvCounterStart;
     this.done = new Promise<ReceiveResult>((res, rej) => {
@@ -152,7 +178,7 @@ export class TransferReceiver {
   }
 
   private async applyManifest(payload: Uint8Array): Promise<void> {
-    if (this.file) throw new TransferError('integrity', 'duplicate manifest');
+    if (this.manifest) throw new TransferError('integrity', 'duplicate manifest');
     const msg = decodeControl(payload);
     if (msg.type !== FrameType.Manifest) throw new TransferError('integrity', 'expected manifest');
     let manifest;
@@ -161,18 +187,67 @@ export class TransferReceiver {
     } catch (e) {
       throw new TransferError('integrity', e instanceof Error ? e.message : String(e));
     }
-    const file = manifest.files[0];
-    if (!file || manifest.files.length !== 1) {
-      throw new TransferError('integrity', 'single-file manifest required');
-    }
-    this.file = file;
     try {
-      await this.o.onManifest?.(file);
+      await this.destination.prepare(manifest);
+      await this.o.onManifestSet?.(manifest);
     } catch (e) {
       throw e instanceof TransferError
         ? e
         : new TransferError('sink_error', e instanceof Error ? e.message : String(e));
     }
+    this.manifest = manifest;
+    await this.openNextFile();
+  }
+
+  /** Open the next file and immediately verify/close consecutive empty files. */
+  private async openNextFile(): Promise<void> {
+    const manifest = this.manifest;
+    if (!manifest) throw new TransferError('integrity', 'file opened before manifest');
+    while (this.fileIdx < manifest.files.length) {
+      const file = manifest.files[this.fileIdx]!;
+      this.file = file;
+      this.nextBlock = 0;
+      this.seenAhead.clear();
+      this.nackOutstanding = undefined;
+      this.digest = this.o.createDigest();
+      try {
+        await this.o.onManifest?.(file);
+        this.sink = await this.destination.open(file);
+      } catch (e) {
+        throw e instanceof TransferError
+          ? e
+          : new TransferError('sink_error', e instanceof Error ? e.message : String(e));
+      }
+      if (file.blocks > 0) return;
+      await this.finishCurrentFile();
+    }
+    this.file = undefined;
+    this.sink = undefined;
+    this.digest = undefined;
+  }
+
+  private async finishCurrentFile(): Promise<void> {
+    const file = this.file;
+    const digest = this.digest;
+    const sink = this.sink;
+    if (!file || !digest || !sink) throw new TransferError('integrity', 'no active file');
+    const got = await digest.hexDigest();
+    if (got !== file.fileDigest) {
+      throw new TransferError('digest_mismatch', `file ${file.idx} digest mismatch`);
+    }
+    try {
+      await sink.close();
+    } catch (e) {
+      throw e instanceof TransferError
+        ? e
+        : new TransferError('sink_error', e instanceof Error ? e.message : String(e));
+    }
+    this.digests[file.idx] = got;
+    this.o.onFileProgress?.(file.idx, file.size, this.acknowledged);
+    this.fileIdx++;
+    this.file = undefined;
+    this.sink = undefined;
+    this.digest = undefined;
   }
 
   private onBlockData(
@@ -181,19 +256,21 @@ export class TransferReceiver {
     frameOff: number,
     payload: Uint8Array,
   ): void {
-    const file = this.file;
-    if (!file) throw new TransferError('integrity', 'block_data before manifest');
-    if (fileIdx !== 0 || blockIdx < 0 || blockIdx >= file.blocks) {
+    const manifest = this.manifest;
+    if (!manifest) throw new TransferError('integrity', 'block_data before manifest');
+    const entry = manifest.files[fileIdx];
+    if (!entry || fileIdx > this.fileIdx || blockIdx < 0 || blockIdx >= entry.blocks) {
       throw new TransferError('integrity', `block_data outside manifest: ${blockIdx}`);
     }
     if (frameOff === 0) {
       if (this.blockBuf) throw new TransferError('integrity', 'new block before block_hash');
-      const blockLen = Math.min(file.blockSize, file.size - blockIdx * file.blockSize);
+      const blockLen = Math.min(entry.blockSize, entry.size - blockIdx * entry.blockSize);
+      this.assemblingFileIdx = fileIdx;
       this.assemblingBlock = blockIdx;
       this.blockBuf = new Uint8Array(blockLen);
       this.blockReceived = 0;
     }
-    if (!this.blockBuf || this.assemblingBlock !== blockIdx) {
+    if (!this.blockBuf || this.assemblingFileIdx !== fileIdx || this.assemblingBlock !== blockIdx) {
       throw new TransferError('integrity', `unexpected block fragment ${blockIdx}`);
     }
     if (frameOff !== this.blockReceived || frameOff + payload.length > this.blockBuf.length) {
@@ -204,14 +281,15 @@ export class TransferReceiver {
   }
 
   private async onBlockHash(payload: Uint8Array): Promise<void> {
-    const file = this.file;
     const block = this.blockBuf;
-    if (!file || !block) throw new TransferError('integrity', 'block_hash without a block');
+    if (!this.manifest || !block) {
+      throw new TransferError('integrity', 'block_hash without a block');
+    }
     const msg = decodeControl(payload);
     if (msg.type !== FrameType.BlockHash) {
       throw new TransferError('integrity', 'expected block_hash');
     }
-    if (msg.fileIdx !== 0 || msg.blockIdx !== this.assemblingBlock) {
+    if (msg.fileIdx !== this.assemblingFileIdx || msg.blockIdx !== this.assemblingBlock) {
       throw new TransferError('integrity', 'block_hash does not match assembled block');
     }
     if (this.blockReceived !== block.length) throw new TransferError('integrity', 'short block');
@@ -223,9 +301,21 @@ export class TransferReceiver {
     this.blockBuf = undefined;
     this.blockReceived = 0;
     this.assemblingBlock = -1;
+    this.assemblingFileIdx = -1;
+
+    if (msg.fileIdx < this.fileIdx) {
+      await this.sendAck(msg.fileIdx, msg.blockIdx);
+      return;
+    }
+    const file = this.file;
+    const sink = this.sink;
+    const digest = this.digest;
+    if (!file || !sink || !digest || msg.fileIdx !== this.fileIdx) {
+      throw new TransferError('integrity', 'block_hash for inactive file');
+    }
 
     if (msg.blockIdx < this.nextBlock) {
-      await this.sendAck(msg.blockIdx); // verified duplicate; acknowledgement was likely lost
+      await this.sendAck(msg.fileIdx, msg.blockIdx);
       return;
     }
     if (msg.blockIdx > this.nextBlock) {
@@ -236,25 +326,32 @@ export class TransferReceiver {
 
     const offset = this.nextBlock * file.blockSize;
     try {
-      await this.o.sink.write(offset, block);
+      await sink.write(offset, block);
     } catch (e) {
       throw e instanceof TransferError
         ? e
         : new TransferError('sink_error', e instanceof Error ? e.message : String(e));
     }
-    this.digest.update(block);
+    digest.update(block);
     this.nextBlock++;
     this.nackOutstanding = undefined;
-    this.o.onProgress?.(offset + block.length);
-    await this.sendAck(msg.blockIdx);
+    this.acknowledged += block.length;
+    this.o.onProgress?.(this.acknowledged);
+    this.o.onFileProgress?.(file.idx, offset + block.length, this.acknowledged);
+    await this.sendAck(msg.fileIdx, msg.blockIdx);
 
-    if (this.seenAhead.delete(this.nextBlock)) await this.requestMissing();
+    if (this.nextBlock === file.blocks) {
+      await this.finishCurrentFile();
+      await this.openNextFile();
+    } else if (this.seenAhead.delete(this.nextBlock)) {
+      await this.requestMissing();
+    }
   }
 
-  private async sendAck(blockIdx: number): Promise<void> {
+  private async sendAck(fileIdx: number, blockIdx: number): Promise<void> {
     await this.sendControl(FrameType.Ack, {
       type: FrameType.Ack,
-      fileIdx: 0,
+      fileIdx,
       blockIdx,
     });
   }
@@ -264,7 +361,7 @@ export class TransferReceiver {
     this.nackOutstanding = this.nextBlock;
     await this.sendControl(FrameType.Nack, {
       type: FrameType.Nack,
-      fileIdx: 0,
+      fileIdx: this.fileIdx,
       blockIdx: this.nextBlock,
       reason: 'missing',
     });
@@ -307,20 +404,21 @@ export class TransferReceiver {
   }
 
   private async onComplete(payload: Uint8Array): Promise<void> {
-    const file = this.file;
-    if (!file) throw new TransferError('integrity', 'complete before manifest');
+    const manifest = this.manifest;
+    if (!manifest) throw new TransferError('integrity', 'complete before manifest');
     const msg = decodeControl(payload);
     if (msg.type !== FrameType.Complete) throw new TransferError('integrity', 'expected complete');
-    if (this.nextBlock !== file.blocks) {
+    if (this.file && this.nextBlock !== this.file.blocks) {
       await this.requestMissing();
       return;
     }
-    const got = await this.digest.hexDigest();
-    if (msg.fileDigest !== file.fileDigest || got !== msg.fileDigest) {
-      throw new TransferError('digest_mismatch', 'whole-file digest mismatch');
+    if (this.fileIdx !== manifest.files.length) {
+      throw new TransferError('integrity', 'complete before every file was received');
     }
+    const got = await completionDigest(manifest.files);
+    if (got !== msg.fileDigest) throw new TransferError('digest_mismatch', 'file-set mismatch');
     try {
-      await this.o.sink.close();
+      await this.destination.close();
     } catch (e) {
       throw e instanceof TransferError
         ? e
@@ -328,7 +426,13 @@ export class TransferReceiver {
     }
     await this.sendControl(FrameType.Done, { type: FrameType.Done });
     this.settled = true;
-    this.resolveDone({ file, digest: got });
+    this.resolveDone({
+      files: manifest.files,
+      digests: [...this.digests],
+      totalSize: manifest.totalSize,
+      file: manifest.files[0]!,
+      digest: got,
+    });
   }
 
   private async abortWith(
@@ -345,7 +449,7 @@ export class TransferReceiver {
       }
     }
     try {
-      await this.o.sink.abort(err.reason);
+      await this.destination.abort(err.reason);
     } catch {
       // Sink abort is best-effort after the first terminal failure.
     }

@@ -54,7 +54,7 @@ func usage(w *os.File) {
 	_, _ = fmt.Fprint(w, `sendarc — secure peer-to-peer file transfer
 
 Usage:
-  sendarc send <file> [flags]
+  sendarc send <file-or-folder>... [flags]
   sendarc receive <code|link> [flags]
 
 Flags:
@@ -76,12 +76,20 @@ func runSend(args []string) int {
 		fmt.Fprintln(os.Stderr, "sendarc send: a file to send is required")
 		return 2
 	}
-	src, err := transfer.NewOSFileSource(positionals[0])
+	sources, totalSize, err := transfer.NewOSFileSources(positionals)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sendarc send: %s\n", err)
 		return 1
 	}
-	meta := src.Meta()
+	progressFiles := make([]progressFile, len(sources))
+	for i, source := range sources {
+		meta := source.Meta()
+		progressFiles[i] = progressFile{name: meta.Name, size: meta.Size}
+	}
+	label := progressFiles[0].name
+	if len(progressFiles) > 1 {
+		label = fmt.Sprintf("%d files", len(progressFiles))
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -93,7 +101,8 @@ func runSend(args []string) int {
 	}
 	defer client.Close()
 
-	progress := newProgress(meta.Size)
+	progress := newProgress(totalSize)
+	progress.setFiles(progressFiles)
 	out, err := transfer.Run(ctx, client, transfer.Spec{
 		Session: rendezvous.Options{
 			Role:      rendezvous.RoleOfferer,
@@ -101,20 +110,28 @@ func runSend(args []string) int {
 			OnCode:    codePrinter(*server),
 			OnPhase:   phasePrinter(rendezvous.RoleOfferer),
 		},
-		Source:        src,
-		OnConnect:     connectPrinter(fmt.Sprintf("Sending %s (%s) …", meta.Name, humanBytes(meta.Size))),
-		OnProgress:    progress.report,
-		OnControls:    terminalControls(),
-		OnStateChange: progress.setState,
+		Sources:        sources,
+		OnConnect:      connectPrinter(fmt.Sprintf("Sending %s (%s) …", label, humanBytes(totalSize))),
+		OnFileProgress: progress.reportFile,
+		OnControls:     terminalControls(),
+		OnStateChange:  progress.setState,
 	})
 	progress.finish()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\nFailed: %s\n", handshakeError(err))
 		return 1
 	}
-	fmt.Printf("\n✓ Sent %s (%s).\n", out.Name, humanBytes(out.Size))
+	if len(out.Files) == 1 {
+		fmt.Printf("\n✓ Sent %s (%s).\n", out.Name, humanBytes(out.Size))
+	} else {
+		fmt.Printf("\n✓ Sent %d files (%s).\n", len(out.Files), humanBytes(out.Size))
+	}
 	fmt.Printf("  Fingerprint:  %s\n", fingerprint(out.Handshake.Master))
-	fmt.Printf("  SHA-256:      %s\n", out.Digest)
+	if len(out.Files) == 1 {
+		fmt.Printf("  SHA-256:      %s\n", out.Digest)
+	} else {
+		fmt.Printf("  File-set SHA-256: %s\n", out.Digest)
+	}
 	return 0
 }
 
@@ -157,22 +174,39 @@ func runReceive(args []string) int {
 			OnPhase: phasePrinter(rendezvous.RoleJoiner),
 		},
 		DestDir: *outDir,
-		OnManifest: func(file wire.FileEntry) {
-			progress.setTotal(file.Size)
-			connectPrinter(fmt.Sprintf("Receiving %s (%s) …", file.Name, humanBytes(file.Size)))()
+		OnManifestSet: func(manifest wire.Manifest) {
+			progress.setTotal(manifest.TotalSize)
+			files := make([]progressFile, len(manifest.Files))
+			for i, file := range manifest.Files {
+				files[i] = progressFile{name: file.Name, size: file.Size}
+			}
+			progress.setFiles(files)
+			label := files[0].name
+			if len(files) > 1 {
+				label = fmt.Sprintf("%d files", len(files))
+			}
+			connectPrinter(fmt.Sprintf("Receiving %s (%s) …", label, humanBytes(manifest.TotalSize)))()
 		},
-		OnProgress:    progress.report,
-		OnControls:    terminalControls(),
-		OnStateChange: progress.setState,
+		OnFileProgress: progress.reportFile,
+		OnControls:     terminalControls(),
+		OnStateChange:  progress.setState,
 	})
 	progress.finish()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\nFailed: %s\n", handshakeError(err))
 		return 1
 	}
-	fmt.Printf("\n✓ Received %s (%s) → %s\n", out.Name, humanBytes(out.Size), out.Path)
+	if len(out.Files) == 1 {
+		fmt.Printf("\n✓ Received %s (%s) → %s\n", out.Name, humanBytes(out.Size), out.Path)
+	} else {
+		fmt.Printf("\n✓ Received %d files (%s) → %s\n", len(out.Files), humanBytes(out.Size), *outDir)
+	}
 	fmt.Printf("  Fingerprint:  %s\n", fingerprint(out.Handshake.Master))
-	fmt.Printf("  SHA-256:      %s\n", out.Digest)
+	if len(out.Files) == 1 {
+		fmt.Printf("  SHA-256:      %s\n", out.Digest)
+	} else {
+		fmt.Printf("  File-set SHA-256: %s\n", out.Digest)
+	}
 	return 0
 }
 
