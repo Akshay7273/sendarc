@@ -16,6 +16,7 @@ import { bytesToHex } from './bytes.js';
 import { TransferError, type Digest, type Sink } from './transfer-ports.js';
 import { decodeControl, encodeControl } from './transfer-messages.js';
 import type { TransferRunState } from './transfer-sender.js';
+import { validateManifest } from './safe-path.js';
 
 export interface ReceiveResult {
   file: FileEntry;
@@ -154,17 +155,15 @@ export class TransferReceiver {
     if (this.file) throw new TransferError('integrity', 'duplicate manifest');
     const msg = decodeControl(payload);
     if (msg.type !== FrameType.Manifest) throw new TransferError('integrity', 'expected manifest');
-    const file = msg.files[0];
-    if (!file || msg.files.length !== 1) {
-      throw new TransferError('integrity', 'single-file manifest required');
+    let manifest;
+    try {
+      manifest = validateManifest(msg);
+    } catch (e) {
+      throw new TransferError('integrity', e instanceof Error ? e.message : String(e));
     }
-    if (
-      file.idx !== 0 ||
-      file.size < 0 ||
-      file.blockSize <= 0 ||
-      file.blocks !== Math.ceil(file.size / file.blockSize)
-    ) {
-      throw new TransferError('integrity', 'invalid manifest geometry');
+    const file = manifest.files[0];
+    if (!file || manifest.files.length !== 1) {
+      throw new TransferError('integrity', 'single-file manifest required');
     }
     this.file = file;
     try {
