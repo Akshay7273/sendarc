@@ -16,6 +16,8 @@ import {
   type FileEntry,
   type Manifest,
   type Nack,
+  type ResumeFileState,
+  type ResumeState,
   type TransferMsg,
 } from './transfer.js';
 import { utf8 } from './bytes.js';
@@ -54,6 +56,8 @@ export function decodeControl(payload: Uint8Array): TransferMsg {
       return { type: FrameType.Done };
     case FrameType.Fail:
       return asFail(m);
+    case FrameType.ResumeState:
+      return asResumeState(m);
     default:
       throw new Error(`control frame: unexpected type ${String(m.type)}`);
   }
@@ -89,8 +93,12 @@ function asFileEntry(v: unknown): FileEntry {
 function asManifest(m: Record<string, unknown>): Manifest {
   if (!Array.isArray(m.files) || m.files.length === 0)
     throw new Error('control frame: manifest.files');
+  // transferId is optional; when present it must be a string and keeps its position right after
+  // `type` so the re-encoded wire bytes match the original ordering.
+  const transferId = m.transferId === undefined ? undefined : str(m, 'transferId');
   return {
     type: FrameType.Manifest,
+    ...(transferId !== undefined ? { transferId } : {}),
     files: m.files.map(asFileEntry),
     totalSize: num(m, 'totalSize'),
   };
@@ -130,6 +138,20 @@ function asControl(m: Record<string, unknown>): Control {
 }
 function asComplete(m: Record<string, unknown>): Complete {
   return { type: FrameType.Complete, fileDigest: str(m, 'fileDigest') };
+}
+function asResumeFileState(v: unknown): ResumeFileState {
+  if (typeof v !== 'object' || v === null) throw new Error('control frame: bad resume file state');
+  const f = v as Record<string, unknown>;
+  return { idx: num(f, 'idx'), haveBlocks: num(f, 'haveBlocks') };
+}
+function asResumeState(m: Record<string, unknown>): ResumeState {
+  if (!Array.isArray(m.files) || m.files.length === 0)
+    throw new Error('control frame: resume_state.files');
+  return {
+    type: FrameType.ResumeState,
+    transferId: str(m, 'transferId'),
+    files: m.files.map(asResumeFileState),
+  };
 }
 function asFail(m: Record<string, unknown>): Fail {
   const reason = str(m, 'reason');
