@@ -26,12 +26,18 @@ func newTokenBucket(burst int, perSec float64) *tokenBucket {
 }
 
 func (b *tokenBucket) allow() bool {
-	return b.allowAt(time.Now())
+	return b.allowNAt(1, time.Now())
 }
+
+func (b *tokenBucket) allowN(tokens float64) bool { return b.allowNAt(tokens, time.Now()) }
 
 // allowAt is the time-injectable core, kept separate so tests can drive it
 // deterministically.
 func (b *tokenBucket) allowAt(now time.Time) bool {
+	return b.allowNAt(1, now)
+}
+
+func (b *tokenBucket) allowNAt(tokens float64, now time.Time) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -39,9 +45,9 @@ func (b *tokenBucket) allowAt(now time.Time) bool {
 		b.tokens = min(b.burst, b.tokens+elapsed*b.rate)
 		b.last = now
 	}
-	if b.tokens < 1 {
+	if tokens <= 0 || b.tokens < tokens {
 		return false
 	}
-	b.tokens--
+	b.tokens -= tokens
 	return true
 }

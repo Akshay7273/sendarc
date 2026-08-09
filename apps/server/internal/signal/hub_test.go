@@ -4,15 +4,19 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // newTestPeer builds a peer without a socket, for hub-logic tests that never write.
 func newTestPeer() *peer {
 	return &peer{
-		room:   -1,
-		send:   make(chan []byte, sendBuffer),
-		done:   make(chan struct{}),
-		closed: make(chan struct{}),
+		room:             -1,
+		send:             make(chan outboundFrame, sendBuffer),
+		relayRate:        newTokenBucket(1<<20, 1<<20),
+		relayControlRate: newTokenBucket(128, 64),
+		done:             make(chan struct{}),
+		closed:           make(chan struct{}),
 	}
 }
 
@@ -143,5 +147,35 @@ func TestTokenBucket(t *testing.T) {
 	}
 	if b.allowAt(t0.Add(time.Second)) {
 		t.Fatal("only one token should refill per second")
+	}
+}
+
+func TestTokenBucketWeightedBytes(t *testing.T) {
+	b := newTokenBucket(10, 10)
+	t0 := time.Now()
+	if !b.allowNAt(7, t0) || b.allowNAt(4, t0) {
+		t.Fatal("weighted burst accounting did not enforce the byte ceiling")
+	}
+	if !b.allowNAt(4, t0.Add(100*time.Millisecond)) {
+		t.Fatal("weighted bucket did not refill one byte")
+	}
+}
+
+func TestPeerRelayQueueIsByteBounded(t *testing.T) {
+	h := testHub(t)
+	h.cfg.RelayQueueBytes = 32
+	p := newTestPeer()
+	p.hub = h
+	if !p.tryEnqueue(websocket.MessageBinary, make([]byte, 24)) {
+		t.Fatal("first bounded relay frame was refused")
+	}
+	if p.tryEnqueue(websocket.MessageBinary, make([]byte, 9)) {
+		t.Fatal("queue accepted bytes above its configured ceiling")
+	}
+	p.queueMu.Lock()
+	queued := p.queuedBytes
+	p.queueMu.Unlock()
+	if queued != 24 {
+		t.Fatalf("queued bytes = %d, want 24", queued)
 	}
 }

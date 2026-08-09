@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // Hub owns every room and the goroutine that reaps idle ones. A room holds at most
@@ -22,10 +24,105 @@ type Hub struct {
 }
 
 type room struct {
-	number   int
-	offerer  *peer
-	joiner   *peer
-	lastSeen time.Time
+	number     int
+	offerer    *peer
+	joiner     *peer
+	lastSeen   time.Time
+	relayBytes int64
+}
+
+// openRelay opts p into the binary path and coordinates a room-wide cutover. The first peer asks
+// its partner to follow; the second makes the path ready for both.
+func (h *Hub) openRelay(p *peer) (other *peer, ready bool, code string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	r, ok := h.rooms[p.room]
+	if !ok {
+		return nil, false, errNotPaired
+	}
+	other = roomPartner(r, p)
+	if other == nil {
+		return nil, false, errNotPaired
+	}
+	p.relayOpen = true
+	r.lastSeen = time.Now()
+	return other, other.relayOpen, ""
+}
+
+// grantRelayCredit caps a receiver's grant to one configured window and returns the actual grant
+// forwarded to its sending partner.
+func (h *Hub) grantRelayCredit(receiver *peer, requested int64) (*peer, int64, string) {
+	if requested <= 0 || requested > h.cfg.RelayWindowBytes {
+		return nil, 0, errRelayCredit
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	r, ok := h.rooms[receiver.room]
+	if !ok {
+		return nil, 0, errNotPaired
+	}
+	sender := roomPartner(r, receiver)
+	if sender == nil || !receiver.relayOpen || !sender.relayOpen {
+		return nil, 0, errRelayNotReady
+	}
+	grant := min(requested, h.cfg.RelayWindowBytes-sender.relayCredit)
+	if grant <= 0 {
+		return sender, 0, ""
+	}
+	sender.relayCredit += grant
+	r.lastSeen = time.Now()
+	return sender, grant, ""
+}
+
+// forwardRelay reserves sender credit and room byte budget before handing one opaque frame to the
+// partner's bounded writer queue. No encrypted frame contents are parsed or logged.
+func (h *Hub) forwardRelay(sender *peer, data []byte) string {
+	size := int64(len(data))
+	if size <= 0 || size > h.cfg.MaxRelayFrameBytes {
+		return errRelayLimit
+	}
+	if !sender.relayRate.allowN(float64(size)) {
+		return errRelayLimit
+	}
+
+	h.mu.Lock()
+	r, ok := h.rooms[sender.room]
+	if !ok {
+		h.mu.Unlock()
+		return errNotPaired
+	}
+	other := roomPartner(r, sender)
+	if other == nil || !sender.relayOpen || !other.relayOpen {
+		h.mu.Unlock()
+		return errRelayNotReady
+	}
+	if sender.relayCredit < size {
+		h.mu.Unlock()
+		return errRelayCredit
+	}
+	if size > h.cfg.RelayMaxSessionBytes-r.relayBytes {
+		h.mu.Unlock()
+		return errRelayLimit
+	}
+	sender.relayCredit -= size
+	r.relayBytes += size
+	r.lastSeen = time.Now()
+	h.mu.Unlock()
+
+	if !other.tryEnqueue(websocket.MessageBinary, append([]byte(nil), data...)) {
+		return errRelayLimit
+	}
+	return ""
+}
+
+func roomPartner(r *room, p *peer) *peer {
+	if p == r.offerer {
+		return r.joiner
+	}
+	if p == r.joiner {
+		return r.offerer
+	}
+	return nil
 }
 
 // NewHub builds a Hub and starts its reaper. The reaper stops when ctx is canceled.
