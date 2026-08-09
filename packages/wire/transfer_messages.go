@@ -34,9 +34,13 @@ type FileEntry struct {
 
 // Manifest lists the files a transfer will deliver.
 type Manifest struct {
-	Type      uint8       `json:"type"`
-	Files     []FileEntry `json:"files"`
-	TotalSize int64       `json:"totalSize"`
+	Type uint8 `json:"type"`
+	// TransferID is a random 128-bit id (hex) minted by the sender so a resumed receiver can
+	// prove it is resuming this transfer. Optional (omitempty): older senders and transfers that
+	// are never resumed omit it, matching the TS optional field.
+	TransferID string      `json:"transferId,omitempty"`
+	Files      []FileEntry `json:"files"`
+	TotalSize  int64       `json:"totalSize"`
 }
 
 // BlockHash carries a block's SHA-256 so the receiver can verify before acking.
@@ -114,6 +118,21 @@ type Fail struct {
 	Reason FailReason `json:"reason"`
 }
 
+// ResumeFileState is one file's resume position within a ResumeState.
+type ResumeFileState struct {
+	Idx        int `json:"idx"`
+	HaveBlocks int `json:"haveBlocks"` // per-file high-water mark (receiver's nextBlock)
+}
+
+// ResumeState tells the sender where to restart each file after the receiver reloaded and
+// re-handshaked. The sender validates it against its manifest (same TransferID, HaveBlocks
+// within bounds) and streams only the missing blocks.
+type ResumeState struct {
+	Type       uint8             `json:"type"`
+	TransferID string            `json:"transferId"`
+	Files      []ResumeFileState `json:"files"`
+}
+
 // FrameType returns the frame-header tag for each message; the JSON "type" field carries the
 // same value, so the field is the single source of truth and cannot drift from the header.
 func (m Manifest) FrameType() uint8 { return m.Type }
@@ -141,6 +160,9 @@ func (m Done) FrameType() uint8 { return m.Type }
 
 // FrameType reports the fail frame tag.
 func (m Fail) FrameType() uint8 { return m.Type }
+
+// FrameType reports the resume_state frame tag.
+func (m ResumeState) FrameType() uint8 { return m.Type }
 
 // NewManifest builds a manifest message with the correct frame tag.
 func NewManifest(files []FileEntry, totalSize int64) *Manifest {
@@ -180,6 +202,12 @@ func NewDone() *Done { return &Done{Type: FrameDone} }
 
 // NewFail builds a fail message with the given reason.
 func NewFail(reason FailReason) *Fail { return &Fail{Type: FrameFail, Reason: reason} }
+
+// NewResumeState builds a resume_state message carrying the transfer id and per-file high-water
+// marks.
+func NewResumeState(transferID string, files []ResumeFileState) *ResumeState {
+	return &ResumeState{Type: FrameResumeState, TransferID: transferID, Files: files}
+}
 
 // EncodeControl serializes a control message to its wire JSON. HTML escaping is disabled and
 // the encoder's trailing newline stripped so the bytes match JavaScript's JSON.stringify.
@@ -227,6 +255,8 @@ func DecodeControl(payload []byte) (ControlMsg, error) {
 		return &Done{Type: FrameDone}, nil
 	case FrameFail:
 		return decodeFail(payload)
+	case FrameResumeState:
+		return decodeResumeState(payload)
 	default:
 		return nil, fmt.Errorf("control frame: unexpected type %d", *head.Type)
 	}
@@ -259,8 +289,11 @@ func (r rawFileEntry) build() (FileEntry, error) {
 
 func decodeManifest(payload []byte) (ControlMsg, error) {
 	var raw struct {
-		Files     []rawFileEntry `json:"files"`
-		TotalSize *int64         `json:"totalSize"`
+		// TransferID is optional; an absent key decodes to "" and re-encodes as omitted (omitempty),
+		// so a manifest without it round-trips byte-identically.
+		TransferID string         `json:"transferId"`
+		Files      []rawFileEntry `json:"files"`
+		TotalSize  *int64         `json:"totalSize"`
 	}
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return nil, errors.New("control frame: invalid manifest")
@@ -279,7 +312,7 @@ func decodeManifest(payload []byte) (ControlMsg, error) {
 		}
 		files[i] = f
 	}
-	return &Manifest{Type: FrameManifest, Files: files, TotalSize: *raw.TotalSize}, nil
+	return &Manifest{Type: FrameManifest, TransferID: raw.TransferID, Files: files, TotalSize: *raw.TotalSize}, nil
 }
 
 func decodeBlockHash(payload []byte) (ControlMsg, error) {
@@ -390,4 +423,35 @@ func decodeFail(payload []byte) (ControlMsg, error) {
 	default:
 		return nil, fmt.Errorf("control frame: bad fail reason %q", *raw.Reason)
 	}
+}
+
+// rawResumeFileState uses pointer fields so a missing key is distinguishable from a zero value
+// (e.g. idx 0 or haveBlocks 0), matching the TS num() presence checks.
+type rawResumeFileState struct {
+	Idx        *int `json:"idx"`
+	HaveBlocks *int `json:"haveBlocks"`
+}
+
+func decodeResumeState(payload []byte) (ControlMsg, error) {
+	var raw struct {
+		TransferID *string              `json:"transferId"`
+		Files      []rawResumeFileState `json:"files"`
+	}
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return nil, errors.New("control frame: invalid resume_state")
+	}
+	if raw.TransferID == nil {
+		return nil, errors.New("control frame: resume_state.transferId missing")
+	}
+	if len(raw.Files) == 0 {
+		return nil, errors.New("control frame: resume_state.files empty")
+	}
+	files := make([]ResumeFileState, len(raw.Files))
+	for i, rf := range raw.Files {
+		if rf.Idx == nil || rf.HaveBlocks == nil {
+			return nil, errors.New("control frame: incomplete resume file state")
+		}
+		files[i] = ResumeFileState{Idx: *rf.Idx, HaveBlocks: *rf.HaveBlocks}
+	}
+	return &ResumeState{Type: FrameResumeState, TransferID: *raw.TransferID, Files: files}, nil
 }

@@ -23,6 +23,47 @@ describe('control-message codec', () => {
     expect(decodeControl(encodeControl(manifest))).toEqual(manifest);
   });
 
+  it('round-trips a manifest carrying a transferId', () => {
+    const manifest: Manifest = {
+      type: FrameType.Manifest,
+      transferId: '0123456789abcdef0123456789abcdef',
+      files: [
+        {
+          idx: 0,
+          name: 'a.bin',
+          size: 10,
+          mime: 'application/octet-stream',
+          lastModified: 5,
+          blockSize: 8,
+          blocks: 2,
+          fileDigest: 'ab',
+        },
+      ],
+      totalSize: 10,
+    };
+    const wire = encodeControl(manifest);
+    expect(new TextDecoder().decode(wire)).toBe(
+      '{"type":2,"transferId":"0123456789abcdef0123456789abcdef","files":[{"idx":0,"name":"a.bin","size":10,"mime":"application/octet-stream","lastModified":5,"blockSize":8,"blocks":2,"fileDigest":"ab"}],"totalSize":10}',
+    );
+    expect(decodeControl(wire)).toEqual(manifest);
+  });
+
+  it('round-trips a resume_state', () => {
+    const msg = {
+      type: FrameType.ResumeState,
+      transferId: '0123456789abcdef0123456789abcdef',
+      files: [
+        { idx: 0, haveBlocks: 3 },
+        { idx: 1, haveBlocks: 0 },
+      ],
+    } as const;
+    const wire = encodeControl(msg);
+    expect(new TextDecoder().decode(wire)).toBe(
+      '{"type":12,"transferId":"0123456789abcdef0123456789abcdef","files":[{"idx":0,"haveBlocks":3},{"idx":1,"haveBlocks":0}]}',
+    );
+    expect(decodeControl(wire)).toEqual(msg);
+  });
+
   it('round-trips block and terminal messages', () => {
     const msgs = [
       { type: FrameType.BlockHash, fileIdx: 0, blockIdx: 1, sha256: 'ff' },
@@ -56,5 +97,22 @@ describe('control-message codec', () => {
       decodeControl(encodeControl({ type: FrameType.Control, op: 'stop' } as never)),
     ).toThrow();
     expect(() => decodeControl(encodeControl({ type: FrameType.Complete } as never))).toThrow(); // missing fileDigest
+    expect(() =>
+      decodeControl(encodeControl({ type: FrameType.ResumeState, files: [] } as never)),
+    ).toThrow(); // missing transferId + empty files
+    expect(() =>
+      decodeControl(
+        encodeControl({ type: FrameType.ResumeState, transferId: 'x', files: [] } as never),
+      ),
+    ).toThrow(); // empty files
+    expect(() =>
+      decodeControl(
+        encodeControl({
+          type: FrameType.ResumeState,
+          transferId: 'x',
+          files: [{ idx: 0 }],
+        } as never),
+      ),
+    ).toThrow(); // resume file missing haveBlocks
   });
 });

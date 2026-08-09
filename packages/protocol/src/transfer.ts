@@ -27,6 +27,7 @@ export enum FrameType {
   Complete = 9,
   Done = 10,
   Fail = 11,
+  ResumeState = 12,
 }
 
 /** Feature flags negotiated in caps. */
@@ -60,6 +61,12 @@ export interface FileEntry {
 
 export interface Manifest {
   type: FrameType.Manifest;
+  /**
+   * Random 128-bit id (hex) minted by the sender so a resumed receiver can prove it is
+   * resuming *this* transfer, not a different file set that reused the room. Optional: older
+   * senders omit it, and a transfer that is never resumed never needs it.
+   */
+  transferId?: string;
   files: FileEntry[];
   totalSize: number;
 }
@@ -117,5 +124,28 @@ export interface Fail {
   reason: 'digest_mismatch' | 'integrity' | 'sink_error' | 'canceled' | 'quota' | 'retry_exhausted';
 }
 
+/** One file's resume position within a {@link ResumeState}. */
+export interface ResumeFileState {
+  idx: number;
+  /**
+   * Per-file high-water mark: the count of consecutively-committed blocks the receiver already
+   * holds (its `nextBlock`). Because commitment is strictly in order, a single integer fully
+   * describes what is held — no sparse bitmap on the wire.
+   */
+  haveBlocks: number;
+}
+
+/**
+ * Receiver → sender (forwarded), sent once immediately after the manifest is re-confirmed on a
+ * fresh session: "I already hold blocks `[0, haveBlocks)` of each file — restart there." The
+ * sender validates it against its own manifest (same `transferId`, `haveBlocks ≤ file.blocks`)
+ * and streams only the missing blocks; a mismatch fails the transfer closed.
+ */
+export interface ResumeState {
+  type: FrameType.ResumeState;
+  transferId: string;
+  files: ResumeFileState[];
+}
+
 export type TransferMsg =
-  Caps | Manifest | BlockHash | BlockRecv | Ack | Nack | Control | Complete | Done | Fail;
+  Caps | Manifest | BlockHash | BlockRecv | Ack | Nack | Control | Complete | Done | Fail | ResumeState;
