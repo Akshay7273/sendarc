@@ -27,7 +27,8 @@ Files stream without being loaded entirely into memory.
 - **Files and folders.** Each file is independently verified; browsers can write directly to a
   chosen destination or stream a portable ZIP fallback without buffering the file set in memory.
 - **Reliable and controllable.** Verified block acknowledgements drive progress and recovery;
-  missing blocks are retried, and either peer can pause, resume, or cancel a transfer.
+  missing blocks are retried, an interrupted direct path can continue through the relay, and either
+  peer can pause, resume, or cancel a transfer.
 - **Verifiable completion.** Every block is authenticated and hashed; the final streaming
   SHA-256 digest is compatible with `sha256sum`.
 - **Browser and CLI interoperability.** Send or receive with either client using the same

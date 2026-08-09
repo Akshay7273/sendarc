@@ -50,11 +50,13 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
           pause(): void;
           resume(): void;
           cancel(reason?: string): void;
+          transportChanged(): void | Promise<void>;
         }
       | undefined;
     let started = false;
     const pending: Uint8Array[] = [];
     const pendingControls: Array<'pause' | 'resume' | 'cancel'> = [];
+    let pendingTransportChange = false;
 
     const post = (msg: WorkerToHost): void => port.postMessage(msg);
     const send = (frame: Uint8Array): void => {
@@ -66,9 +68,12 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
       pause(): void;
       resume(): void;
       cancel(reason?: string): void;
+      transportChanged(): void | Promise<void>;
     }): void => {
       engine = e;
       post({ kind: 'state', state: 'running' });
+      if (pendingTransportChange) void e.transportChanged();
+      pendingTransportChange = false;
       for (const f of pending) consume(e, f);
       pending.length = 0;
       for (const op of pendingControls) {
@@ -114,6 +119,10 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
           else pending.push(frame);
           return;
         }
+        case 'transport-changed':
+          if (engine) void engine.transportChanged();
+          else pendingTransportChange = true;
+          return;
         case 'cancel':
           if (engine) engine.cancel(msg.reason);
           else pendingControls.push('cancel');

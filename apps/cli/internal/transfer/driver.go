@@ -55,7 +55,7 @@ type Spec struct {
 	// does not finish in time; zero uses the production default.
 	ForceRelay     bool
 	ConnectTimeout time.Duration
-	// OnTransport reports "direct" or "relay" once the byte path is selected.
+	// OnTransport reports "direct" or "relay" when the selected byte path changes.
 	OnTransport func(string)
 	// OnConnect fires once the DataChannel opens, before the first byte moves.
 	OnConnect func()
@@ -70,6 +70,8 @@ type Spec struct {
 	OnControls func(Controls)
 	// OnStateChange reports pause, resume, and remote cancellation.
 	OnStateChange func(wire.TransferState)
+	// breakDirect is a deterministic in-package integration hook.
+	breakDirect <-chan struct{}
 }
 
 // Outcome is the result of a completed transfer.
@@ -180,41 +182,67 @@ func (d *driver) run(ctx context.Context) (*Outcome, error) {
 	if d.spec.OnTransport != nil {
 		d.spec.OnTransport(path)
 	}
+	var adaptive *adaptiveConn
+	if path == "direct" {
+		adaptive = newAdaptiveConn(conn.(*rtc.DataConn), d.relay, d.spec.OnTransport)
+		conn = adaptive
+		if d.spec.breakDirect != nil {
+			go func() {
+				select {
+				case <-d.spec.breakDirect:
+					_ = peer.Close()
+				case <-ctx.Done():
+				}
+			}()
+		}
+	}
 	if d.spec.OnConnect != nil {
 		d.spec.OnConnect()
 	}
 
+	transferCtx, cancelTransfer := context.WithCancel(ctx)
+	type transferResult struct {
+		out *Outcome
+		err error
+	}
+	transferDone := make(chan transferResult, 1)
+	go func() {
+		result, transferErr := d.transfer(transferCtx, conn, res)
+		transferDone <- transferResult{out: result, err: transferErr}
+	}()
 	var out *Outcome
 	var terr error
 	readEnded := false
-	if path == "relay" {
-		transferCtx, cancelTransfer := context.WithCancel(ctx)
-		type transferResult struct {
-			out *Outcome
-			err error
-		}
-		transferDone := make(chan transferResult, 1)
-		go func() {
-			result, transferErr := d.transfer(transferCtx, conn, res)
-			transferDone <- transferResult{out: result, err: transferErr}
-		}()
+	readCh := (<-chan error)(readErr)
+	for {
 		select {
 		case result := <-transferDone:
 			out, terr = result.out, result.err
-		case sigErr := <-readErr:
-			readEnded = true
 			cancelTransfer()
-			_ = conn.Close()
-			<-transferDone
+			goto transferSettled
+		case sigErr := <-readCh:
+			readEnded = true
 			if sigErr == nil {
 				sigErr = errors.New("signaling closed")
 			}
-			terr = fmt.Errorf("transfer: relay connection lost: %w", sigErr)
+			if adaptive != nil && !adaptive.IsRelay() {
+				adaptive.SignalingLost(sigErr)
+				readCh = nil // a healthy direct channel can finish without signaling
+				continue
+			}
+			cancelTransfer()
+			_ = conn.Close()
+			<-transferDone
+			if ctx.Err() != nil {
+				terr = ctx.Err()
+			} else {
+				terr = fmt.Errorf("transfer: relay connection lost: %w", sigErr)
+			}
+			goto transferSettled
 		}
-		cancelTransfer()
-	} else {
-		out, terr = d.transfer(ctx, conn, res)
 	}
+
+transferSettled:
 
 	// Drain the data channel before tearing down the peer: the first side to finish (the
 	// receiver, once it has sent done) must let that final frame reach the wire, or closing the
@@ -393,6 +421,9 @@ func (d *driver) send(ctx context.Context, conn dataConn, res *rendezvous.Result
 		OnFileProgress:   d.spec.OnFileProgress,
 		OnStateChange:    d.spec.OnStateChange,
 	})
+	if switched, ok := conn.(*adaptiveConn); ok {
+		switched.SetOnSwitch(sender.TransportChanged)
+	}
 	conn.OnData(sender.Handle)
 	if d.spec.OnControls != nil {
 		d.spec.OnControls(sender)
@@ -448,6 +479,9 @@ func (d *driver) receive(ctx context.Context, conn dataConn, res *rendezvous.Res
 			return nil
 		},
 	})
+	if switched, ok := conn.(*adaptiveConn); ok {
+		switched.SetOnSwitch(receiver.TransportChanged)
+	}
 	conn.OnData(receiver.Handle)
 	if d.spec.OnControls != nil {
 		d.spec.OnControls(receiver)

@@ -1,9 +1,9 @@
 /**
  * Transfer orchestrator — the main-thread conductor that turns a settled rendezvous into a running
  * file transfer. It adopts the still-open signaling socket, prefers an authenticated WebRTC data
- * channel ({@link createPeer}), and falls back to the encrypted relay when direct negotiation fails.
- * It spawns the transfer worker ({@link runTransferCore} host) and pumps frames between the selected
- * path and worker. The worker owns crypto and disk; this module owns transport selection and the
+ * channel ({@link createPeer}), and falls back to the encrypted relay when negotiation or an active
+ * direct path fails. It spawns the transfer worker ({@link runTransferCore} host) and pumps frames
+ * between the selected path and worker. The worker owns crypto and disk; this module owns transport selection and the
  * public {@link TransferController} the UI binds against (progress, a `done` promise, cancel).
  *
  * Browser-only (needs `Worker`, `RTCPeerConnection`); not unit-tested — the pieces it wires each
@@ -106,6 +106,7 @@ function run(
   let writer: ChannelWriter | undefined;
   let relay: RelayTransport | undefined;
   let transport: 'connecting' | 'direct' | 'relay' = 'connecting';
+  let switchPromise: Promise<void> | undefined;
   let cancelTimer: ReturnType<typeof setTimeout> | undefined;
 
   let resolveDone!: (o: TransferOutcome) => void;
@@ -147,8 +148,8 @@ function run(
       const relayPath = new RelayTransport(signaling);
       relay = relayPath;
       signaling.onClose((err) => {
-        if (transport !== 'direct') {
-          relayPath.fail(err);
+        relayPath.fail(err);
+        if (transport !== 'direct' || switchPromise) {
           fail(err);
         }
       });
@@ -175,18 +176,68 @@ function run(
       }
       await ready;
 
+      // Channel → worker: forward every inbound data frame as a Transferable.
+      const receive = (frame: ArrayBuffer): void =>
+        w.postMessage({ kind: 'inbound-frame', frame } satisfies HostToWorker, [frame]);
+      const switchToRelay = (): Promise<void> => {
+        if (transport === 'relay') return Promise.resolve();
+        if (switchPromise) return switchPromise;
+        switchPromise = (async () => {
+          relayPath.open();
+          await relayPath.ready;
+          if (settled) return;
+          transport = 'relay';
+          w.postMessage({ kind: 'transport-changed' } satisfies HostToWorker);
+          writer = undefined;
+          p.close();
+        })().catch((err: unknown) => {
+          const failure = err instanceof Error ? err : new Error(String(err));
+          fail(failure);
+          throw failure;
+        });
+        return switchPromise;
+      };
+      const sendOutbound = async (frame: ArrayBuffer): Promise<void> => {
+        if (transport === 'relay') {
+          await relayPath.write(frame);
+          return;
+        }
+        if (switchPromise) {
+          await switchPromise;
+          await relayPath.write(frame);
+          return;
+        }
+        try {
+          writer!.write(frame);
+        } catch {
+          await switchToRelay();
+          await relayPath.write(frame);
+        }
+      };
+
+      if (selected.kind === 'direct') {
+        p.onData((frame) => {
+          if (transport === 'direct' && !switchPromise) receive(frame);
+        });
+        p.onDisconnect(() => void switchToRelay().catch(() => {}));
+        void relayPath.ready.then(switchToRelay).catch(() => {});
+        relayPath.onData((frame) => {
+          void switchToRelay()
+            .then(() => receive(frame))
+            .catch(() => {});
+        });
+      } else {
+        relayPath.onData(receive);
+      }
+
       // Worker → host events.
       w.addEventListener('message', (ev: MessageEvent) => {
         const msg = ev.data as WorkerToHost;
         switch (msg.kind) {
           case 'outbound-frame':
-            if (transport === 'relay') {
-              void relayPath
-                .write(msg.frame)
-                .catch((err: unknown) => fail(err instanceof Error ? err : new Error(String(err))));
-            } else {
-              writer?.write(msg.frame);
-            }
+            void sendOutbound(msg.frame).catch((err: unknown) =>
+              fail(err instanceof Error ? err : new Error(String(err))),
+            );
             return;
           case 'frame-consumed':
             if (transport === 'relay') relayPath.consumed(msg.bytes);
@@ -218,12 +269,6 @@ function run(
             return;
         }
       });
-
-      // Channel → worker: forward every inbound data frame as a Transferable.
-      const receive = (frame: ArrayBuffer): void =>
-        w.postMessage({ kind: 'inbound-frame', frame } satisfies HostToWorker, [frame]);
-      if (selected.kind === 'direct') p.onData(receive);
-      else relayPath.onData(receive);
 
       // Kick off the transfer in the worker.
       const startMsg = spec.start();

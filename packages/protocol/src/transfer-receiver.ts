@@ -72,6 +72,7 @@ export class TransferReceiver {
   private assemblingFileIdx = -1;
   private blockBuf: Uint8Array | undefined;
   private blockReceived = 0;
+  private awaitingRestart = false;
   private readonly seenAhead = new Set<number>();
   private nackOutstanding: number | undefined;
   private paused = false;
@@ -109,6 +110,20 @@ export class TransferReceiver {
             : new TransferError('integrity', e instanceof Error ? e.message : String(e)),
         );
       });
+    return this.inbound;
+  }
+
+  /** Discard an unverified partial block when the host replaces the ordered byte path. */
+  transportChanged(): Promise<void> {
+    this.inbound = this.inbound.then(() => {
+      this.blockBuf = undefined;
+      this.blockReceived = 0;
+      this.assemblingBlock = -1;
+      this.assemblingFileIdx = -1;
+      this.seenAhead.clear();
+      this.nackOutstanding = undefined;
+      this.awaitingRestart = true;
+    });
     return this.inbound;
   }
 
@@ -265,6 +280,7 @@ export class TransferReceiver {
     if (!entry || fileIdx > this.fileIdx || blockIdx < 0 || blockIdx >= entry.blocks) {
       throw new TransferError('integrity', `block_data outside manifest: ${blockIdx}`);
     }
+    if (this.awaitingRestart && frameOff !== 0) return;
     if (frameOff === 0) {
       if (this.blockBuf) throw new TransferError('integrity', 'new block before block_hash');
       const blockLen = Math.min(entry.blockSize, entry.size - blockIdx * entry.blockSize);
@@ -272,6 +288,7 @@ export class TransferReceiver {
       this.assemblingBlock = blockIdx;
       this.blockBuf = new Uint8Array(blockLen);
       this.blockReceived = 0;
+      this.awaitingRestart = false;
     }
     if (!this.blockBuf || this.assemblingFileIdx !== fileIdx || this.assemblingBlock !== blockIdx) {
       throw new TransferError('integrity', `unexpected block fragment ${blockIdx}`);
@@ -285,6 +302,7 @@ export class TransferReceiver {
 
   private async onBlockHash(payload: Uint8Array): Promise<void> {
     const block = this.blockBuf;
+    if (!block && this.awaitingRestart) return;
     if (!this.manifest || !block) {
       throw new TransferError('integrity', 'block_hash without a block');
     }

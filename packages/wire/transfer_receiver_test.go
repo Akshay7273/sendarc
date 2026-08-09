@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -332,6 +333,45 @@ func TestReceiverRequestsMissingAndRecoversReorderedBlocks(t *testing.T) {
 		if string(gotJSON) != string(wantJSON) {
 			t.Errorf("back frame %d = %s, want %s", i, gotJSON, wantJSON)
 		}
+	}
+}
+
+func TestReceiverDiscardsPartialBlockAcrossTransportChange(t *testing.T) {
+	keys, err := DeriveTransferKeys(senderMaster())
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := seq(8)
+	fileDigest := hexSHA256(data)
+	sf := newSenderFrames(t, keys)
+	sf.ctrl(NewManifest([]FileEntry{{
+		Idx: 0, Name: "switched.bin", Size: 8, BlockSize: 8, Blocks: 1, FileDigest: fileDigest,
+	}}, 8))
+	sf.push(FrameHeaderInput{
+		Version: FrameVersion, Type: FrameBlockData, FileIdx: 0, BlockIdx: 0, FrameOff: 0,
+	}, data[:4])
+	partialEnd := len(sf.frames)
+	sf.oneBlock(0, data, 8)
+	sf.ctrl(NewComplete(fileDigest))
+
+	sink := &MemorySink{}
+	var back outbox
+	r := NewReceiver(ReceiverOptions{
+		Send: back.push, SendDir: keys.J2O, RecvDir: keys.O2J, Sink: sink,
+	})
+	for _, frame := range sf.frames[:partialEnd] {
+		r.Handle(frame)
+	}
+	r.TransportChanged()
+	for _, frame := range sf.frames[partialEnd:] {
+		r.Handle(frame)
+	}
+	result, err := r.Wait(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Digest != fileDigest || !bytes.Equal(sink.Bytes(), data) {
+		t.Fatalf("recovered digest=%s bytes=%v", result.Digest, sink.Bytes())
 	}
 }
 
