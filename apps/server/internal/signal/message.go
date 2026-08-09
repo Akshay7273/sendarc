@@ -17,17 +17,22 @@ import (
 // Wire message types. Control types are handled by the server; the
 // forwardable types are relayed peer-to-peer as opaque bytes.
 const (
-	typeCreate     = "create"
-	typeCreated    = "created"
-	typeJoin       = "join"
-	typePeerJoined = "peer-joined"
-	typePake       = "pake"
-	typeConfirm    = "confirm"
-	typeCaps       = "caps"
-	typeSDP        = "sdp"
-	typeICE        = "ice"
-	typeBye        = "bye"
-	typeError      = "error"
+	typeCreate        = "create"
+	typeCreated       = "created"
+	typeJoin          = "join"
+	typePeerJoined    = "peer-joined"
+	typePake          = "pake"
+	typeConfirm       = "confirm"
+	typeCaps          = "caps"
+	typeSDP           = "sdp"
+	typeICE           = "ice"
+	typeRelayOpen     = "relay_open"
+	typeRelayRequired = "relay_required"
+	typeRelayReady    = "relay_ready"
+	typeRelayCredit   = "relay_credit"
+	typeCredit        = "credit"
+	typeBye           = "bye"
+	typeError         = "error"
 )
 
 // Role labels echoed to peers on pairing. These are routing labels only; their
@@ -50,20 +55,29 @@ var forwardable = map[string]bool{
 
 // Error codes carried in an error message's "code" field.
 const (
-	errBadMessage  = "bad_message"
-	errUnknownRoom = "unknown_room"
-	errRoomFull    = "room_full"
-	errNotPaired   = "not_paired"
-	errRateLimited = "rate_limited"
-	errProtocol    = "protocol"
+	errBadMessage    = "bad_message"
+	errUnknownRoom   = "unknown_room"
+	errRoomFull      = "room_full"
+	errNotPaired     = "not_paired"
+	errRateLimited   = "rate_limited"
+	errProtocol      = "protocol"
+	errRelayNotReady = "relay_not_ready"
+	errRelayCredit   = "relay_credit"
+	errRelayLimit    = "relay_limit"
 )
 
 // clientMsg is the envelope the server parses from a client. Only type and room are
 // read; the payloads of forwardable messages are relayed as raw bytes and never
 // decoded here, which is what keeps the server blind to handshake contents.
 type clientMsg struct {
-	Type string `json:"type"`
-	Room *int   `json:"room,omitempty"`
+	Type  string `json:"type"`
+	Room  *int   `json:"room,omitempty"`
+	Bytes int64  `json:"bytes,omitempty"`
+}
+
+type relayMsg struct {
+	Type  string `json:"type"`
+	Bytes int64  `json:"bytes,omitempty"`
 }
 
 // createdMsg tells the offerer which room number the server allocated.
@@ -117,6 +131,12 @@ func errorFrame(code, msg string) []byte {
 	return mustJSON(errorMsg{Type: typeError, Code: code, Msg: msg})
 }
 
+func relayFrame(typ string) []byte { return mustJSON(relayMsg{Type: typ}) }
+
+func creditFrame(bytes int64) []byte {
+	return mustJSON(relayMsg{Type: typeCredit, Bytes: bytes})
+}
+
 // Config controls the signaling server's limits and origin policy.
 type Config struct {
 	// AllowedOrigins is the WSS origin allowlist for browser clients. An empty list
@@ -140,18 +160,32 @@ type Config struct {
 	// upgrade time.
 	ConnBurst  int
 	ConnPerSec float64
+
+	// Relay limits bound every layer of the opaque binary data path.
+	MaxRelayFrameBytes   int64
+	RelayWindowBytes     int64
+	RelayQueueBytes      int64
+	RelayBurstBytes      int64
+	RelayBytesPerSec     int64
+	RelayMaxSessionBytes int64
 }
 
-// DefaultConfig returns limits sized for the rendezvous workload: a handful of tiny
-// JSON control messages per session, not a data path.
+// DefaultConfig returns conservative rendezvous and opaque relay limits. Relay ceilings are high
+// enough for ordinary transfers while keeping memory, bandwidth, and lifetime bytes explicit.
 func DefaultConfig() Config {
 	return Config{
-		IdleTimeout:     2 * time.Minute,
-		MaxMessageBytes: 64 * 1024,
-		MsgBurst:        32,
-		MsgPerSec:       16,
-		ConnBurst:       16,
-		ConnPerSec:      8,
+		IdleTimeout:          2 * time.Minute,
+		MaxMessageBytes:      64 * 1024,
+		MsgBurst:             32,
+		MsgPerSec:            16,
+		ConnBurst:            16,
+		ConnPerSec:           8,
+		MaxRelayFrameBytes:   128 * 1024,
+		RelayWindowBytes:     1 * 1024 * 1024,
+		RelayQueueBytes:      2 * 1024 * 1024,
+		RelayBurstBytes:      8 * 1024 * 1024,
+		RelayBytesPerSec:     32 * 1024 * 1024,
+		RelayMaxSessionBytes: 16 * 1024 * 1024 * 1024,
 	}
 }
 
@@ -170,6 +204,24 @@ func ConfigFromEnv() Config {
 	}
 	if n, ok := envInt("SENDARC_SIGNAL_MAX_MESSAGE_BYTES"); ok {
 		cfg.MaxMessageBytes = int64(n)
+	}
+	if n, ok := envInt64("SENDARC_RELAY_MAX_FRAME_BYTES"); ok {
+		cfg.MaxRelayFrameBytes = n
+	}
+	if n, ok := envInt64("SENDARC_RELAY_WINDOW_BYTES"); ok {
+		cfg.RelayWindowBytes = n
+	}
+	if n, ok := envInt64("SENDARC_RELAY_QUEUE_BYTES"); ok {
+		cfg.RelayQueueBytes = n
+	}
+	if n, ok := envInt64("SENDARC_RELAY_BURST_BYTES"); ok {
+		cfg.RelayBurstBytes = n
+	}
+	if n, ok := envInt64("SENDARC_RELAY_BYTES_PER_SEC"); ok {
+		cfg.RelayBytesPerSec = n
+	}
+	if n, ok := envInt64("SENDARC_RELAY_MAX_SESSION_BYTES"); ok {
+		cfg.RelayMaxSessionBytes = n
 	}
 	return cfg
 }
@@ -192,6 +244,18 @@ func envInt(key string) (int, bool) {
 		return 0, false
 	}
 	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+func envInt64(key string) (int64, bool) {
+	v := os.Getenv(key)
+	if v == "" {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil || n <= 0 {
 		return 0, false
 	}

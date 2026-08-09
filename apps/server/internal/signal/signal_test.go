@@ -80,6 +80,15 @@ func (c *client) sendRaw(data []byte) {
 	}
 }
 
+func (c *client) sendBinary(data []byte) {
+	c.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := c.conn.Write(ctx, websocket.MessageBinary, data); err != nil {
+		c.t.Fatalf("write binary: %v", err)
+	}
+}
+
 func (c *client) recv() map[string]any {
 	c.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -105,6 +114,20 @@ func (c *client) recvRaw() []byte {
 	_, data, err := c.conn.Read(ctx)
 	if err != nil {
 		c.t.Fatalf("read raw: %v", err)
+	}
+	return data
+}
+
+func (c *client) recvBinary() []byte {
+	c.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	typ, data, err := c.conn.Read(ctx)
+	if err != nil {
+		c.t.Fatalf("read binary: %v", err)
+	}
+	if typ != websocket.MessageBinary {
+		c.t.Fatalf("frame type = %v, want binary (%s)", typ, data)
 	}
 	return data
 }
@@ -160,6 +183,84 @@ func TestBlindForwardVerbatim(t *testing.T) {
 	joiner.sendRaw(conf)
 	if got := offerer.recvRaw(); string(got) != string(conf) {
 		t.Fatalf("forwarded confirm = %s, want %s", got, conf)
+	}
+}
+
+func openRelay(t *testing.T, offerer, joiner *client) {
+	t.Helper()
+	offerer.send(map[string]any{"type": typeRelayOpen})
+	if got := joiner.recv(); got["type"] != typeRelayRequired {
+		t.Fatalf("relay required = %v", got)
+	}
+	joiner.send(map[string]any{"type": typeRelayOpen})
+	if got := offerer.recv(); got["type"] != typeRelayReady {
+		t.Fatalf("offerer relay ready = %v", got)
+	}
+	if got := joiner.recv(); got["type"] != typeRelayReady {
+		t.Fatalf("joiner relay ready = %v", got)
+	}
+}
+
+func TestRelayForwardsOpaqueBinaryWithinReceiverCredit(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RelayWindowBytes = 1024
+	url := testServer(t, cfg)
+	offerer, joiner, _ := pair(t, url)
+	openRelay(t, offerer, joiner)
+
+	joiner.send(map[string]any{"type": typeRelayCredit, "bytes": 64})
+	if got := offerer.recv(); got["type"] != typeCredit || got["bytes"] != float64(64) {
+		t.Fatalf("offerer credit = %v", got)
+	}
+	opaque := []byte{0, 255, 19, 88, 42, 7}
+	offerer.sendBinary(opaque)
+	if got := joiner.recvBinary(); string(got) != string(opaque) {
+		t.Fatalf("relay changed opaque bytes: %x != %x", got, opaque)
+	}
+
+	offerer.send(map[string]any{"type": typeRelayCredit, "bytes": 32})
+	if got := joiner.recv(); got["type"] != typeCredit || got["bytes"] != float64(32) {
+		t.Fatalf("joiner credit = %v", got)
+	}
+	joiner.sendBinary([]byte{9, 8, 7})
+	if got := offerer.recvBinary(); string(got) != string([]byte{9, 8, 7}) {
+		t.Fatalf("reverse relay bytes = %x", got)
+	}
+}
+
+func TestRelayRefusesBytesBeyondCredit(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RelayWindowBytes = 32
+	url := testServer(t, cfg)
+	offerer, joiner, _ := pair(t, url)
+	openRelay(t, offerer, joiner)
+	joiner.send(map[string]any{"type": typeRelayCredit, "bytes": 16})
+	_ = offerer.recv()
+	offerer.sendBinary(make([]byte, 17))
+	if got := offerer.recv(); got["type"] != typeError || got["code"] != errRelayCredit {
+		t.Fatalf("credit violation = %v", got)
+	}
+}
+
+func TestRelayEnforcesFrameAndSessionCeilings(t *testing.T) {
+	for name, configure := range map[string]func(*Config){
+		"frame":   func(cfg *Config) { cfg.MaxRelayFrameBytes = 8 },
+		"session": func(cfg *Config) { cfg.RelayMaxSessionBytes = 8 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.RelayWindowBytes = 64
+			configure(&cfg)
+			url := testServer(t, cfg)
+			offerer, joiner, _ := pair(t, url)
+			openRelay(t, offerer, joiner)
+			joiner.send(map[string]any{"type": typeRelayCredit, "bytes": 64})
+			_ = offerer.recv()
+			offerer.sendBinary(make([]byte, 9))
+			if got := offerer.recv(); got["type"] != typeError || got["code"] != errRelayLimit {
+				t.Fatalf("limit violation = %v", got)
+			}
+		})
 	}
 }
 
@@ -261,12 +362,18 @@ func TestMessageSizeCap(t *testing.T) {
 	for i := range big {
 		big[i] = 'a'
 	}
-	// Writing may succeed locally; the server closes the socket for exceeding the
-	// read limit, so a subsequent read fails.
+	// Writing may succeed locally; the server reports the protocol violation and closes.
 	c.sendRaw(big)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if _, _, err := c.conn.Read(ctx); err == nil {
-		t.Fatal("expected the socket to close after an oversize message")
+	_, data, err := c.conn.Read(ctx)
+	if err == nil {
+		var got map[string]any
+		if json.Unmarshal(data, &got) != nil || got["type"] != typeError {
+			t.Fatalf("oversize response = %s", data)
+		}
+		if _, _, err = c.conn.Read(ctx); err == nil {
+			t.Fatal("expected the socket to close after the oversize error")
+		}
 	}
 }
