@@ -147,7 +147,7 @@ func (r *Receiver) applyManifest(payload []byte) error {
 	return nil
 }
 
-func (r *Receiver) onBlockData(blockIdx uint32, frameOff uint16, payload []byte) error {
+func (r *Receiver) onBlockData(blockIdx uint32, frameOff uint32, payload []byte) error {
 	if r.file == nil {
 		return NewTransferError(FailIntegrity, "block_data before manifest")
 	}
