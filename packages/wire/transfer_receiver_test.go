@@ -68,6 +68,24 @@ func (s *senderFrames) blockData(data []byte, blockSize, frameSize int) {
 	}
 }
 
+func (s *senderFrames) oneBlock(blockIdx int, block []byte, frameSize int) {
+	for off := 0; off < len(block); off += frameSize {
+		end := off + frameSize
+		if end > len(block) {
+			end = len(block)
+		}
+		flags := uint8(0)
+		if end == len(block) {
+			flags = FrameFlagLastInBlock
+		}
+		s.push(FrameHeaderInput{
+			Version: FrameVersion, Type: FrameBlockData, Flags: flags,
+			BlockIdx: uint32(blockIdx), FrameOff: uint32(off),
+		}, block[off:end])
+	}
+	s.ctrl(NewBlockHash(0, blockIdx, hexSHA256(block)))
+}
+
 func hexSHA256(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
@@ -114,8 +132,8 @@ func TestReceiverAssemblesVerifiesWritesDone(t *testing.T) {
 		t.Error("sink not closed on done")
 	}
 
-	// Back-channel: block_recv ×3 then done.
-	wantBack := []uint8{FrameBlockRecv, FrameBlockRecv, FrameBlockRecv, FrameDone}
+	// Back-channel: verified ACK ×3 then done.
+	wantBack := []uint8{FrameAck, FrameAck, FrameAck, FrameDone}
 	got := back.snapshot()
 	if len(got) != len(wantBack) {
 		t.Fatalf("back-channel has %d frames, want %d", len(got), len(wantBack))
@@ -148,8 +166,9 @@ func TestReceiverAbortsIntegrityOnCorruptFrame(t *testing.T) {
 	last[len(last)-1] ^= 0x01
 
 	sink := &MemorySink{}
+	var back outbox
 	r := NewReceiver(ReceiverOptions{
-		Send: func([]byte) error { return nil }, SendDir: keys.J2O, RecvDir: keys.O2J, Sink: sink,
+		Send: back.push, SendDir: keys.J2O, RecvDir: keys.O2J, Sink: sink,
 	})
 	for _, f := range sf.frames {
 		r.Handle(f)
@@ -160,6 +179,17 @@ func TestReceiverAbortsIntegrityOnCorruptFrame(t *testing.T) {
 	}
 	if sink.AbortReason() != "integrity" {
 		t.Errorf("sink abort reason = %q, want integrity", sink.AbortReason())
+	}
+	frames := back.snapshot()
+	if len(frames) != 1 {
+		t.Fatalf("back-channel has %d frames, want one terminal fail", len(frames))
+	}
+	opened, openErr := Open(keys.J2O, 0, frames[0])
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	if opened.Header.Type != FrameFail {
+		t.Fatalf("corruption response type = %d, want fail", opened.Header.Type)
 	}
 }
 
@@ -236,6 +266,72 @@ func TestReceiverFailsDigestMismatch(t *testing.T) {
 	_, err = r.Wait(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "digest_mismatch") {
 		t.Fatalf("Wait error = %v, want one mentioning digest_mismatch", err)
+	}
+}
+
+func TestReceiverRequestsMissingAndRecoversReorderedBlocks(t *testing.T) {
+	keys, err := DeriveTransferKeys(senderMaster())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := []byte{1, 2, 3, 4}
+	second := []byte{5, 6, 7, 8}
+	data := append(append([]byte(nil), first...), second...)
+	fileDigest := hexSHA256(data)
+
+	sf := newSenderFrames(t, keys)
+	sf.ctrl(NewManifest([]FileEntry{{
+		Idx: 0, Name: "reordered.bin", Size: int64(len(data)), BlockSize: 4,
+		Blocks: 2, FileDigest: fileDigest,
+	}}, int64(len(data))))
+	// A transport transition exposes block 1 first. It is authenticated but not committed;
+	// the requested sequence then arrives under fresh counters.
+	sf.oneBlock(1, second, 4)
+	sf.oneBlock(0, first, 4)
+	sf.oneBlock(1, second, 4)
+	sf.ctrl(NewComplete(fileDigest))
+
+	sink := &MemorySink{}
+	var back outbox
+	r := NewReceiver(ReceiverOptions{
+		Send: back.push, SendDir: keys.J2O, RecvDir: keys.O2J, Sink: sink,
+	})
+	for _, frame := range sf.frames {
+		r.Handle(frame)
+	}
+	result, err := r.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if result.Digest != fileDigest || string(sink.Bytes()) != string(data) {
+		t.Fatalf("recovered result digest=%s bytes=%v", result.Digest, sink.Bytes())
+	}
+
+	want := []ControlMsg{
+		NewNack(0, 0, NackMissing),
+		NewAck(0, 0),
+		NewNack(0, 1, NackMissing),
+		NewAck(0, 1),
+		NewDone(),
+	}
+	frames := back.snapshot()
+	if len(frames) != len(want) {
+		t.Fatalf("back-channel has %d frames, want %d", len(frames), len(want))
+	}
+	for i, frame := range frames {
+		opened, openErr := Open(keys.J2O, uint64(i), frame)
+		if openErr != nil {
+			t.Fatalf("open back frame %d: %v", i, openErr)
+		}
+		got, decodeErr := DecodeControl(opened.Plaintext)
+		if decodeErr != nil {
+			t.Fatalf("decode back frame %d: %v", i, decodeErr)
+		}
+		gotJSON, _ := EncodeControl(got)
+		wantJSON, _ := EncodeControl(want[i])
+		if string(gotJSON) != string(wantJSON) {
+			t.Errorf("back frame %d = %s, want %s", i, gotJSON, wantJSON)
+		}
 	}
 }
 

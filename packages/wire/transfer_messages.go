@@ -47,7 +47,7 @@ type BlockHash struct {
 	SHA256   string `json:"sha256"`
 }
 
-// BlockRecv is the window signal: the receiver has taken delivery of a block (pre-ack).
+// BlockRecv is the legacy pre-verification receipt retained for decoder compatibility.
 type BlockRecv struct {
 	Type     uint8 `json:"type"`
 	FileIdx  int   `json:"fileIdx"`
@@ -152,7 +152,7 @@ func NewBlockHash(fileIdx, blockIdx int, sha256 string) *BlockHash {
 	return &BlockHash{Type: FrameBlockHash, FileIdx: fileIdx, BlockIdx: blockIdx, SHA256: sha256}
 }
 
-// NewBlockRecv builds a block_recv window signal.
+// NewBlockRecv builds a legacy pre-verification receipt.
 func NewBlockRecv(fileIdx, blockIdx int) *BlockRecv {
 	return &BlockRecv{Type: FrameBlockRecv, FileIdx: fileIdx, BlockIdx: blockIdx}
 }

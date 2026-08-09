@@ -6,7 +6,7 @@ import { FrameType } from './transfer.js';
 import { FRAME_VERSION } from './constants.js';
 import { sha256 } from './webcrypto.js';
 import { bytesToHex } from './bytes.js';
-import { encodeControl } from './transfer-messages.js';
+import { decodeControl, encodeControl } from './transfer-messages.js';
 import { MemorySink, type Digest, type Sink } from './transfer-ports.js';
 import { TransferReceiver } from './transfer-receiver.js';
 
@@ -101,16 +101,11 @@ describe('TransferReceiver', () => {
     expect(result.digest).toBe(fileDigest);
     expect([...sink.bytes()]).toEqual([...data]);
     expect(sink.isClosed).toBe(true);
-    // Back-channel: block_recv ×3 then done.
+    // Back-channel: verified ACK ×3 then done.
     let c = 0;
     const backTypes: number[] = [];
     for (const f of backChannel) backTypes.push((await open(keys.j2o, c++, f)).header.type);
-    expect(backTypes).toEqual([
-      FrameType.BlockRecv,
-      FrameType.BlockRecv,
-      FrameType.BlockRecv,
-      FrameType.Done,
-    ]);
+    expect(backTypes).toEqual([FrameType.Ack, FrameType.Ack, FrameType.Ack, FrameType.Done]);
   });
 
   it('aborts with integrity on a corrupted frame (GCM failure)', async () => {
@@ -148,8 +143,9 @@ describe('TransferReceiver', () => {
     b.frames.at(-1)![b.frames.at(-1)!.length - 1] ^= 0x01; // corrupt the tag
 
     const sink = new MemorySink();
+    const backChannel: Uint8Array[] = [];
     const receiver = new TransferReceiver({
-      send: () => {},
+      send: (frame) => void backChannel.push(frame),
       sendDir: keys.j2o,
       recvDir: keys.o2j,
       sendCounterStart: 0,
@@ -160,6 +156,8 @@ describe('TransferReceiver', () => {
     for (const f of b.frames) receiver.handle(f);
     await expect(receiver.done).rejects.toThrow(/integrity/);
     expect(sink.abortReason).toBe('integrity');
+    expect(backChannel).toHaveLength(1);
+    expect((await open(keys.j2o, 0, backChannel[0]!)).header.type).toBe(FrameType.Fail);
   });
 
   it('invokes onManifest with the file entry before writing the first block', async () => {
@@ -281,5 +279,85 @@ describe('TransferReceiver', () => {
     });
     for (const f of b.frames) receiver.handle(f);
     await expect(receiver.done).rejects.toThrow(/digest_mismatch/);
+  });
+
+  it('requests a missing block, reorders by retransmission, and verifies the file', async () => {
+    const keys = await deriveTransferKeys(master);
+    const first = new Uint8Array([1, 2, 3, 4]);
+    const second = new Uint8Array([5, 6, 7, 8]);
+    const data = new Uint8Array([...first, ...second]);
+    const fileDigest = createHash('sha256').update(data).digest('hex');
+    const b = await build(keys);
+    await b.ctrl(FrameType.Manifest, {
+      type: FrameType.Manifest,
+      files: [
+        {
+          idx: 0,
+          name: 'reordered.bin',
+          size: data.length,
+          mime: '',
+          lastModified: 0,
+          blockSize: 4,
+          blocks: 2,
+          fileDigest,
+        },
+      ],
+      totalSize: data.length,
+    });
+    const addBlock = async (blockIdx: number, block: Uint8Array) => {
+      await b.push(
+        {
+          version: FRAME_VERSION,
+          type: FrameType.BlockData,
+          flags: 1,
+          fileIdx: 0,
+          blockIdx,
+          frameOff: 0,
+        },
+        block,
+      );
+      await b.ctrl(FrameType.BlockHash, {
+        type: FrameType.BlockHash,
+        fileIdx: 0,
+        blockIdx,
+        sha256: bytesToHex(await sha256(block)),
+      });
+    };
+
+    // A transport transition exposes block 1 before block 0. The first copy of block 1 is
+    // authenticated but not committed; both blocks then arrive in the requested order.
+    await addBlock(1, second);
+    await addBlock(0, first);
+    await addBlock(1, second);
+    await b.ctrl(FrameType.Complete, { type: FrameType.Complete, fileDigest });
+
+    const sink = new MemorySink();
+    const backChannel: Uint8Array[] = [];
+    const receiver = new TransferReceiver({
+      send: (frame) => void backChannel.push(frame),
+      sendDir: keys.j2o,
+      recvDir: keys.o2j,
+      sendCounterStart: 0,
+      recvCounterStart: 0,
+      createDigest: nodeDigest,
+      sink,
+    });
+    for (const frame of b.frames) receiver.handle(frame);
+    const result = await receiver.done;
+
+    expect(result.digest).toBe(fileDigest);
+    expect(sink.bytes()).toEqual(data);
+    let counter = 0;
+    const controls = [];
+    for (const frame of backChannel) {
+      controls.push(decodeControl((await open(keys.j2o, counter++, frame)).plaintext));
+    }
+    expect(controls).toEqual([
+      { type: FrameType.Nack, fileIdx: 0, blockIdx: 0, reason: 'missing' },
+      { type: FrameType.Ack, fileIdx: 0, blockIdx: 0 },
+      { type: FrameType.Nack, fileIdx: 0, blockIdx: 1, reason: 'missing' },
+      { type: FrameType.Ack, fileIdx: 0, blockIdx: 1 },
+      { type: FrameType.Done },
+    ]);
   });
 });
