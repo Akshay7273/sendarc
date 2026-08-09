@@ -18,6 +18,7 @@ export const WORDLIST_SIZE = 256; // one byte of entropy per word
 export const CODE_SEPARATOR = '-';
 
 /** Framing constants. The header is fixed-size and used as AES-GCM AAD. */
+export const FRAME_COUNTER_BYTES = 8;
 export const FRAME_HEADER_BYTES = 16;
 
 /** Frame-header format version (the header's first byte). Bumped only if the header layout changes. */

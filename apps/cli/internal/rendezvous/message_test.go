@@ -72,6 +72,23 @@ func TestHandshakeMessagesOmitSignalingFields(t *testing.T) {
 	}
 }
 
+func TestRelayControlWireShapes(t *testing.T) {
+	open, err := MarshalMessage(NewRelayOpen())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(open) != `{"type":"relay_open"}` {
+		t.Fatalf("relay open = %s", open)
+	}
+	credit, err := MarshalMessage(NewRelayCredit(524288))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(credit) != `{"type":"relay_credit","bytes":524288}` {
+		t.Fatalf("relay credit = %s", credit)
+	}
+}
+
 // TestMessageRoundTrip confirms an sdp message survives marshal→unmarshal intact,
 // including the pointer seq.
 func TestMessageRoundTrip(t *testing.T) {

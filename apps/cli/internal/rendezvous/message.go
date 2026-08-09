@@ -30,6 +30,16 @@ const (
 	typeError      = "error"
 )
 
+// Relay control tags are exported for the adopted transfer transport. They remain outside the
+// cryptographic handshake state machine and are handled only after establishment.
+const (
+	TypeRelayOpen     = "relay_open"
+	TypeRelayRequired = "relay_required"
+	TypeRelayReady    = "relay_ready"
+	TypeRelayCredit   = "relay_credit"
+	TypeCredit        = "credit"
+)
+
 // Message is the SendArc signaling envelope. One flat struct covers every message type;
 // the fields used depend on Type, and omitempty keeps each serialized frame minimal and
 // byte-compatible with the TypeScript union in signaling.ts. The word code is never a
@@ -59,6 +69,8 @@ type Message struct {
 	Reason string `json:"reason,omitempty"`
 	// Code is the machine-readable error code on error.
 	Code string `json:"code,omitempty"`
+	// Bytes carries bounded flow-control credit on relay_credit and credit messages.
+	Bytes int64 `json:"bytes,omitempty"`
 }
 
 // Sink is the outbound half of the signaling channel the session drives.
@@ -86,6 +98,14 @@ func NewSDP(seq int, sdp, mac string) Message {
 // and tagged exactly like [NewSDP].
 func NewICE(seq int, cand, mac string) Message {
 	return Message{Type: typeICE, Cand: cand, Seq: &seq, Mac: mac}
+}
+
+// NewRelayOpen opts this peer into the paired encrypted binary relay.
+func NewRelayOpen() Message { return Message{Type: TypeRelayOpen} }
+
+// NewRelayCredit grants bytes only after this peer has consumed the same amount.
+func NewRelayCredit(bytes int64) Message {
+	return Message{Type: TypeRelayCredit, Bytes: bytes}
 }
 
 // UnmarshalMessage decodes a JSON signaling frame. A frame missing a type is rejected so

@@ -156,12 +156,14 @@ func (r *Receiver) process(frame []byte) error {
 	if r.isSettled() {
 		return nil
 	}
-	ctr := r.recvCounter
-	r.recvCounter++
-	opened, err := Open(r.o.RecvDir, ctr, frame)
+	opened, err := OpenSequenced(r.o.RecvDir, r.recvCounter, frame)
 	if err != nil {
+		if errors.Is(err, ErrFrameReplay) {
+			return nil
+		}
 		return NewTransferError(FailIntegrity, err.Error())
 	}
+	r.recvCounter = opened.Counter + 1
 	switch opened.Header.Type {
 	case FrameManifest:
 		return r.applyManifest(opened.Plaintext)

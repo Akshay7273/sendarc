@@ -77,6 +77,33 @@ export interface IceMsg {
   mac: string;
 }
 
+/** Peer → server: opt into the encrypted WebSocket data path for the current room. */
+export interface RelayOpenMsg {
+  type: 'relay_open';
+}
+
+/** Server → peer: the partner requested relay; opt in so both sides switch together. */
+export interface RelayRequiredMsg {
+  type: 'relay_required';
+}
+
+/** Server → both: both peers opted in and binary relay frames may now flow. */
+export interface RelayReadyMsg {
+  type: 'relay_ready';
+}
+
+/** Peer → server: grant the partner more receive capacity after consuming relay bytes. */
+export interface RelayCreditMsg {
+  type: 'relay_credit';
+  bytes: number;
+}
+
+/** Server → peer: bounded relay-send capacity granted by the receiving partner. */
+export interface CreditMsg {
+  type: 'credit';
+  bytes: number;
+}
+
 /** Any → any: graceful teardown. */
 export interface ByeMsg {
   type: 'bye';
@@ -111,6 +138,11 @@ export type SignalMsg =
   | CapsMsg
   | SdpMsg
   | IceMsg
+  | RelayOpenMsg
+  | RelayRequiredMsg
+  | RelayReadyMsg
+  | RelayCreditMsg
+  | CreditMsg
   | ByeMsg
   | ErrorMsg;
 
