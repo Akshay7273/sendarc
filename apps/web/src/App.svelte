@@ -37,7 +37,11 @@
   // M2 transfer state, live once the handshake settles and the socket is adopted.
   let role = $state<Role | undefined>(undefined);
   let pickedFile = $state<File | null>(null);
-  let transfer = $state<TransferController | null>(null);
+  // TransferController is an imperative identity-bearing object (methods + a terminal Promise),
+  // not a reactive data model. Deep-proxying it makes `transfer !== ctrl` even immediately after
+  // assignment, so the stale-controller guard below discards the real completion callback and
+  // leaves both peers stuck at 100%. Keep the controller raw; its progress is polled explicitly.
+  let transfer = $state.raw<TransferController | null>(null);
   let sentBytes = $state(0);
   let totalBytes = $state(0);
   let outcome = $state<TransferOutcome | null>(null);

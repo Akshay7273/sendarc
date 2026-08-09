@@ -5,6 +5,11 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 // We keep this a static SPA — no SSR — so it can be served by the Go binary in prod.
 export default defineConfig({
   plugins: [svelte()],
+  // Component tests run in jsdom and must resolve Svelte's browser runtime rather than its
+  // SSR-only export (where mount/unmount intentionally throw).
+  resolve: {
+    conditions: ['browser'],
+  },
   server: {
     port: 5173,
     strictPort: true,
