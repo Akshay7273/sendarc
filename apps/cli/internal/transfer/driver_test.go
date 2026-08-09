@@ -1,0 +1,236 @@
+package transfer
+
+import (
+	"bytes"
+	"context"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/pion/webrtc/v4"
+	"github.com/sendarc/cli/internal/rendezvous"
+	"github.com/sendarc/wire"
+)
+
+// relay is an in-memory stand-in for the signaling server, faithful to apps/server's peer
+// loop: it allocates a room on create, pairs on join (notifying each side with its own
+// role, exactly as peerJoinedFrame does), and forwards every other message verbatim to the
+// partner. It lets a complete offerer↔joiner exchange — SPAKE2 handshake, authenticated
+// SDP/ICE, and the sealed file transfer — run in one process with no sockets.
+type relay struct {
+	off     *relayEnd
+	join    *relayEnd
+	room    int
+	created chan struct{} // closed once the offerer has created the room
+	once    sync.Once
+}
+
+func newRelay() *relay {
+	r := &relay{room: 7, created: make(chan struct{})}
+	r.off = newRelayEnd(r, "offerer")
+	r.join = newRelayEnd(r, "joiner")
+	return r
+}
+
+func (r *relay) partner(e *relayEnd) *relayEnd {
+	if e == r.off {
+		return r.join
+	}
+	return r.off
+}
+
+// route reproduces the server's dispatch: create allocates the room and answers the sender,
+// join pairs and tells each peer its own role, and anything else is relayed to the partner. A
+// join blocks until the room has been created, mirroring the server guarantee that a joiner
+// cannot pair before the offerer exists (it needs the code, which needs the room) — without
+// this, the two drivers start concurrently and a join can race ahead of create, delivering
+// peer-joined to the offerer while it is still allocating.
+func (r *relay) route(from *relayEnd, m rendezvous.Message) {
+	switch m.Type {
+	case "create":
+		room := r.room
+		from.enqueue(rendezvous.Message{Type: "created", Room: &room})
+		r.once.Do(func() { close(r.created) })
+	case "join":
+		<-r.created
+		r.off.enqueue(rendezvous.Message{Type: "peer-joined", Role: r.off.role})
+		r.join.enqueue(rendezvous.Message{Type: "peer-joined", Role: r.join.role})
+	default:
+		r.partner(from).enqueue(m)
+	}
+}
+
+// relayEnd is one side of the relay. It satisfies transfer.Signal, so a driver adopts it
+// exactly as it would a real *wsclient.Client.
+type relayEnd struct {
+	hub  *relay
+	role string
+	in   chan rendezvous.Message
+	once sync.Once
+	done chan struct{}
+}
+
+func newRelayEnd(hub *relay, role string) *relayEnd {
+	return &relayEnd{hub: hub, role: role, in: make(chan rendezvous.Message, 256), done: make(chan struct{})}
+}
+
+func (e *relayEnd) Send(m rendezvous.Message) error {
+	e.hub.route(e, m)
+	return nil
+}
+
+func (e *relayEnd) Run(ctx context.Context, onMessage func(rendezvous.Message)) error {
+	for {
+		select {
+		case m := <-e.in:
+			onMessage(m)
+		case <-e.done:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (e *relayEnd) Close() { e.once.Do(func() { close(e.done) }) }
+
+// enqueue delivers to this end unless it has closed, in which case the frame is dropped —
+// a late trickled candidate arriving after teardown must not panic on a closed channel.
+func (e *relayEnd) enqueue(m rendezvous.Message) {
+	select {
+	case e.in <- m:
+	case <-e.done:
+	}
+}
+
+// TestDriverLoopbackTransfersFile is the M2c capstone: two drivers, wired only through the
+// in-memory relay, complete the whole pipeline — SPAKE2 rendezvous, an authenticated pion
+// DataChannel over host candidates, and a sealed file transfer — and the receiver writes a
+// file byte-identical to the sender's, with matching whole-file digests and session keys.
+func TestDriverLoopbackTransfersFile(t *testing.T) {
+	hub := newRelay()
+
+	// A payload that crosses a 1 MiB block boundary and does not divide evenly into frames,
+	// so the run exercises real chunking, windowing, and multi-block reassembly.
+	payload := make([]byte, 1<<20+40000)
+	for i := range payload {
+		payload[i] = byte(i*31 + 7)
+	}
+	meta := wire.FileMeta{
+		Name:         "payload.bin",
+		Size:         int64(len(payload)),
+		Mime:         "application/octet-stream",
+		LastModified: 1_700_000_000_000,
+	}
+	dir := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	type result struct {
+		out *Outcome
+		err error
+	}
+	sendDone := make(chan result, 1)
+	recvDone := make(chan result, 1)
+
+	go func() {
+		out, err := Run(ctx, hub.off, Spec{
+			Session:    rendezvous.Options{Role: rendezvous.RoleOfferer, Words: "alpha-bravo"},
+			Source:     wire.BytesSource(payload, meta, 64*1024),
+			ICEServers: []webrtc.ICEServer{}, // host candidates only; loopback needs no STUN
+		})
+		sendDone <- result{out, err}
+	}()
+	go func() {
+		out, err := Run(ctx, hub.join, Spec{
+			Session:    rendezvous.Options{Role: rendezvous.RoleJoiner, Code: "7-alpha-bravo"},
+			DestDir:    dir,
+			ICEServers: []webrtc.ICEServer{},
+		})
+		recvDone <- result{out, err}
+	}()
+
+	send := <-sendDone
+	recv := <-recvDone
+
+	if recv.err != nil {
+		t.Fatalf("receiver: %v", recv.err)
+	}
+	if send.err != nil {
+		t.Fatalf("sender: %v", send.err)
+	}
+
+	if send.out.Digest != recv.out.Digest {
+		t.Errorf("digests differ: sender %s, receiver %s", send.out.Digest, recv.out.Digest)
+	}
+	if recv.out.Name != "payload.bin" {
+		t.Errorf("received name = %q, want payload.bin", recv.out.Name)
+	}
+	if recv.out.Size != meta.Size {
+		t.Errorf("received size = %d, want %d", recv.out.Size, meta.Size)
+	}
+	if want := filepath.Join(dir, "payload.bin"); recv.out.Path != want {
+		t.Errorf("written path = %q, want %q", recv.out.Path, want)
+	}
+
+	got, err := os.ReadFile(recv.out.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("received %d bytes, want %d byte-identical to the source", len(got), len(payload))
+	}
+
+	// Both peers derived the same session key, so their SAS fingerprints would match.
+	if !bytes.Equal(send.out.Handshake.Master, recv.out.Handshake.Master) {
+		t.Error("master keys differ across peers")
+	}
+}
+
+// TestDriverReceiverRejectsMismatchedCode proves the handshake still fails closed when
+// adopted by the driver: a joiner with the wrong code never reaches a channel, and both
+// sides surface a confirmation failure rather than hanging or transferring.
+func TestDriverReceiverRejectsMismatchedCode(t *testing.T) {
+	hub := newRelay()
+	payload := []byte("must never be sent under a bad code")
+	meta := wire.FileMeta{Name: "secret.bin", Size: int64(len(payload)), Mime: "application/octet-stream"}
+	dir := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	errs := make(chan error, 2)
+	go func() {
+		_, err := Run(ctx, hub.off, Spec{
+			Session:    rendezvous.Options{Role: rendezvous.RoleOfferer, Words: "alpha-bravo"},
+			Source:     wire.BytesSource(payload, meta, 64*1024),
+			ICEServers: []webrtc.ICEServer{},
+		})
+		errs <- err
+	}()
+	go func() {
+		_, err := Run(ctx, hub.join, Spec{
+			Session:    rendezvous.Options{Role: rendezvous.RoleJoiner, Code: "7-wrong-words"},
+			DestDir:    dir,
+			ICEServers: []webrtc.ICEServer{},
+		})
+		errs <- err
+	}()
+
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err == nil {
+			t.Fatal("expected a handshake failure under a mismatched code, got nil")
+		}
+	}
+	// No file should have been created from a failed handshake.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("destination dir has %d entries, want 0 after a failed handshake", len(entries))
+	}
+}

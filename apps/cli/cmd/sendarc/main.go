@@ -1,12 +1,14 @@
-// Command sendarc is the terminal client for a SendArc transfer. It drives one M1
-// rendezvous over the blind signaling server:
+// Command sendarc is the terminal client for a SendArc transfer. It runs one M1
+// rendezvous over the blind signaling server and then, over the same socket, an M2
+// end-to-end-encrypted direct file transfer:
 //
-//	sendarc send            # allocate a room, print the invite code + link, wait
-//	sendarc receive <code>  # join with a code (or a pasted invite link)
+//	sendarc send <file>     # allocate a room, print the invite code + link, send the file
+//	sendarc receive <code>  # join with a code (or a pasted invite link), receive the file
 //
 // Both ends run SPAKE2 over the invite code, confirm the key (failing closed on a
-// mismatch), and exchange sealed capabilities — the point where the M2 encrypted file
-// transfer will begin. The word half of the code never reaches the server.
+// mismatch), exchange sealed capabilities, then bring up an authenticated WebRTC channel
+// and stream the file sealed under the session key. The word half of the code never
+// reaches the server, and the server never sees the file bytes.
 package main
 
 import (
@@ -21,7 +23,9 @@ import (
 	"syscall"
 
 	"github.com/sendarc/cli/internal/rendezvous"
+	"github.com/sendarc/cli/internal/transfer"
 	"github.com/sendarc/cli/internal/wsclient"
+	"github.com/sendarc/wire"
 )
 
 const defaultServer = "wss://localhost:8443/ws"
@@ -50,13 +54,14 @@ func usage(w *os.File) {
 	_, _ = fmt.Fprint(w, `sendarc — secure peer-to-peer file transfer
 
 Usage:
-  sendarc send [flags]
+  sendarc send <file> [flags]
   sendarc receive <code|link> [flags]
 
 Flags:
   --server URL             signaling server (default `+defaultServer+`)
   --insecure-skip-verify   skip TLS verification; self-signed dev certs only
   --words N                number of words in the invite code (send only; 0 = default)
+  --out DIR                directory to write the received file into (receive only; default .)
 `)
 }
 
@@ -65,33 +70,57 @@ func runSend(args []string) int {
 	server := fs.String("server", defaultServer, "signaling server URL")
 	insecure := fs.Bool("insecure-skip-verify", false, "skip TLS verification (self-signed dev certs only)")
 	words := fs.Int("words", 0, "number of words in the invite code (0 = default)")
-	parseArgs(fs, args)
+	positionals := parseArgs(fs, args)
+
+	if len(positionals) == 0 {
+		fmt.Fprintln(os.Stderr, "sendarc send: a file to send is required")
+		return 2
+	}
+	src, err := transfer.NewOSFileSource(positionals[0])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sendarc send: %s\n", err)
+		return 1
+	}
+	meta := src.Meta()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	fmt.Fprintf(os.Stderr, "Connecting to %s …\n", *server)
-	res, err := wsclient.Rendezvous(ctx, *server, wsclient.DialOptions{InsecureSkipVerify: *insecure},
-		rendezvous.Options{
+	client, err := dial(ctx, *server, *insecure)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\nFailed: %s\n", handshakeError(err))
+		return 1
+	}
+	defer client.Close()
+
+	progress := newProgress(meta.Size)
+	out, err := transfer.Run(ctx, client, transfer.Spec{
+		Session: rendezvous.Options{
 			Role:      rendezvous.RoleOfferer,
 			WordCount: *words,
-			OnCode: func(code string) {
-				fmt.Println()
-				fmt.Printf("  Invite code:  %s\n", code)
-				if link := inviteLink(*server, code); link != "" {
-					fmt.Printf("  Invite link:  %s\n", link)
-				}
-				fmt.Println()
-			},
-			OnPhase: phasePrinter(rendezvous.RoleOfferer),
-		})
-	return report("receiver", res, err)
+			OnCode:    codePrinter(*server),
+			OnPhase:   phasePrinter(rendezvous.RoleOfferer),
+		},
+		Source:     src,
+		OnConnect:  connectPrinter(fmt.Sprintf("Sending %s (%s) …", meta.Name, humanBytes(meta.Size))),
+		OnProgress: progress.report,
+	})
+	progress.finish()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\nFailed: %s\n", handshakeError(err))
+		return 1
+	}
+	fmt.Printf("\n✓ Sent %s (%s).\n", out.Name, humanBytes(out.Size))
+	fmt.Printf("  Fingerprint:  %s\n", fingerprint(out.Handshake.Master))
+	fmt.Printf("  SHA-256:      %s\n", out.Digest)
+	return 0
 }
 
 func runReceive(args []string) int {
 	fs := flag.NewFlagSet("receive", flag.ExitOnError)
 	server := fs.String("server", defaultServer, "signaling server URL")
 	insecure := fs.Bool("insecure-skip-verify", false, "skip TLS verification (self-signed dev certs only)")
+	outDir := fs.String("out", ".", "directory to write the received file into")
 	positionals := parseArgs(fs, args)
 
 	code := ""
@@ -102,19 +131,52 @@ func runReceive(args []string) int {
 		fmt.Fprintln(os.Stderr, "sendarc receive: an invite code (or link) is required")
 		return 2
 	}
+	if err := os.MkdirAll(*outDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "sendarc receive: %s\n", err)
+		return 1
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	fmt.Fprintf(os.Stderr, "Connecting to %s …\n", *server)
+	client, err := dial(ctx, *server, *insecure)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\nFailed: %s\n", handshakeError(err))
+		return 1
+	}
+	defer client.Close()
+
 	fmt.Fprintf(os.Stderr, "Joining %s …\n", code)
-	res, err := wsclient.Rendezvous(ctx, *server, wsclient.DialOptions{InsecureSkipVerify: *insecure},
-		rendezvous.Options{
+	progress := newProgress(0)
+	out, err := transfer.Run(ctx, client, transfer.Spec{
+		Session: rendezvous.Options{
 			Role:    rendezvous.RoleJoiner,
 			Code:    code,
 			OnPhase: phasePrinter(rendezvous.RoleJoiner),
-		})
-	return report("sender", res, err)
+		},
+		DestDir: *outDir,
+		OnManifest: func(file wire.FileEntry) {
+			progress.setTotal(file.Size)
+			connectPrinter(fmt.Sprintf("Receiving %s (%s) …", file.Name, humanBytes(file.Size)))()
+		},
+		OnProgress: progress.report,
+	})
+	progress.finish()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\nFailed: %s\n", handshakeError(err))
+		return 1
+	}
+	fmt.Printf("\n✓ Received %s (%s) → %s\n", out.Name, humanBytes(out.Size), out.Path)
+	fmt.Printf("  Fingerprint:  %s\n", fingerprint(out.Handshake.Master))
+	fmt.Printf("  SHA-256:      %s\n", out.Digest)
+	return 0
+}
+
+// dial opens the signaling socket, reporting the server it is contacting. The transfer
+// driver adopts the returned client for the whole exchange and closes it when done.
+func dial(ctx context.Context, server string, insecure bool) (*wsclient.Client, error) {
+	fmt.Fprintf(os.Stderr, "Connecting to %s …\n", server)
+	return wsclient.Dial(ctx, server, wsclient.DialOptions{InsecureSkipVerify: insecure})
 }
 
 // parseArgs parses flags that may appear before or after positional arguments. Go's flag
@@ -134,6 +196,19 @@ func parseArgs(fs *flag.FlagSet, args []string) []string {
 	return positionals
 }
 
+// codePrinter shows the invite code and the matching web-app link once the room is
+// allocated, so the sender can hand either to the recipient.
+func codePrinter(server string) func(string) {
+	return func(code string) {
+		fmt.Println()
+		fmt.Printf("  Invite code:  %s\n", code)
+		if link := inviteLink(server, code); link != "" {
+			fmt.Printf("  Invite link:  %s\n", link)
+		}
+		fmt.Println()
+	}
+}
+
 // phasePrinter surfaces the two transitions worth a human's attention — waiting for the
 // peer (offerer only) and the start of the key handshake — and stays quiet for the rest so
 // the output reads as progress, not a state-machine trace.
@@ -150,22 +225,52 @@ func phasePrinter(role rendezvous.Role) func(rendezvous.Phase) {
 	}
 }
 
-// report prints the outcome and returns the process exit code. peer names the other side
-// for the success line ("receiver" for a sender, "sender" for a receiver).
-func report(peer string, res *rendezvous.Result, err error) int {
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "\nFailed: %s\n", handshakeError(err))
-		return 1
-	}
-	fmt.Printf("\n✓ Secure channel established with the %s.\n", peer)
-	fmt.Printf("  Fingerprint:  %s\n", fingerprint(res.Master))
-	fmt.Printf("  Peer:         %s\n", describeCaps(res.RemoteCaps))
-	fmt.Fprintln(os.Stderr, "\nBoth sides should see the same fingerprint. File transfer arrives in the next milestone.")
-	return 0
+// connectPrinter returns a one-shot callback that prints line once the direct channel is
+// open, just before the bytes begin to move.
+func connectPrinter(line string) func() {
+	return func() { fmt.Fprintln(os.Stderr, line) }
 }
 
-// handshakeError renders a rendezvous failure as a human-readable line, translating the
-// stable codes into plain guidance where it helps.
+// progress renders a single, rewriting transfer-progress line on stderr. The total may be
+// unknown at first (the receiver learns it from the manifest), in which case only the byte
+// count is shown until setTotal is called.
+type progress struct {
+	total    int64
+	lastPct  int
+	reported bool
+}
+
+func newProgress(total int64) *progress { return &progress{total: total, lastPct: -1} }
+
+func (p *progress) setTotal(total int64) { p.total = total }
+
+// report prints cumulative bytes. It is invoked from the engine goroutine while the main
+// goroutine blocks in transfer.Run, so it needs no locking; it throttles to whole-percent
+// changes to keep the terminal quiet.
+func (p *progress) report(n int64) {
+	p.reported = true
+	if p.total <= 0 {
+		fmt.Fprintf(os.Stderr, "\r  %s", humanBytes(n))
+		return
+	}
+	pct := int(n * 100 / p.total)
+	if pct == p.lastPct {
+		return
+	}
+	p.lastPct = pct
+	fmt.Fprintf(os.Stderr, "\r  %s / %s (%d%%)", humanBytes(n), humanBytes(p.total), pct)
+}
+
+// finish terminates the progress line with a newline if anything was printed on it.
+func (p *progress) finish() {
+	if p.reported {
+		fmt.Fprintln(os.Stderr)
+	}
+}
+
+// handshakeError renders a transfer failure as a human-readable line, translating the
+// stable rendezvous codes into plain guidance where it helps and falling back to the raw
+// message for transport and transfer errors.
 func handshakeError(err error) string {
 	var re *rendezvous.Error
 	if errorsAs(err, &re) {
@@ -198,11 +303,7 @@ func fingerprint(master []byte) string {
 	return fmt.Sprintf("%02x%02x %02x%02x", sum[0], sum[1], sum[2], sum[3])
 }
 
-func describeCaps(c rendezvous.Caps) string {
-	return fmt.Sprintf("%s (frame %s, block %s)", c.Version, humanBytes(c.MaxFrame), humanBytes(c.BlockSize))
-}
-
-func humanBytes(n int) string {
+func humanBytes(n int64) string {
 	switch {
 	case n >= 1<<20 && n%(1<<20) == 0:
 		return fmt.Sprintf("%d MiB", n>>20)
