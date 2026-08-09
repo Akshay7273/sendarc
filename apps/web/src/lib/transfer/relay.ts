@@ -23,7 +23,11 @@ export class RelayTransport {
     this.rejectReady = reject;
   });
 
-  constructor(private readonly signaling: SignalChannel) {}
+  constructor(private readonly signaling: SignalChannel) {
+    // A direct path may remain healthy after signaling disappears; suppress an unhandled
+    // readiness rejection while preserving it for a later attempted relay switch.
+    this.ready.catch(() => {});
+  }
 
   open(): void {
     if (this.opened || this.closed) return;

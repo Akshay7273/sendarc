@@ -138,6 +138,15 @@ export class TransferSender {
     return this.inbound;
   }
 
+  /** Retransmit every unacknowledged block after the host selects a new ordered byte path. */
+  transportChanged(): void {
+    if (this.settled) return;
+    for (const [blockIdx, state] of this.inflight) {
+      state.retries = 0;
+      this.queueRetry(blockIdx);
+    }
+  }
+
   /** Pause locally and ask the peer to reflect the paused state. */
   pause(): void {
     if (this.settled || this.paused) return;

@@ -292,6 +292,88 @@ func TestDriverForcedRelayTransfersEncryptedFile(t *testing.T) {
 	}
 }
 
+func TestDriverSwitchesActiveDirectTransferToRelay(t *testing.T) {
+	hub := newRelay()
+	payload := make([]byte, 6*1024*1024+29)
+	for i := range payload {
+		payload[i] = byte(i*23 + 11)
+	}
+	meta := wire.FileMeta{Name: "switched.bin", Size: int64(len(payload)), Mime: "application/octet-stream"}
+	dir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	type pathLog struct {
+		mu    sync.Mutex
+		paths []string
+	}
+	appendPath := func(log *pathLog) func(string) {
+		return func(path string) {
+			log.mu.Lock()
+			log.paths = append(log.paths, path)
+			log.mu.Unlock()
+		}
+	}
+	trigger := make(chan struct{})
+	var triggerOnce sync.Once
+	sendPaths, recvPaths := &pathLog{}, &pathLog{}
+	type result struct {
+		out *Outcome
+		err error
+	}
+	done := make(chan result, 2)
+	go func() {
+		out, err := Run(ctx, hub.off, Spec{
+			Session:     rendezvous.Options{Role: rendezvous.RoleOfferer, Words: "alpha-bravo"},
+			Source:      wire.BytesSource(payload, meta, 64*1024),
+			ICEServers:  []webrtc.ICEServer{},
+			OnTransport: appendPath(sendPaths),
+			breakDirect: trigger,
+			OnProgress: func(bytes int64) {
+				if bytes >= 1024*1024 {
+					triggerOnce.Do(func() { close(trigger) })
+				}
+			},
+		})
+		done <- result{out: out, err: err}
+	}()
+	go func() {
+		out, err := Run(ctx, hub.join, Spec{
+			Session:     rendezvous.Options{Role: rendezvous.RoleJoiner, Code: "7-alpha-bravo"},
+			DestDir:     dir,
+			ICEServers:  []webrtc.ICEServer{},
+			OnTransport: appendPath(recvPaths),
+		})
+		done <- result{out: out, err: err}
+	}()
+
+	a, b := <-done, <-done
+	if a.err != nil || b.err != nil {
+		t.Fatalf("switched transfer results: %v / %v", a.err, b.err)
+	}
+	var recv *Outcome
+	if a.out.Path != "" {
+		recv = a.out
+	} else {
+		recv = b.out
+	}
+	got, err := os.ReadFile(recv.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("switched transfer output differs from source")
+	}
+	for name, log := range map[string]*pathLog{"sender": sendPaths, "receiver": recvPaths} {
+		log.mu.Lock()
+		paths := append([]string(nil), log.paths...)
+		log.mu.Unlock()
+		if len(paths) != 2 || paths[0] != "direct" || paths[1] != "relay" {
+			t.Fatalf("%s paths = %v, want [direct relay]", name, paths)
+		}
+	}
+}
+
 // TestDriverReceiverRejectsMismatchedCode proves the handshake still fails closed when
 // adopted by the driver: a joiner with the wrong code never reaches a channel, and both
 // sides surface a confirmation failure rather than hanging or transferring.

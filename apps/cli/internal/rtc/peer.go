@@ -96,7 +96,14 @@ func NewPeer(opts PeerOptions) (*Peer, error) {
 	})
 	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
 		if s == webrtc.PeerConnectionStateFailed {
-			p.fail(errors.New("rtc: peer connection failed"))
+			p.mu.Lock()
+			established := p.settled
+			p.mu.Unlock()
+			if established {
+				_ = p.pc.Close() // DataConn.OnClose publishes the active-path failure.
+			} else {
+				p.fail(errors.New("rtc: peer connection failed"))
+			}
 		}
 	})
 
@@ -242,7 +249,10 @@ func (p *Peer) wireChannel(dc *webrtc.DataChannel) {
 		p.mu.Unlock()
 		p.connCh <- conn
 	})
-	dc.OnError(func(err error) { p.fail(fmt.Errorf("rtc: data channel: %w", err)) })
+	dc.OnError(func(error) {
+		conn.shutdown()
+		_ = p.pc.Close()
+	})
 }
 
 // fail records the first fatal error and closes the PeerConnection; later calls are no-ops.
