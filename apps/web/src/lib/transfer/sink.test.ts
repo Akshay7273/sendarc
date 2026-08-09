@@ -35,6 +35,41 @@ class FakeWritable implements WritableFileLike {
   }
 }
 
+/** A growable buffer exposing the synchronous read/write/truncate surface the durable sink uses. */
+class FakeSyncHandle {
+  bytes = new Uint8Array();
+  closed = false;
+  write(buffer: Uint8Array, options?: { at?: number }): number {
+    const at = options?.at ?? 0;
+    const end = at + buffer.length;
+    if (end > this.bytes.length) {
+      const grown = new Uint8Array(end);
+      grown.set(this.bytes);
+      this.bytes = grown;
+    }
+    this.bytes.set(buffer, at);
+    return buffer.length;
+  }
+  read(buffer: Uint8Array, options?: { at?: number }): number {
+    const at = options?.at ?? 0;
+    const n = Math.max(0, Math.min(buffer.length, this.bytes.length - at));
+    buffer.set(this.bytes.subarray(at, at + n));
+    return n;
+  }
+  truncate(size: number): void {
+    const next = new Uint8Array(size);
+    next.set(this.bytes.subarray(0, Math.min(size, this.bytes.length)));
+    this.bytes = next;
+  }
+  getSize(): number {
+    return this.bytes.length;
+  }
+  flush(): void {}
+  close(): void {
+    this.closed = true;
+  }
+}
+
 function manifest(names: Array<[string, number]>): Manifest {
   return {
     type: FrameType.Manifest,
@@ -123,6 +158,60 @@ describe('browser destinations', () => {
       reason: 'quota',
     });
     expect(root.getFileHandle).not.toHaveBeenCalled();
+  });
+
+  it('routes a single auto-selected file through a durable sync-access handle', async () => {
+    const handle = new FakeSyncHandle();
+    const removeEntry = vi.fn(async () => {});
+    vi.stubGlobal('navigator', {
+      storage: {
+        estimate: vi.fn(async () => ({ quota: 1 << 30, usage: 0 })),
+        getDirectory: vi.fn(async () => ({
+          getFileHandle: vi.fn(async () => ({
+            createSyncAccessHandle: vi.fn(async () => handle),
+          })),
+          removeEntry,
+        })),
+      },
+    });
+
+    const one = manifest([['clip.bin', 3]]);
+    const destination = createBrowserDestination({ kind: 'auto' });
+    await destination.prepare(one);
+    const sink = await destination.open(one.files[0]!);
+    await sink.write(0, new Uint8Array([1, 2]));
+    await sink.write(2, new Uint8Array([3]));
+    await sink.close();
+    expect(handle.bytes).toEqual(new Uint8Array([1, 2, 3]));
+    expect(handle.closed).toBe(true);
+    expect(destination.result()).toMatchObject({ kind: 'opfs', name: 'clip.bin' });
+    expect(removeEntry).not.toHaveBeenCalled();
+  });
+
+  it('drops the durable handle and removes the entry on abort', async () => {
+    const handle = new FakeSyncHandle();
+    const removeEntry = vi.fn(async () => {});
+    vi.stubGlobal('navigator', {
+      storage: {
+        estimate: vi.fn(async () => ({ quota: 1 << 30, usage: 0 })),
+        getDirectory: vi.fn(async () => ({
+          getFileHandle: vi.fn(async () => ({
+            createSyncAccessHandle: vi.fn(async () => handle),
+          })),
+          removeEntry,
+        })),
+      },
+    });
+
+    const one = manifest([['clip.bin', 3]]);
+    const destination = createBrowserDestination({ kind: 'auto' });
+    await destination.prepare(one);
+    await destination.open(one.files[0]!);
+    await destination.abort('canceled');
+    expect(handle.closed).toBe(true);
+    const output = destination.result();
+    expect(output?.kind).toBe('opfs');
+    expect(removeEntry).toHaveBeenCalledWith(output?.kind === 'opfs' ? output.key : '');
   });
 
   it('writes a direct single-file destination without staging in memory', async () => {
