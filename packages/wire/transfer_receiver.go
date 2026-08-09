@@ -48,6 +48,7 @@ type Receiver struct {
 
 	sendMu      sync.Mutex
 	sendCounter uint64
+	handleMu    sync.Mutex
 
 	// Assembly state belongs to the serial Handle path.
 	recvCounter     uint64
@@ -63,6 +64,7 @@ type Receiver struct {
 	assembling      int
 	blockBuf        []byte
 	blockReceived   int
+	awaitingRestart bool
 	seenAhead       map[int]bool
 	nackOutstanding int
 
@@ -111,6 +113,8 @@ func (r *Receiver) Wait(ctx context.Context) (ReceiveResult, error) {
 
 // Handle consumes one encrypted sender frame. Any malformed or unauthenticated frame aborts.
 func (r *Receiver) Handle(frame []byte) {
+	r.handleMu.Lock()
+	defer r.handleMu.Unlock()
 	if err := r.process(frame); err != nil {
 		var te *TransferError
 		if !errors.As(err, &te) {
@@ -118,6 +122,20 @@ func (r *Receiver) Handle(frame []byte) {
 		}
 		r.abortWith(te, true)
 	}
+}
+
+// TransportChanged discards an unverified partial block from the old ordered path. The sender
+// retransmits its unacknowledged window on the new path; already committed blocks stay intact.
+func (r *Receiver) TransportChanged() {
+	r.handleMu.Lock()
+	r.blockBuf = nil
+	r.blockReceived = 0
+	r.assembling = -1
+	r.assemblingFile = -1
+	r.seenAhead = make(map[int]bool)
+	r.nackOutstanding = -1
+	r.awaitingRestart = true
+	r.handleMu.Unlock()
 }
 
 // Pause asks the sender to stop producing data frames.
@@ -285,6 +303,9 @@ func (r *Receiver) onBlockData(fileIdx uint16, blockIdx uint32, frameOff uint32,
 	if idx < 0 || idx >= entry.Blocks {
 		return NewTransferError(FailIntegrity, fmt.Sprintf("block_data outside manifest: %d", idx))
 	}
+	if r.awaitingRestart && frameOff != 0 {
+		return nil // discard the abandoned old-path tail until a fresh block begins
+	}
 	if frameOff == 0 {
 		if r.blockBuf != nil {
 			return NewTransferError(FailIntegrity, "new block before block_hash")
@@ -297,6 +318,7 @@ func (r *Receiver) onBlockData(fileIdx uint16, blockIdx uint32, frameOff uint32,
 		r.assembling = idx
 		r.blockBuf = make([]byte, blockLen)
 		r.blockReceived = 0
+		r.awaitingRestart = false
 	}
 	if r.blockBuf == nil || r.assemblingFile != fileNumber || r.assembling != idx {
 		return NewTransferError(FailIntegrity, fmt.Sprintf("unexpected block fragment %d", idx))
@@ -311,6 +333,9 @@ func (r *Receiver) onBlockData(fileIdx uint16, blockIdx uint32, frameOff uint32,
 }
 
 func (r *Receiver) onBlockHash(payload []byte) error {
+	if r.blockBuf == nil && r.awaitingRestart {
+		return nil // hash for the abandoned partial block
+	}
 	if r.manifest == nil || r.blockBuf == nil {
 		return NewTransferError(FailIntegrity, "block_hash without a block")
 	}

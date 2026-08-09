@@ -100,6 +100,9 @@ func (c *DataConn) OnData(handler func(frame []byte)) {
 	close(c.handlerReady)
 }
 
+// Done closes when the data channel closes locally or remotely.
+func (c *DataConn) Done() <-chan struct{} { return c.done }
+
 // Close closes the underlying channel. It drains the SCTP send buffer (bounded) so a final
 // frame reaches the wire before teardown, then closes the channel. It is idempotent and unblocks
 // any waiting Send.

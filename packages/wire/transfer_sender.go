@@ -293,6 +293,28 @@ func (s *Sender) Handle(frame []byte) {
 	}
 }
 
+// TransportChanged immediately retransmits every unacknowledged block on the new byte path.
+// Fresh counters are used, while replays arriving late from the old path remain harmless.
+func (s *Sender) TransportChanged() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.settled {
+		return
+	}
+	for idx, state := range s.inflight {
+		if state.timer != nil {
+			state.timer.Stop()
+			state.timer = nil
+		}
+		state.retries = 0
+		if !s.retryQueued[idx] {
+			s.retryQueued[idx] = true
+			s.retryQueue = append(s.retryQueue, idx)
+		}
+	}
+	s.cond.Broadcast()
+}
+
 // Pause stops new data frames locally and notifies the peer.
 func (s *Sender) Pause() error {
 	if !s.setPaused(true) {

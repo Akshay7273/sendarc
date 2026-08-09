@@ -234,6 +234,44 @@ describe('TransferSender', () => {
     expect(outbound[1]).not.toEqual(outbound[3]); // retransmission uses a fresh GCM nonce
   });
 
+  it('immediately retransmits the unacknowledged window after a transport change', async () => {
+    const keys = await deriveTransferKeys(master);
+    const data = new Uint8Array([1, 2, 3, 4]);
+    const outbound: Uint8Array[] = [];
+    const sender = new TransferSender({
+      file: bytesSource(data, { name: 'f', size: data.length, mime: '', lastModified: 0 }),
+      send: (frame) => void outbound.push(frame),
+      sendDir: keys.o2j,
+      recvDir: keys.j2o,
+      sendCounterStart: 0,
+      recvCounterStart: 0,
+      createDigest: nodeDigest,
+      blockSize: 8,
+      frameSize: 4,
+      window: 1,
+      ackTimeoutMs: 60_000,
+    });
+
+    const run = sender.run();
+    await waitFor(() => outbound.length === 3);
+    sender.transportChanged();
+    await waitFor(() => outbound.length === 5);
+    sender.cancel('test complete');
+    await expect(run).rejects.toThrow(/test complete/);
+
+    let counter = 0;
+    const opened = [];
+    for (const frame of outbound.slice(0, 5)) opened.push(await open(keys.o2j, counter++, frame));
+    expect(opened.map((frame) => frame.header.type)).toEqual([
+      FrameType.Manifest,
+      FrameType.BlockData,
+      FrameType.BlockHash,
+      FrameType.BlockData,
+      FrameType.BlockHash,
+    ]);
+    expect(outbound[1]).not.toEqual(outbound[3]);
+  });
+
   it('halts new data while paused and resumes without losing the window', async () => {
     const keys = await deriveTransferKeys(master);
     const outbound: Uint8Array[] = [];
