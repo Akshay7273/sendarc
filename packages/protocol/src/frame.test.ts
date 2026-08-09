@@ -37,8 +37,15 @@ describe('frame header codec', () => {
     expect(decodeFrameHeader(view)).toEqual(sample);
   });
 
-  it('rejects a file offset that would overflow u16 (guards the multi-GB bug)', () => {
-    expect(() => encodeFrameHeader({ ...sample, frameOff: 0x10000 })).toThrow(RangeError);
+  it('carries a within-block byte offset past u16 (a 1 MiB block needs u32)', () => {
+    // The default 1 MiB block framed at 16 KiB reaches offsets well past 0xffff; the
+    // field is u32, so such an offset must round-trip rather than throw.
+    const off = 1_000_000;
+    expect(decodeFrameHeader(encodeFrameHeader({ ...sample, frameOff: off })).frameOff).toBe(off);
+  });
+
+  it('rejects a frame offset that would overflow u32 (guards the multi-GB bug)', () => {
+    expect(() => encodeFrameHeader({ ...sample, frameOff: 0x1_0000_0000 })).toThrow(RangeError);
   });
 
   it('rejects out-of-range block index', () => {

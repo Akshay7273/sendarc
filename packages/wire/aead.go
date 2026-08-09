@@ -17,7 +17,7 @@ type FrameHeaderInput struct {
 	Flags    uint8
 	FileIdx  uint16
 	BlockIdx uint32
-	FrameOff uint16
+	FrameOff uint32
 }
 
 // nonce builds the 12-byte GCM nonce: the direction's 4-byte salt followed by a

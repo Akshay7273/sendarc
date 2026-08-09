@@ -10,7 +10,7 @@ export interface FrameHeader {
   flags: number;
   fileIdx: number; // u16
   blockIdx: number; // u32
-  frameOff: number; // u16 — byte offset WITHIN the block (not the file)
+  frameOff: number; // u32 — byte offset WITHIN the block (not the file)
   len: number; // u16 — ciphertext payload length
 }
 

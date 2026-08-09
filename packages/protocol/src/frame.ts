@@ -4,7 +4,12 @@
  *
  * Layout (big-endian):
  *   version(u8) type(u8) flags(u8) reserved(u8)
- *   fileIdx(u16) blockIdx(u32) frameOff(u16) len(u16)
+ *   fileIdx(u16) blockIdx(u32) frameOff(u32) len(u16)
+ *
+ * frameOff is a byte offset within the block, so it must span the whole block: at the
+ * default 1 MiB block a 16 KiB frame reaches offset ~1 MiB, far past u16. It is u32
+ * (an earlier draft miscalculated it as u16), absorbed by dropping the former trailing
+ * reserved(u16) — the header stays a fixed 16 bytes.
  */
 
 import { FRAME_HEADER_BYTES } from './constants.js';
@@ -27,7 +32,7 @@ export function encodeFrameHeader(h: FrameHeader): Uint8Array {
   assertRange('flags', h.flags, U8_MAX);
   assertRange('fileIdx', h.fileIdx, U16_MAX);
   assertRange('blockIdx', h.blockIdx, U32_MAX);
-  assertRange('frameOff', h.frameOff, U16_MAX);
+  assertRange('frameOff', h.frameOff, U32_MAX);
   assertRange('len', h.len, U16_MAX);
 
   const buf = new Uint8Array(FRAME_HEADER_BYTES);
@@ -38,9 +43,8 @@ export function encodeFrameHeader(h: FrameHeader): Uint8Array {
   dv.setUint8(3, 0); // reserved
   dv.setUint16(4, h.fileIdx, false);
   dv.setUint32(6, h.blockIdx, false);
-  dv.setUint16(10, h.frameOff, false);
-  dv.setUint16(12, h.len, false);
-  dv.setUint16(14, 0, false); // reserved tail — keeps header at a fixed 16 bytes
+  dv.setUint32(10, h.frameOff, false);
+  dv.setUint16(14, h.len, false);
   return buf;
 }
 
@@ -56,7 +60,7 @@ export function decodeFrameHeader(buf: Uint8Array): FrameHeader {
     flags: dv.getUint8(2),
     fileIdx: dv.getUint16(4, false),
     blockIdx: dv.getUint32(6, false),
-    frameOff: dv.getUint16(10, false),
-    len: dv.getUint16(12, false),
+    frameOff: dv.getUint32(10, false),
+    len: dv.getUint16(14, false),
   };
 }

@@ -136,7 +136,7 @@ func (s *Sender) Run() (string, error) {
 			Flags:    flags,
 			FileIdx:  0,
 			BlockIdx: uint32(p.BlockIdx),
-			FrameOff: uint16(p.FrameOff),
+			FrameOff: uint32(p.FrameOff),
 		}, p.Payload); err != nil {
 			return err
 		}
