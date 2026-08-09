@@ -7,6 +7,7 @@ import {
   type Sink,
 } from '@sendarc/protocol';
 import { streamSink, type WritableFileLike } from './stream-sink.js';
+import { opfsRoot, openDurableOpfsFile, type DurableOpfsFile } from './opfs-file.js';
 import type { ReceiveDestinationSpec } from './wire.js';
 
 export type DestinationOutput =
@@ -112,30 +113,34 @@ class DirectDirectoryDestination implements BrowserDestination {
   }
 }
 
+/**
+ * Single-file OPFS receive backed by a durable sync-access handle. Unlike a writable stream (which
+ * truncates on open and only commits at close), the handle keeps existing bytes, writes straight
+ * through, and can read its committed prefix back — the substrate a reloaded receiver resumes from.
+ * A fresh unique key names an empty file per transfer, so this stays behaviour-identical to the
+ * writable-stream path until a resume seed is threaded in.
+ */
 class OpfsFileDestination implements BrowserDestination {
-  private root: FileSystemDirectoryHandle | undefined;
   private key = '';
   private outputName = '';
   private mime = '';
-  private sink: Sink | undefined;
+  private sink: DurableOpfsFile | undefined;
   async prepare(manifest: Manifest): Promise<void> {
     await ensureQuota(manifest.totalSize);
     const file = manifest.files[0]!;
-    this.root = await opfsRoot();
     this.outputName = file.name;
     this.mime = file.mime;
     this.key = uniqueKey(file.name);
   }
   async open(): Promise<Sink> {
-    if (!this.root || this.sink) throw new TransferError('sink_error', 'OPFS destination state');
-    const handle = await this.root.getFileHandle(this.key, { create: true });
-    const writable = (await handle.createWritable({ keepExistingData: false })) as WritableFileLike;
-    return (this.sink = streamSink(writable));
+    if (this.sink) throw new TransferError('sink_error', 'OPFS destination state');
+    return (this.sink = await openDurableOpfsFile(this.key));
   }
   close(): void {}
-  async abort(reason?: string): Promise<void> {
-    await this.sink?.abort(reason);
-    if (this.root && this.key) await this.root.removeEntry(this.key).catch(() => {});
+  async abort(): Promise<void> {
+    // Drop the handle's exclusive lock before removing the entry, or the removal blocks.
+    this.sink?.abort();
+    if (this.key) await (await opfsRoot()).removeEntry(this.key).catch(() => {});
   }
   result(): DestinationOutput {
     return { kind: 'opfs', key: this.key, name: this.outputName, mime: this.mime };
@@ -284,14 +289,6 @@ export async function readOpfsOutput(key: string, name: string, mime: string): P
 export async function removeOpfsOutput(key: string): Promise<void> {
   const root = await opfsRoot();
   await root.removeEntry(key).catch(() => {});
-}
-
-async function opfsRoot(): Promise<FileSystemDirectoryHandle> {
-  const storage = navigator.storage as StorageManager | undefined;
-  if (!storage || typeof storage.getDirectory !== 'function') {
-    throw new TransferError('sink_error', 'Origin Private File System is unavailable');
-  }
-  return storage.getDirectory();
 }
 
 const crcTable = Array.from({ length: 256 }, (_, value) => {
