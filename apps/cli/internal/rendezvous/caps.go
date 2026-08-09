@@ -30,8 +30,8 @@ func DefaultCaps() Caps {
 		Version:   wire.ProtocolVersion,
 		MaxFrame:  defaultFrameBytes,
 		BlockSize: defaultBlockBytes,
-		Features:  []string{},
-		SinkHints: []string{},
+		Features:  []string{"folders"},
+		SinkHints: []string{"direct-file"},
 	}
 }
 

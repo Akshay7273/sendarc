@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 )
@@ -26,7 +27,9 @@ const (
 
 // SenderOptions configures a Sender. Zero-valued sizing and retry fields select defaults.
 type SenderOptions struct {
+	// File is the one-file compatibility shorthand. Set either File or Files, not both.
 	File             FileSource
+	Files            []FileSource
 	Send             func(frame []byte) error
 	SendDir          DirectionalKey
 	RecvDir          DirectionalKey
@@ -39,8 +42,9 @@ type SenderOptions struct {
 	AckTimeout       time.Duration
 	MaxRetries       int
 	// OnProgress reports bytes acknowledged after verify-and-sink.
-	OnProgress    func(acknowledgedBytes int64)
-	OnStateChange func(TransferState)
+	OnProgress     func(acknowledgedBytes int64)
+	OnFileProgress func(fileIdx int, fileBytes, acknowledgedBytes int64)
+	OnStateChange  func(TransferState)
 }
 
 type inflightBlock struct {
@@ -57,21 +61,24 @@ type Sender struct {
 	window     int
 	ackTimeout time.Duration
 	maxRetries int
+	files      []FileSource
 
 	sendMu      sync.Mutex
 	sendCounter uint64
 
-	mu           sync.Mutex
-	cond         *sync.Cond
-	recvCounter  uint64
-	inflight     map[int]*inflightBlock
-	retryQueue   []int
-	retryQueued  map[int]bool
-	acknowledged int64
-	paused       bool
-	completeSent bool
-	settled      bool
-	err          error
+	mu                     sync.Mutex
+	cond                   *sync.Cond
+	recvCounter            uint64
+	inflight               map[int]*inflightBlock
+	retryQueue             []int
+	retryQueued            map[int]bool
+	acknowledged           int64
+	activeFileIdx          int
+	activeFileAcknowledged int64
+	paused                 bool
+	completeSent           bool
+	settled                bool
+	err                    error
 }
 
 var errSenderSettled = errors.New("sender settled")
@@ -96,17 +103,23 @@ func NewSender(opts SenderOptions) *Sender {
 	if opts.CreateDigest == nil {
 		opts.CreateDigest = NewSHA256Digest
 	}
+	files := opts.Files
+	if len(files) == 0 && opts.File != nil {
+		files = []FileSource{opts.File}
+	}
 	s := &Sender{
-		o:           opts,
-		blockSize:   opts.BlockSize,
-		frameSize:   opts.FrameSize,
-		window:      opts.Window,
-		ackTimeout:  opts.AckTimeout,
-		maxRetries:  opts.MaxRetries,
-		sendCounter: opts.SendCounterStart,
-		recvCounter: opts.RecvCounterStart,
-		inflight:    make(map[int]*inflightBlock),
-		retryQueued: make(map[int]bool),
+		o:             opts,
+		blockSize:     opts.BlockSize,
+		frameSize:     opts.FrameSize,
+		window:        opts.Window,
+		ackTimeout:    opts.AckTimeout,
+		maxRetries:    opts.MaxRetries,
+		files:         files,
+		sendCounter:   opts.SendCounterStart,
+		recvCounter:   opts.RecvCounterStart,
+		inflight:      make(map[int]*inflightBlock),
+		retryQueued:   make(map[int]bool),
+		activeFileIdx: -1,
 	}
 	s.cond = sync.NewCond(&s.mu)
 	return s
@@ -125,71 +138,95 @@ func (s *Sender) Run(ctx context.Context) (string, error) {
 		}
 	}()
 
-	meta := s.o.File.Meta()
-	digest := s.o.CreateDigest()
-	if err := s.o.File.Stream(func(chunk []byte) error {
-		digest.Update(chunk)
-		return nil
-	}); err != nil {
+	if len(s.files) == 0 || (s.o.File != nil && len(s.o.Files) > 0) {
+		err := errors.New("transfer: exactly one of File or Files is required")
 		s.fail(err)
 		return "", err
 	}
-	fileDigest := digest.HexDigest()
-
-	blocks := 0
-	if meta.Size > 0 {
-		blocks = int((meta.Size-1)/int64(s.blockSize) + 1)
+	entries := make([]FileEntry, len(s.files))
+	var totalSize int64
+	for idx, source := range s.files {
+		meta := source.Meta()
+		digest := s.o.CreateDigest()
+		if err := source.Stream(func(chunk []byte) error {
+			digest.Update(chunk)
+			return nil
+		}); err != nil {
+			s.fail(err)
+			return "", err
+		}
+		blocks := 0
+		if meta.Size > 0 {
+			blocks = int((meta.Size-1)/int64(s.blockSize) + 1)
+		}
+		entries[idx] = FileEntry{
+			Idx: idx, Name: meta.Name, Size: meta.Size, Mime: meta.Mime,
+			LastModified: meta.LastModified, BlockSize: s.blockSize, Blocks: blocks,
+			FileDigest: digest.HexDigest(),
+		}
+		if meta.Size > math.MaxInt64-totalSize {
+			err := errors.New("transfer: total size overflow")
+			s.fail(err)
+			return "", err
+		}
+		totalSize += meta.Size
 	}
-	manifest, err := ValidateManifest(*NewManifest([]FileEntry{{
-		Idx: 0, Name: meta.Name, Size: meta.Size, Mime: meta.Mime,
-		LastModified: meta.LastModified, BlockSize: s.blockSize, Blocks: blocks,
-		FileDigest: fileDigest,
-	}}, meta.Size))
+	manifest, err := ValidateManifest(*NewManifest(entries, totalSize))
 	if err != nil {
 		s.fail(err)
 		return "", err
 	}
+	transferDigest := CompletionDigest(manifest.Files)
 	if err := s.sendControl(&manifest); err != nil {
 		s.fail(err)
 		return "", err
 	}
 
-	streamErr := ReChunk(StreamFunc(s.o.File.Stream), s.blockSize, s.blockSize, func(p FramePiece) error {
-		if err := s.beforeNewBlock(); err != nil {
-			return err
-		}
-		block := append([]byte(nil), p.Payload...)
+	for fileIdx, source := range s.files {
 		s.mu.Lock()
-		if s.settled {
-			s.mu.Unlock()
-			return errSenderSettled
-		}
-		s.inflight[p.BlockIdx] = &inflightBlock{bytes: block}
+		s.activeFileIdx = fileIdx
+		s.activeFileAcknowledged = 0
 		s.mu.Unlock()
-		if err := s.sendBlock(p.BlockIdx, block); err != nil {
-			return err
+		streamErr := ReChunk(StreamFunc(source.Stream), s.blockSize, s.blockSize, func(p FramePiece) error {
+			if err := s.beforeNewBlock(); err != nil {
+				return err
+			}
+			block := append([]byte(nil), p.Payload...)
+			s.mu.Lock()
+			if s.settled {
+				s.mu.Unlock()
+				return errSenderSettled
+			}
+			s.inflight[p.BlockIdx] = &inflightBlock{bytes: block}
+			s.mu.Unlock()
+			if err := s.sendBlock(p.BlockIdx, block); err != nil {
+				return err
+			}
+			s.armTimeout(p.BlockIdx)
+			return nil
+		})
+		if streamErr != nil && !errors.Is(streamErr, errSenderSettled) {
+			s.fail(streamErr)
+			return "", streamErr
 		}
-		s.armTimeout(p.BlockIdx)
-		return nil
-	})
-	if streamErr != nil && !errors.Is(streamErr, errSenderSettled) {
-		s.fail(streamErr)
-		return "", streamErr
-	}
-	if err := s.waitInflight(); err != nil {
-		return "", err
+		if err := s.waitInflight(); err != nil {
+			return "", err
+		}
+		if s.o.OnFileProgress != nil {
+			s.o.OnFileProgress(fileIdx, entries[fileIdx].Size, s.acknowledged)
+		}
 	}
 	s.mu.Lock()
 	s.completeSent = true
 	s.mu.Unlock()
-	if err := s.sendControl(NewComplete(fileDigest)); err != nil {
+	if err := s.sendControl(NewComplete(transferDigest)); err != nil {
 		s.fail(err)
 		return "", err
 	}
 	if err := s.waitDone(); err != nil {
 		return "", err
 	}
-	return fileDigest, nil
+	return transferDigest, nil
 }
 
 // Handle consumes one encrypted receiver control frame. Calls must remain ordered.
@@ -222,7 +259,13 @@ func (s *Sender) Handle(frame []byte) {
 	case *Ack:
 		s.onAck(m)
 	case *Nack:
-		if m.FileIdx != 0 {
+		s.mu.Lock()
+		active := s.activeFileIdx
+		s.mu.Unlock()
+		if m.FileIdx < active {
+			return
+		}
+		if m.FileIdx != active {
 			s.fail(NewTransferError(FailIntegrity, "nack for unknown file"))
 			return
 		}
@@ -276,11 +319,16 @@ func (s *Sender) Cancel(reason string) error {
 }
 
 func (s *Sender) onAck(ack *Ack) {
-	if ack.FileIdx != 0 {
+	s.mu.Lock()
+	if ack.FileIdx < s.activeFileIdx {
+		s.mu.Unlock()
+		return
+	}
+	if ack.FileIdx != s.activeFileIdx {
+		s.mu.Unlock()
 		s.fail(NewTransferError(FailIntegrity, "ack for unknown file"))
 		return
 	}
-	s.mu.Lock()
 	state := s.inflight[ack.BlockIdx]
 	if state == nil {
 		s.mu.Unlock()
@@ -292,11 +340,17 @@ func (s *Sender) onAck(ack *Ack) {
 	delete(s.inflight, ack.BlockIdx)
 	delete(s.retryQueued, ack.BlockIdx)
 	s.acknowledged += int64(len(state.bytes))
+	s.activeFileAcknowledged += int64(len(state.bytes))
 	acknowledged := s.acknowledged
+	fileAcknowledged := s.activeFileAcknowledged
+	fileIdx := s.activeFileIdx
 	s.cond.Broadcast()
 	s.mu.Unlock()
 	if s.o.OnProgress != nil {
 		s.o.OnProgress(acknowledged)
+	}
+	if s.o.OnFileProgress != nil {
+		s.o.OnFileProgress(fileIdx, fileAcknowledged, acknowledged)
 	}
 }
 
@@ -466,6 +520,9 @@ func (s *Sender) armTimeoutLocked(blockIdx int, state *inflightBlock) {
 }
 
 func (s *Sender) sendBlock(blockIdx int, block []byte) error {
+	s.mu.Lock()
+	fileIdx := s.activeFileIdx
+	s.mu.Unlock()
 	for off := 0; off < len(block); off += s.frameSize {
 		end := off + s.frameSize
 		if end > len(block) {
@@ -477,13 +534,13 @@ func (s *Sender) sendBlock(blockIdx int, block []byte) error {
 		}
 		if err := s.sendFrame(FrameHeaderInput{
 			Version: FrameVersion, Type: FrameBlockData, Flags: flags,
-			FileIdx: 0, BlockIdx: uint32(blockIdx), FrameOff: uint32(off),
+			FileIdx: uint16(fileIdx), BlockIdx: uint32(blockIdx), FrameOff: uint32(off),
 		}, block[off:end]); err != nil {
 			return err
 		}
 	}
 	sum := sha256.Sum256(block)
-	return s.sendControl(NewBlockHash(0, blockIdx, hex.EncodeToString(sum[:])))
+	return s.sendControl(NewBlockHash(fileIdx, blockIdx, hex.EncodeToString(sum[:])))
 }
 
 func (s *Sender) waitDone() error {

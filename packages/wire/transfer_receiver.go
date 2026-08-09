@@ -16,8 +16,11 @@ import (
 
 // ReceiveResult is the successful manifest entry and canonical whole-file digest.
 type ReceiveResult struct {
-	File   FileEntry
-	Digest string
+	Files     []FileEntry
+	Digests   []string
+	TotalSize int64
+	File      FileEntry
+	Digest    string
 }
 
 // ReceiverOptions configures a Receiver.
@@ -29,24 +32,34 @@ type ReceiverOptions struct {
 	RecvCounterStart uint64
 	CreateDigest     func() Digest
 	Sink             Sink
+	Destination      Destination
 	// OnProgress reports bytes only after verify-and-sink.
-	OnProgress    func(acknowledgedBytes int64)
-	OnStateChange func(TransferState)
-	OnManifest    func(file FileEntry) error
+	OnProgress     func(acknowledgedBytes int64)
+	OnFileProgress func(fileIdx int, fileBytes, acknowledgedBytes int64)
+	OnStateChange  func(TransferState)
+	OnManifestSet  func(manifest Manifest) error
+	OnManifest     func(file FileEntry) error
 }
 
 // Receiver drives one file receive. Handle calls must remain ordered.
 type Receiver struct {
-	o      ReceiverOptions
-	digest Digest
+	o           ReceiverOptions
+	destination Destination
 
 	sendMu      sync.Mutex
 	sendCounter uint64
 
 	// Assembly state belongs to the serial Handle path.
 	recvCounter     uint64
+	manifest        *Manifest
+	fileIdx         int
 	file            *FileEntry
+	sink            Sink
+	digest          Digest
+	digests         []string
+	acknowledged    int64
 	nextBlock       int
+	assemblingFile  int
 	assembling      int
 	blockBuf        []byte
 	blockReceived   int
@@ -66,12 +79,17 @@ func NewReceiver(opts ReceiverOptions) *Receiver {
 	if opts.CreateDigest == nil {
 		opts.CreateDigest = NewSHA256Digest
 	}
+	destination := opts.Destination
+	if destination == nil && opts.Sink != nil {
+		destination = SingleSinkDestination(opts.Sink)
+	}
 	return &Receiver{
 		o:               opts,
-		digest:          opts.CreateDigest(),
+		destination:     destination,
 		sendCounter:     opts.SendCounterStart,
 		recvCounter:     opts.RecvCounterStart,
 		assembling:      -1,
+		assemblingFile:  -1,
 		seenAhead:       make(map[int]bool),
 		nackOutstanding: -1,
 		done:            make(chan struct{}),
@@ -165,7 +183,7 @@ func (r *Receiver) process(frame []byte) error {
 }
 
 func (r *Receiver) applyManifest(payload []byte) error {
-	if r.file != nil {
+	if r.manifest != nil {
 		return NewTransferError(FailIntegrity, "duplicate manifest")
 	}
 	msg, err := DecodeControl(payload)
@@ -180,40 +198,105 @@ func (r *Receiver) applyManifest(payload []byte) error {
 	if err != nil {
 		return NewTransferError(FailIntegrity, err.Error())
 	}
-	if len(validated.Files) != 1 {
-		return NewTransferError(FailIntegrity, "single-file manifest required")
+	if r.destination == nil {
+		return NewTransferError(FailSinkError, "transfer destination is required")
 	}
-	f := validated.Files[0]
-	r.file = &f
-	if r.o.OnManifest != nil {
-		if err := r.o.OnManifest(f); err != nil {
+	if err := r.destination.Prepare(validated); err != nil {
+		return asTransferError(err, FailSinkError)
+	}
+	if r.o.OnManifestSet != nil {
+		if err := r.o.OnManifestSet(validated); err != nil {
 			return asTransferError(err, FailSinkError)
 		}
 	}
+	r.manifest = &validated
+	r.digests = make([]string, len(validated.Files))
+	return r.openNextFile()
+}
+
+func (r *Receiver) openNextFile() error {
+	if r.manifest == nil {
+		return NewTransferError(FailIntegrity, "file opened before manifest")
+	}
+	for r.fileIdx < len(r.manifest.Files) {
+		file := r.manifest.Files[r.fileIdx]
+		r.file = &file
+		r.nextBlock = 0
+		r.seenAhead = make(map[int]bool)
+		r.nackOutstanding = -1
+		r.digest = r.o.CreateDigest()
+		if r.o.OnManifest != nil {
+			if err := r.o.OnManifest(file); err != nil {
+				return asTransferError(err, FailSinkError)
+			}
+		}
+		sink, err := r.destination.Open(file)
+		if err != nil {
+			return asTransferError(err, FailSinkError)
+		}
+		r.sink = sink
+		if file.Blocks > 0 {
+			return nil
+		}
+		if err := r.finishCurrentFile(); err != nil {
+			return err
+		}
+	}
+	r.file = nil
+	r.sink = nil
+	r.digest = nil
+	return nil
+}
+
+func (r *Receiver) finishCurrentFile() error {
+	if r.file == nil || r.sink == nil || r.digest == nil {
+		return NewTransferError(FailIntegrity, "no active file")
+	}
+	got := r.digest.HexDigest()
+	if got != r.file.FileDigest {
+		return NewTransferError(FailDigestMismatch, fmt.Sprintf("file %d digest mismatch", r.file.Idx))
+	}
+	if err := r.sink.Close(); err != nil {
+		return asTransferError(err, FailSinkError)
+	}
+	r.digests[r.file.Idx] = got
+	if r.o.OnFileProgress != nil {
+		r.o.OnFileProgress(r.file.Idx, r.file.Size, r.acknowledged)
+	}
+	r.fileIdx++
+	r.file = nil
+	r.sink = nil
+	r.digest = nil
 	return nil
 }
 
 func (r *Receiver) onBlockData(fileIdx uint16, blockIdx uint32, frameOff uint32, payload []byte) error {
-	if r.file == nil {
+	if r.manifest == nil {
 		return NewTransferError(FailIntegrity, "block_data before manifest")
 	}
+	fileNumber := int(fileIdx)
+	if fileNumber < 0 || fileNumber >= len(r.manifest.Files) || fileNumber > r.fileIdx {
+		return NewTransferError(FailIntegrity, fmt.Sprintf("block_data outside manifest: %d", blockIdx))
+	}
+	entry := r.manifest.Files[fileNumber]
 	idx := int(blockIdx)
-	if fileIdx != 0 || idx < 0 || idx >= r.file.Blocks {
+	if idx < 0 || idx >= entry.Blocks {
 		return NewTransferError(FailIntegrity, fmt.Sprintf("block_data outside manifest: %d", idx))
 	}
 	if frameOff == 0 {
 		if r.blockBuf != nil {
 			return NewTransferError(FailIntegrity, "new block before block_hash")
 		}
-		blockLen := r.file.BlockSize
-		if rem := r.file.Size - int64(idx)*int64(r.file.BlockSize); int64(blockLen) > rem {
+		blockLen := entry.BlockSize
+		if rem := entry.Size - int64(idx)*int64(entry.BlockSize); int64(blockLen) > rem {
 			blockLen = int(rem)
 		}
+		r.assemblingFile = fileNumber
 		r.assembling = idx
 		r.blockBuf = make([]byte, blockLen)
 		r.blockReceived = 0
 	}
-	if r.blockBuf == nil || r.assembling != idx {
+	if r.blockBuf == nil || r.assemblingFile != fileNumber || r.assembling != idx {
 		return NewTransferError(FailIntegrity, fmt.Sprintf("unexpected block fragment %d", idx))
 	}
 	off := int(frameOff)
@@ -226,7 +309,7 @@ func (r *Receiver) onBlockData(fileIdx uint16, blockIdx uint32, frameOff uint32,
 }
 
 func (r *Receiver) onBlockHash(payload []byte) error {
-	if r.file == nil || r.blockBuf == nil {
+	if r.manifest == nil || r.blockBuf == nil {
 		return NewTransferError(FailIntegrity, "block_hash without a block")
 	}
 	msg, err := DecodeControl(payload)
@@ -237,7 +320,7 @@ func (r *Receiver) onBlockHash(payload []byte) error {
 	if !ok {
 		return NewTransferError(FailIntegrity, "expected block_hash")
 	}
-	if bh.FileIdx != 0 || bh.BlockIdx != r.assembling {
+	if bh.FileIdx != r.assemblingFile || bh.BlockIdx != r.assembling {
 		return NewTransferError(FailIntegrity, "block_hash does not match assembled block")
 	}
 	if r.blockReceived != len(r.blockBuf) {
@@ -252,9 +335,17 @@ func (r *Receiver) onBlockHash(payload []byte) error {
 	r.blockBuf = nil
 	r.blockReceived = 0
 	r.assembling = -1
+	r.assemblingFile = -1
+
+	if bh.FileIdx < r.fileIdx {
+		return r.sendControl(NewAck(bh.FileIdx, bh.BlockIdx))
+	}
+	if r.file == nil || r.sink == nil || r.digest == nil || bh.FileIdx != r.fileIdx {
+		return NewTransferError(FailIntegrity, "block_hash for inactive file")
+	}
 
 	if bh.BlockIdx < r.nextBlock {
-		return r.sendControl(NewAck(0, bh.BlockIdx))
+		return r.sendControl(NewAck(bh.FileIdx, bh.BlockIdx))
 	}
 	if bh.BlockIdx > r.nextBlock {
 		if len(r.seenAhead) < DefaultInflightBlocks {
@@ -264,17 +355,27 @@ func (r *Receiver) onBlockHash(payload []byte) error {
 	}
 
 	offset := int64(r.nextBlock) * int64(r.file.BlockSize)
-	if err := r.o.Sink.Write(offset, block); err != nil {
+	if err := r.sink.Write(offset, block); err != nil {
 		return asTransferError(err, FailSinkError)
 	}
 	r.digest.Update(block)
 	r.nextBlock++
 	r.nackOutstanding = -1
+	r.acknowledged += int64(len(block))
 	if r.o.OnProgress != nil {
-		r.o.OnProgress(offset + int64(len(block)))
+		r.o.OnProgress(r.acknowledged)
 	}
-	if err := r.sendControl(NewAck(0, bh.BlockIdx)); err != nil {
+	if r.o.OnFileProgress != nil {
+		r.o.OnFileProgress(r.file.Idx, offset+int64(len(block)), r.acknowledged)
+	}
+	if err := r.sendControl(NewAck(bh.FileIdx, bh.BlockIdx)); err != nil {
 		return err
+	}
+	if r.nextBlock == r.file.Blocks {
+		if err := r.finishCurrentFile(); err != nil {
+			return err
+		}
+		return r.openNextFile()
 	}
 	if r.seenAhead[r.nextBlock] {
 		delete(r.seenAhead, r.nextBlock)
@@ -288,7 +389,7 @@ func (r *Receiver) requestMissing() error {
 		return nil
 	}
 	r.nackOutstanding = r.nextBlock
-	return r.sendControl(NewNack(0, r.nextBlock, NackMissing))
+	return r.sendControl(NewNack(r.fileIdx, r.nextBlock, NackMissing))
 }
 
 func (r *Receiver) onControl(payload []byte) error {
@@ -328,7 +429,7 @@ func (r *Receiver) onPeerFail(payload []byte) error {
 }
 
 func (r *Receiver) onComplete(payload []byte) error {
-	if r.file == nil {
+	if r.manifest == nil {
 		return NewTransferError(FailIntegrity, "complete before manifest")
 	}
 	msg, err := DecodeControl(payload)
@@ -339,20 +440,26 @@ func (r *Receiver) onComplete(payload []byte) error {
 	if !ok {
 		return NewTransferError(FailIntegrity, "expected complete")
 	}
-	if r.nextBlock != r.file.Blocks {
+	if r.file != nil && r.nextBlock != r.file.Blocks {
 		return r.requestMissing()
 	}
-	got := r.digest.HexDigest()
-	if complete.FileDigest != r.file.FileDigest || got != complete.FileDigest {
-		return NewTransferError(FailDigestMismatch, "whole-file digest mismatch")
+	if r.fileIdx != len(r.manifest.Files) {
+		return NewTransferError(FailIntegrity, "complete before every file was received")
 	}
-	if err := r.o.Sink.Close(); err != nil {
+	got := CompletionDigest(r.manifest.Files)
+	if complete.FileDigest != got {
+		return NewTransferError(FailDigestMismatch, "file-set mismatch")
+	}
+	if err := r.destination.Close(); err != nil {
 		return asTransferError(err, FailSinkError)
 	}
 	if err := r.sendControl(NewDone()); err != nil {
 		return err
 	}
-	r.settle(ReceiveResult{File: *r.file, Digest: got})
+	r.settle(ReceiveResult{
+		Files: append([]FileEntry(nil), r.manifest.Files...), Digests: append([]string(nil), r.digests...),
+		TotalSize: r.manifest.TotalSize, File: r.manifest.Files[0], Digest: got,
+	})
 	return nil
 }
 
@@ -386,7 +493,9 @@ func (r *Receiver) abortWith(err *TransferError, notifyPeer bool) {
 	if notifyPeer {
 		_ = r.sendControl(NewFail(err.Reason))
 	}
-	_ = r.o.Sink.Abort(string(err.Reason))
+	if r.destination != nil {
+		_ = r.destination.Abort(string(err.Reason))
+	}
 	close(r.done)
 }
 
