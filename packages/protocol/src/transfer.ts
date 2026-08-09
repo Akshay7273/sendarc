@@ -20,7 +20,7 @@ export enum FrameType {
   Manifest = 2,
   BlockData = 3,
   BlockHash = 4,
-  BlockRecv = 5, // lightweight in-flight-window signal
+  BlockRecv = 5, // legacy pre-verification receipt tag; retained for decoder compatibility
   Ack = 6,
   Nack = 7,
   Control = 8,
@@ -72,7 +72,7 @@ export interface BlockHash {
   sha256: string; // hex
 }
 
-/** Window signal: receiver has taken delivery of a block (pre-ack). */
+/** Legacy pre-verification receipt. Reliable engines use Ack after verify-and-sink. */
 export interface BlockRecv {
   type: FrameType.BlockRecv;
   fileIdx: number;
