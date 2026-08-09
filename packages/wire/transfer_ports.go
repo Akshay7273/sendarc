@@ -83,6 +83,8 @@ const (
 	FailCanceled FailReason = "canceled"
 	// FailQuota means the destination ran out of space or quota.
 	FailQuota FailReason = "quota"
+	// FailRetryExhausted means a missing block remained unacknowledged after bounded retries.
+	FailRetryExhausted FailReason = "retry_exhausted"
 )
 
 // TransferError carries one of the protocol's fail reasons. The reason is always prefixed
