@@ -20,8 +20,8 @@ import (
 // signaling server can pair sockets but can neither inject a peer nor tamper with the
 // negotiation. Confidentiality still rests on the AES-GCM frame layer that rides the channel.
 
-// DefaultICEServers is enough for the common NAT case; a TURN relay is a later milestone. It
-// matches DEFAULT_ICE_SERVERS in the browser peer so both ends gather comparably.
+// DefaultICEServers covers the common NAT case. It matches DEFAULT_ICE_SERVERS in the browser
+// peer so both ends gather comparably.
 var DefaultICEServers = []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}}
 
 // PeerOptions configures a Peer.

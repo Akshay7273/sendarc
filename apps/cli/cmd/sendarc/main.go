@@ -1,6 +1,6 @@
-// Command sendarc is the terminal client for a SendArc transfer. It runs one M1
-// rendezvous over the blind signaling server and then, over the same socket, an M2
-// end-to-end-encrypted direct file transfer:
+// Command sendarc is the terminal client for SendArc. It authenticates through the blind
+// rendezvous server, then uses the same socket to negotiate an end-to-end-encrypted direct
+// file transfer:
 //
 //	sendarc send <file>     # allocate a room, print the invite code + link, send the file
 //	sendarc receive <code>  # join with a code (or a pasted invite link), receive the file

@@ -1,5 +1,5 @@
 /**
- * Binary codec for the 16-byte frame header (plan.md §6.3). The encoded header bytes
+ * Binary codec for the 16-byte frame header. The encoded header bytes
  * are used verbatim as the AES-GCM AAD, so encode/decode must be exact and stable.
  *
  * Layout (big-endian):

@@ -1,6 +1,6 @@
 /**
- * Rendezvous state machine — drives one peer through the M1 handshake over the blind
- * signaling channel (plan.md §5.2): `create`/`join` → `peer-joined` → `pake` → `confirm`
+ * Rendezvous state machine — drives one peer through the handshake over the blind
+ * signaling channel: `create`/`join` → `peer-joined` → `pake` → `confirm`
  * → an encrypted `caps` round-trip, ending with a shared master key and both directional
  * transfer keys.
  *
@@ -62,7 +62,7 @@ export interface CapsPayload {
   sinkHints: SinkHint[];
 }
 
-/** Everything a completed handshake yields — enough to run the M2 transfer under the same key. */
+/** Everything a completed handshake yields — enough to run the transfer under the same key. */
 export interface RendezvousResult {
   readonly role: Role;
   readonly room: number;
@@ -72,14 +72,14 @@ export interface RendezvousResult {
   readonly master: Uint8Array;
   /** Both directional AEAD keys + nonce salts. */
   readonly keys: TransferKeys;
-  /** Raw SPAKE2 output, retained for the M2 SDP/ICE MAC keys (KcA/KcB). */
+  /** Raw SPAKE2 output, retained for the SDP/ICE MAC keys (KcA/KcB). */
   readonly spake2: Spake2Output;
   readonly localCaps: CapsPayload;
   readonly remoteCaps: CapsPayload;
   /**
    * Next per-direction frame counters. The caps exchange consumed counter 0 in each
    * direction, so both are 1: the transfer must continue from here without resetting,
-   * or it would reuse an AES-GCM nonce (plan.md §5.3 counter-continuity invariant).
+   * or it would reuse an AES-GCM nonce.
    */
   readonly sendCounter: number;
   readonly recvCounter: number;
@@ -330,7 +330,7 @@ export class RendezvousSession {
     }
     const expected = this.role === 'offerer' ? this.spake2.confirmB : this.spake2.confirmA;
     if (!constantTimeEqual(got, expected)) {
-      // Wrong code or a MITM: fail closed (RFC 9382 §4). This is the core M1 guarantee.
+      // Wrong code or a MITM: fail closed (RFC 9382 §4).
       return this.fail(new RendezvousError('confirmation_failed', 'key confirmation failed'));
     }
     // Confirmed. Derive the transfer keys and send our encrypted caps.

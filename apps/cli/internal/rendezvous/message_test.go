@@ -8,7 +8,7 @@ import (
 // TestSDPMessageWireShape pins the sdp envelope, including that seq:0 — the first
 // message a sender emits — is present on the wire. A dropped seq:0 would let a peer
 // silently accept a replayed first offer, so this guards the pointer-with-omitempty
-// choice that keeps the field for M2 messages while omitting it everywhere else.
+// choice that keeps the field for authenticated signaling while omitting it elsewhere.
 func TestSDPMessageWireShape(t *testing.T) {
 	b, err := MarshalMessage(NewSDP(0, "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\n", "dGFn"))
 	if err != nil {
@@ -60,9 +60,9 @@ func TestICEMessageWireShape(t *testing.T) {
 	}
 }
 
-// TestNonM2MessagesOmitM2Fields confirms sdp/cand/seq never leak onto a handshake
-// message: a create carries only its type, nothing from the M2 extension.
-func TestNonM2MessagesOmitM2Fields(t *testing.T) {
+// TestHandshakeMessagesOmitSignalingFields confirms sdp/cand/seq never leak onto a
+// handshake message: a create carries only its type.
+func TestHandshakeMessagesOmitSignalingFields(t *testing.T) {
 	b, err := MarshalMessage(Message{Type: typeCreate})
 	if err != nil {
 		t.Fatal(err)

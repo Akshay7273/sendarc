@@ -1,5 +1,5 @@
 /**
- * WebRTC peer for the M2 transfer: brings up an `RTCDataChannel` between the two paired clients
+ * WebRTC peer: brings up an `RTCDataChannel` between the two paired clients
  * over the already-authenticated signaling socket. Every SDP and ICE frame is signed and verified
  * with the SPAKE2-derived key (see {@link SignalAuthenticator}); an unverifiable frame is dropped,
  * so a malicious signaling server can pair sockets but cannot inject a peer or tamper with the
@@ -11,7 +11,7 @@
 import type { IceMsg, Role, SdpMsg } from '@sendarc/protocol';
 import type { SignalAuthenticator } from './authed-signaling.js';
 
-/** A public STUN server is enough for the common NAT case; TURN relay is a later milestone. */
+/** A public STUN server is sufficient for the common NAT case. */
 export const DEFAULT_ICE_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
 
 export interface CreatePeerOptions {

@@ -1,7 +1,6 @@
 // Package httpserver wires the HTTP surface for sendarcd: health, security headers,
 // and serving the web app — either from a built directory (prod) or by proxying the
-// Vite dev server (dev). Signaling/relay handlers mount onto this router in later
-// milestones.
+// Vite dev server (dev). The signaling handler mounts on the same router.
 package httpserver
 
 import (
@@ -112,7 +111,7 @@ func router(ctx context.Context, cfg Config, logger *slog.Logger) (http.Handler,
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	// Signaling endpoint: origin-checked WebSocket rendezvous (plan.md §6.1).
+	// Signaling endpoint: origin-checked WebSocket rendezvous.
 	hub := signal.NewHub(ctx, cfg.Signal, logger)
 	r.Handle("/ws", hub.Handler(ctx))
 

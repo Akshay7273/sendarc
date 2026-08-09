@@ -1,4 +1,4 @@
-// Package transfer wires a completed M1 rendezvous into an M2 direct file transfer: it adopts
+// Package transfer wires a completed rendezvous into a direct file transfer: it adopts
 // the open signaling socket, brings up the authenticated WebRTC DataChannel (internal/rtc), and
 // runs the transport-agnostic transfer engine (packages/wire) over it — the offerer sends the
 // file, the joiner writes it to disk. It is the CLI counterpart of
@@ -79,7 +79,7 @@ type driver struct {
 }
 
 // Send implements rendezvous.Sink for the handshake session and doubles as the peer's send
-// callback. It serializes every socket write: during M2 the read loop (relaying an answer),
+// callback. It serializes every socket write: the read loop (relaying an answer),
 // the offerer's sendOffer goroutine, and pion's ICE-candidate goroutine can all write at once,
 // and coder/websocket permits only one writer at a time.
 func (d *driver) Send(m rendezvous.Message) error {
@@ -94,7 +94,7 @@ func (d *driver) run(ctx context.Context) (*Outcome, error) {
 	d.sess = rendezvous.New(opts)
 
 	// On a handshake failure, close the socket so the read loop unblocks; on success keep it
-	// open — the M2 signaling still needs it.
+	// open — WebRTC signaling still needs it.
 	go func() {
 		<-d.sess.Done()
 		if _, err := d.sess.Result(); err != nil {
