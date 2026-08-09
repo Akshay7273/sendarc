@@ -59,7 +59,7 @@ func (s *senderFrames) blockData(data []byte, blockSize, frameSize int) {
 			}
 			s.push(FrameHeaderInput{
 				Version: FrameVersion, Type: FrameBlockData, Flags: flags,
-				BlockIdx: uint32(blk), FrameOff: uint16(off),
+				BlockIdx: uint32(blk), FrameOff: uint32(off),
 			}, frag)
 		}
 		sum := sha256.Sum256(block)

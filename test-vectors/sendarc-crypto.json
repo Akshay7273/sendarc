@@ -26,9 +26,9 @@
   "aead": {
     "direction": "o2j",
     "counter": 0,
-    "headerHex": "010100000000000000000000001b0000",
+    "headerHex": "0101000000000000000000000000001b",
     "plaintextUtf8": "sendarc caps vector payload",
-    "frameHex": "010100000000000000000000001b00009888677ac00c856a25561506dc2ee2f89b4b7fb356920d6819299deb894321e18c92c9123133f0b77b6a4c"
+    "frameHex": "0101000000000000000000000000001b9888677ac00c856a25561506dc2ee2f89b4b7fb356920d6819299d66f7a7cd4171213328dea32e0962fe5b"
   },
   "authmac": {
     "note": "mac = HMAC-SHA256(kAuth, type || ':' || u32be(room) || ':' || u32be(seq) || ':' || body). Self-contained kAuth (not derived from spake2 above).",
