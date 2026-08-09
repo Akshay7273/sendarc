@@ -12,7 +12,7 @@
 import { runTransferCore } from './transfer-core.js';
 import { createSha256DigestFactory } from './digest.js';
 import { blobFileSource } from './file-source.js';
-import { openOpfsSink } from './sink.js';
+import { createBrowserDestination } from './sink.js';
 import type { DuplexPort, HostToWorker, WorkerToHost } from './wire.js';
 
 /** The slice of the worker global we touch, typed narrowly to avoid the DOM/WebWorker lib clash. */
@@ -35,7 +35,10 @@ async function main(): Promise<void> {
   post({ kind: 'ready' });
   await runTransferCore(port, {
     createDigest,
-    createSink: async (file) => (await openOpfsSink(file.name)).sink,
+    createSink: () => {
+      throw new Error('browser worker uses a destination factory');
+    },
+    createDestination: (spec) => createBrowserDestination(spec),
     fileSource: (file) => blobFileSource(file),
   });
 }

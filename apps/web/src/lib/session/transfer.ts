@@ -16,15 +16,24 @@ import { SignalAuthenticator } from '../transfer/authed-signaling.js';
 import { createPeer, type Peer } from '../transfer/peer.js';
 import { ChannelWriter } from '../transfer/channel-writer.js';
 import { ProgressTracker, type TransferSnapshot } from '../transfer/progress.js';
-import { readOpfsFile } from '../transfer/sink.js';
-import type { HostToWorker, SessionCrypto, WorkerToHost } from '../transfer/wire.js';
+import { readOpfsOutput, removeOpfsOutput } from '../transfer/sink.js';
+import type {
+  HostToWorker,
+  ReceiveDestinationSpec,
+  SessionCrypto,
+  WorkerToHost,
+} from '../transfer/wire.js';
 
 /** Terminal outcome of a transfer. `file` is present on the receive side (the downloadable result). */
 export interface TransferOutcome {
   name: string;
   size: number;
   digest: string;
+  files: Array<{ name: string; size: number; digest: string }>;
   file?: File;
+  savedDirectly?: boolean;
+  /** Release a temporary browser-staged output after its download link is gone. */
+  cleanup?: () => Promise<void>;
 }
 
 /** A transfer in progress. `done` settles once; `progress` is polled by the UI for a live bar. */
@@ -46,10 +55,10 @@ export interface TransferController {
 }
 
 export interface SendOptions {
-  file: File;
+  files: File[];
 }
 
-/** Start sending `opts.file` to the peer over the adopted rendezvous socket. */
+/** Start sending an ordered file/folder selection over the adopted rendezvous socket. */
 export function runSend(
   rendezvous: RendezvousResult,
   signaling: SignalChannel,
@@ -57,8 +66,8 @@ export function runSend(
 ): TransferController {
   return run(rendezvous, signaling, {
     role: 'send',
-    total: opts.file.size,
-    start: () => ({ kind: 'start-send', file: opts.file, ...crypto(rendezvous) }),
+    total: opts.files.reduce((total, file) => total + file.size, 0),
+    start: () => ({ kind: 'start-send', files: opts.files, ...crypto(rendezvous) }),
   });
 }
 
@@ -66,10 +75,11 @@ export function runSend(
 export function runReceive(
   rendezvous: RendezvousResult,
   signaling: SignalChannel,
+  destination: ReceiveDestinationSpec = { kind: 'auto' },
 ): TransferController {
   return run(rendezvous, signaling, {
     role: 'receive',
-    start: () => ({ kind: 'start-recv', ...crypto(rendezvous) }),
+    start: () => ({ kind: 'start-recv', destination, ...crypto(rendezvous) }),
   });
 }
 
@@ -155,14 +165,14 @@ function run(
             progress.update(msg.bytes);
             return;
           case 'manifest':
-            total = msg.size;
-            progress.setTotal(msg.size);
+            total = msg.totalSize;
+            progress.setTotal(msg.totalSize);
             return;
           case 'state':
             progress.setState(msg.state);
             return;
           case 'done':
-            void completeReceive(msg.name, msg.size, msg.digest);
+            void completeTransfer(msg);
             return;
           case 'error':
             if (msg.reason === 'canceled') {
@@ -192,16 +202,40 @@ function run(
     }
   })();
 
-  async function completeReceive(name: string, size: number, digest: string): Promise<void> {
+  async function completeTransfer(msg: Extract<WorkerToHost, { kind: 'done' }>): Promise<void> {
+    const first = msg.files[0]!;
     if (spec.role === 'receive') {
       try {
-        const file = await readOpfsFile(name);
-        finish({ name, size, digest, file });
+        const output = msg.output;
+        if (output?.kind === 'opfs') {
+          const file = await readOpfsOutput(output.key, output.name, output.mime);
+          finish({
+            name: output.name,
+            size: msg.totalSize,
+            digest: msg.digest,
+            files: msg.files,
+            file,
+            cleanup: () => removeOpfsOutput(output.key),
+          });
+        } else {
+          finish({
+            name: first.name,
+            size: msg.totalSize,
+            digest: msg.digest,
+            files: msg.files,
+            savedDirectly: true,
+          });
+        }
       } catch (err) {
         fail(err instanceof Error ? err : new Error(String(err)));
       }
     } else {
-      finish({ name, size, digest });
+      finish({
+        name: msg.files.length === 1 ? first.name : `${msg.files.length} files`,
+        size: msg.totalSize,
+        digest: msg.digest,
+        files: msg.files,
+      });
     }
   }
 

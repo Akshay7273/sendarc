@@ -11,7 +11,7 @@ const DEFAULT_CHUNK = 64 * 1024;
 
 export function blobFileSource(file: File, chunk: number = DEFAULT_CHUNK): FileSource {
   const meta: FileMeta = {
-    name: file.name,
+    name: file.webkitRelativePath || file.name,
     size: file.size,
     mime: file.type,
     lastModified: file.lastModified,

@@ -9,7 +9,7 @@
 
 import { open, seal, type FrameHeaderInput } from './aead.js';
 import type { DirectionalKey } from './keyschedule.js';
-import { FrameType, type ControlOp, type Fail } from './transfer.js';
+import { FrameType, type ControlOp, type Fail, type Manifest } from './transfer.js';
 import {
   DEFAULT_BLOCK_BYTES,
   DEFAULT_FRAME_BYTES,
@@ -51,6 +51,7 @@ export interface TransferSenderOptions {
   onProgress?(acknowledgedBytes: number): void;
   /** Reports verified progress for the active file plus aggregate acknowledged bytes. */
   onFileProgress?(fileIdx: number, fileBytes: number, acknowledgedBytes: number): void;
+  onManifest?(manifest: Manifest): void;
   onStateChange?(state: TransferRunState): void;
 }
 
@@ -188,6 +189,7 @@ export class TransferSender {
       totalSize,
     });
     const transferDigest = await completionDigest(manifest.files);
+    this.o.onManifest?.(manifest);
     await this.sendControl(FrameType.Manifest, manifest);
 
     for (const [fileIdx, source] of this.files.entries()) {
