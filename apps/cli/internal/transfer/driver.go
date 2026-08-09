@@ -26,6 +26,13 @@ type Signal interface {
 	Close()
 }
 
+// Controls is the live transfer surface exposed to terminal frontends.
+type Controls interface {
+	Pause() error
+	Resume() error
+	Cancel(reason string) error
+}
+
 // Spec configures one side of a transfer. Session carries the handshake inputs (role, code,
 // caps, progress callbacks); the driver supplies its Transport. A sending (offerer) spec sets
 // Source; a receiving (joiner) spec sets DestDir.
@@ -42,8 +49,12 @@ type Spec struct {
 	OnConnect func()
 	// OnManifest fires on the receiver when the sender's manifest arrives (file named and sized).
 	OnManifest func(wire.FileEntry)
-	// OnProgress reports cumulative bytes transferred.
+	// OnProgress reports cumulative bytes acknowledged after verify-and-sink.
 	OnProgress func(int64)
+	// OnControls receives the live engine after the channel opens, before bytes begin moving.
+	OnControls func(Controls)
+	// OnStateChange reports pause, resume, and remote cancellation.
+	OnStateChange func(wire.TransferState)
 }
 
 // Outcome is the result of a completed transfer.
@@ -216,8 +227,12 @@ func (d *driver) send(ctx context.Context, conn *rtc.DataConn, res *rendezvous.R
 		BlockSize:        negotiate(res.LocalCaps.BlockSize, res.RemoteCaps.BlockSize, wire.DefaultBlockBytes),
 		FrameSize:        negotiate(res.LocalCaps.MaxFrame, res.RemoteCaps.MaxFrame, wire.DefaultFrameBytes),
 		OnProgress:       d.spec.OnProgress,
+		OnStateChange:    d.spec.OnStateChange,
 	})
 	conn.OnData(sender.Handle)
+	if d.spec.OnControls != nil {
+		d.spec.OnControls(sender)
+	}
 	digest, err := sender.Run(ctx)
 	if err != nil {
 		return nil, err
@@ -237,6 +252,7 @@ func (d *driver) receive(ctx context.Context, conn *rtc.DataConn, res *rendezvou
 		RecvCounterStart: res.RecvCounter,
 		Sink:             deferred,
 		OnProgress:       d.spec.OnProgress,
+		OnStateChange:    d.spec.OnStateChange,
 		OnManifest: func(file wire.FileEntry) error {
 			// Open the destination lazily, named after the (sanitized) manifest file, before the
 			// first block is written — the browser DeferredSink pattern.
@@ -253,6 +269,9 @@ func (d *driver) receive(ctx context.Context, conn *rtc.DataConn, res *rendezvou
 		},
 	})
 	conn.OnData(receiver.Handle)
+	if d.spec.OnControls != nil {
+		d.spec.OnControls(receiver)
+	}
 	result, err := receiver.Wait(ctx)
 	if err != nil {
 		return nil, err
