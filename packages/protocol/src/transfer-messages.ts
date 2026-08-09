@@ -7,12 +7,15 @@
 
 import {
   FrameType,
+  type Ack,
   type BlockHash,
   type BlockRecv,
   type Complete,
+  type Control,
   type Fail,
   type FileEntry,
   type Manifest,
+  type Nack,
   type TransferMsg,
 } from './transfer.js';
 import { utf8 } from './bytes.js';
@@ -39,6 +42,12 @@ export function decodeControl(payload: Uint8Array): TransferMsg {
       return asBlockHash(m);
     case FrameType.BlockRecv:
       return asBlockRecv(m);
+    case FrameType.Ack:
+      return asAck(m);
+    case FrameType.Nack:
+      return asNack(m);
+    case FrameType.Control:
+      return asControl(m);
     case FrameType.Complete:
       return asComplete(m);
     case FrameType.Done:
@@ -97,12 +106,41 @@ function asBlockHash(m: Record<string, unknown>): BlockHash {
 function asBlockRecv(m: Record<string, unknown>): BlockRecv {
   return { type: FrameType.BlockRecv, fileIdx: num(m, 'fileIdx'), blockIdx: num(m, 'blockIdx') };
 }
+function asAck(m: Record<string, unknown>): Ack {
+  return { type: FrameType.Ack, fileIdx: num(m, 'fileIdx'), blockIdx: num(m, 'blockIdx') };
+}
+function asNack(m: Record<string, unknown>): Nack {
+  const reason = str(m, 'reason');
+  if (reason !== 'missing' && reason !== 'timeout') {
+    throw new Error(`control frame: bad nack reason ${reason}`);
+  }
+  return {
+    type: FrameType.Nack,
+    fileIdx: num(m, 'fileIdx'),
+    blockIdx: num(m, 'blockIdx'),
+    reason,
+  };
+}
+function asControl(m: Record<string, unknown>): Control {
+  const op = str(m, 'op');
+  if (op !== 'pause' && op !== 'resume' && op !== 'cancel') {
+    throw new Error(`control frame: bad control op ${op}`);
+  }
+  return { type: FrameType.Control, op };
+}
 function asComplete(m: Record<string, unknown>): Complete {
   return { type: FrameType.Complete, fileDigest: str(m, 'fileDigest') };
 }
 function asFail(m: Record<string, unknown>): Fail {
   const reason = str(m, 'reason');
-  const allowed = ['digest_mismatch', 'integrity', 'sink_error', 'canceled', 'quota'];
+  const allowed = [
+    'digest_mismatch',
+    'integrity',
+    'sink_error',
+    'canceled',
+    'quota',
+    'retry_exhausted',
+  ];
   if (!allowed.includes(reason)) throw new Error(`control frame: bad fail reason ${reason}`);
   return { type: FrameType.Fail, reason: reason as Fail['reason'] };
 }
