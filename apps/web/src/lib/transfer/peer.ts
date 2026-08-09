@@ -32,6 +32,8 @@ export interface Peer {
    * call are buffered and flushed here, so the first blocks a fast sender emits are never lost.
    */
   onData(handler: (frame: ArrayBuffer) => void): void;
+  /** Register for an established channel becoming unusable. */
+  onDisconnect(handler: (err: Error) => void): void;
   /** Tear down the peer connection. Idempotent. */
   close(): void;
 }
@@ -46,6 +48,10 @@ export function createPeer(opts: CreatePeerOptions): Peer {
     rejectChannel = reject;
   });
   let settled = false;
+  let channelOpen = false;
+  let closedByUser = false;
+  let disconnectHandler: ((err: Error) => void) | undefined;
+  let disconnectError: Error | undefined;
 
   // Remote ICE can arrive before the remote description is set (network reorder, or the peer
   // trickling early). Buffer such candidates and flush them once the description lands.
@@ -68,6 +74,7 @@ export function createPeer(opts: CreatePeerOptions): Peer {
     ch.onopen = () => {
       if (settled) return;
       settled = true;
+      channelOpen = true;
       resolveChannel(ch);
     };
     ch.onmessage = (ev: MessageEvent) => {
@@ -75,14 +82,25 @@ export function createPeer(opts: CreatePeerOptions): Peer {
       if (dataHandler) dataHandler(frame);
       else dataBuffer.push(frame);
     };
-    ch.onerror = () => fail(new Error('data channel error'));
+    ch.onerror = () => disconnected(new Error('data channel error'));
+    ch.onclose = () => disconnected(new Error('data channel closed'));
+  };
+
+  const disconnected = (err: Error): void => {
+    if (closedByUser || disconnectError) return;
+    if (!channelOpen) {
+      fail(err);
+      return;
+    }
+    disconnectError = err;
+    disconnectHandler?.(err);
   };
 
   pc.onicecandidate = (ev) => {
     if (ev.candidate) void opts.auth.signIce(JSON.stringify(ev.candidate)).then(opts.send);
   };
   pc.onconnectionstatechange = () => {
-    if (pc.connectionState === 'failed') fail(new Error('peer connection failed'));
+    if (pc.connectionState === 'failed') disconnected(new Error('peer connection failed'));
   };
 
   if (opts.role === 'offerer') {
@@ -134,7 +152,12 @@ export function createPeer(opts: CreatePeerOptions): Peer {
       for (const frame of dataBuffer) handler(frame);
       dataBuffer.length = 0;
     },
+    onDisconnect: (handler) => {
+      disconnectHandler = handler;
+      if (disconnectError) handler(disconnectError);
+    },
     close: () => {
+      closedByUser = true;
       settled = true;
       pc.close();
     },

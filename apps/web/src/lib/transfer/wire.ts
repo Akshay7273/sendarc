@@ -42,8 +42,16 @@ export interface TransferControlMsg {
   kind: 'control';
   op: ControlOp;
 }
+export interface TransportChangedMsg {
+  kind: 'transport-changed';
+}
 export type HostToWorker =
-  StartSendMsg | StartRecvMsg | InboundFrameMsg | TransferControlMsg | CancelMsg;
+  | StartSendMsg
+  | StartRecvMsg
+  | InboundFrameMsg
+  | TransferControlMsg
+  | TransportChangedMsg
+  | CancelMsg;
 
 export interface OutboundFrameMsg {
   kind: 'outbound-frame';

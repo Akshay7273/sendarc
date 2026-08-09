@@ -360,4 +360,74 @@ describe('TransferReceiver', () => {
       { type: FrameType.Done },
     ]);
   });
+
+  it('discards an unverified partial block when the ordered transport changes', async () => {
+    const keys = await deriveTransferKeys(master);
+    const data = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+    const fileDigest = createHash('sha256').update(data).digest('hex');
+    const b = await build(keys);
+    await b.ctrl(FrameType.Manifest, {
+      type: FrameType.Manifest,
+      files: [
+        {
+          idx: 0,
+          name: 'switched.bin',
+          size: data.length,
+          mime: '',
+          lastModified: 0,
+          blockSize: 8,
+          blocks: 1,
+          fileDigest,
+        },
+      ],
+      totalSize: data.length,
+    });
+    await b.push(
+      {
+        version: FRAME_VERSION,
+        type: FrameType.BlockData,
+        flags: 0,
+        fileIdx: 0,
+        blockIdx: 0,
+        frameOff: 0,
+      },
+      data.subarray(0, 4),
+    );
+    const partialEnd = b.frames.length;
+    await b.push(
+      {
+        version: FRAME_VERSION,
+        type: FrameType.BlockData,
+        flags: 1,
+        fileIdx: 0,
+        blockIdx: 0,
+        frameOff: 0,
+      },
+      data,
+    );
+    await b.ctrl(FrameType.BlockHash, {
+      type: FrameType.BlockHash,
+      fileIdx: 0,
+      blockIdx: 0,
+      sha256: bytesToHex(await sha256(data)),
+    });
+    await b.ctrl(FrameType.Complete, { type: FrameType.Complete, fileDigest });
+
+    const sink = new MemorySink();
+    const receiver = new TransferReceiver({
+      send: () => {},
+      sendDir: keys.j2o,
+      recvDir: keys.o2j,
+      sendCounterStart: 0,
+      recvCounterStart: 0,
+      createDigest: nodeDigest,
+      sink,
+    });
+    for (const frame of b.frames.slice(0, partialEnd)) await receiver.handle(frame);
+    await receiver.transportChanged();
+    for (const frame of b.frames.slice(partialEnd)) await receiver.handle(frame);
+    const result = await receiver.done;
+    expect(result.digest).toBe(fileDigest);
+    expect(sink.bytes()).toEqual(data);
+  });
 });
