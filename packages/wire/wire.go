@@ -30,10 +30,11 @@ const (
 
 // AES-256-GCM parameters for the frame AEAD (see aead.go).
 const (
-	aeadKeyBytes   = 32
-	aeadNonceBytes = 12
-	aeadTagBytes   = 16
-	aeadSaltBytes  = 4
+	aeadKeyBytes      = 32
+	aeadNonceBytes    = 12
+	aeadTagBytes      = 16
+	aeadSaltBytes     = 4
+	frameCounterBytes = 8
 )
 
 // HKDF info strings. confirmationKeys is fixed by RFC 9382 §4 and must not change; the
