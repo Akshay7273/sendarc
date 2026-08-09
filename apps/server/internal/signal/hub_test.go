@@ -179,3 +179,31 @@ func TestPeerRelayQueueIsByteBounded(t *testing.T) {
 		t.Fatalf("queued bytes = %d, want 24", queued)
 	}
 }
+
+func TestPeerRelayQueueBackpressuresAtMessageCapacity(t *testing.T) {
+	h := testHub(t)
+	p := newTestPeer()
+	p.hub = h
+	for i := 0; i < cap(p.send); i++ {
+		if !p.tryEnqueue(websocket.MessageBinary, []byte{byte(i)}) {
+			t.Fatalf("frame %d was refused before the channel reached capacity", i)
+		}
+	}
+	result := make(chan bool, 1)
+	go func() { result <- p.tryEnqueue(websocket.MessageBinary, []byte("next")) }()
+	select {
+	case <-result:
+		t.Fatal("enqueue did not apply backpressure to a momentarily full channel")
+	case <-time.After(10 * time.Millisecond):
+	}
+	frame := <-p.send
+	p.releaseQueued(int64(len(frame.data)))
+	select {
+	case ok := <-result:
+		if !ok {
+			t.Fatal("enqueue was refused after the writer made room")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("enqueue did not resume after the writer made room")
+	}
+}
