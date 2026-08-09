@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -80,8 +81,17 @@ func NewReceiver(opts ReceiverOptions) *Receiver {
 }
 
 // Wait blocks until the transfer settles, returning the result on done or the error on fail.
-func (r *Receiver) Wait() (ReceiveResult, error) {
-	<-r.done
+// Canceling ctx aborts the receive with FailCanceled in bounded time, so a dropped peer never
+// parks Wait forever.
+func (r *Receiver) Wait(ctx context.Context) (ReceiveResult, error) {
+	select {
+	case <-r.done:
+	case <-ctx.Done():
+		// abortWith is idempotent and closes r.done; if the receive already settled it is a
+		// no-op and the <-r.done below returns immediately with the real result.
+		r.abortWith(NewTransferError(FailCanceled, ctx.Err().Error()))
+		<-r.done
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.result, r.err

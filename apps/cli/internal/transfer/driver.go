@@ -136,8 +136,12 @@ func (d *driver) run(ctx context.Context) (*Outcome, error) {
 		d.spec.OnConnect()
 	}
 
-	out, terr := d.transfer(conn, res)
+	out, terr := d.transfer(ctx, conn, res)
 
+	// Drain the data channel before tearing down the peer: the first side to finish (the
+	// receiver, once it has sent done) must let that final frame reach the wire, or closing the
+	// PeerConnection aborts SCTP and the waiting sender never learns the transfer completed.
+	_ = conn.Close()
 	_ = peer.Close()
 	d.sig.Close()
 	<-readErr // let the read loop drain once the socket is closed
@@ -188,16 +192,17 @@ func (d *driver) route(m rendezvous.Message) {
 
 // transfer runs the engine over the open channel: the offerer sends its file, the joiner
 // receives one. Counters continue from the handshake so the AES-GCM nonce is never reused, and
-// block/frame sizes are the min of the two peers' announced caps.
-func (d *driver) transfer(conn *rtc.DataConn, res *rendezvous.Result) (*Outcome, error) {
+// block/frame sizes are the min of the two peers' announced caps. Canceling ctx aborts the
+// in-flight transfer.
+func (d *driver) transfer(ctx context.Context, conn *rtc.DataConn, res *rendezvous.Result) (*Outcome, error) {
 	sendDir, recvDir := directionalKeys(res)
 	if res.Role == wire.RoleOfferer {
-		return d.send(conn, res, sendDir, recvDir)
+		return d.send(ctx, conn, res, sendDir, recvDir)
 	}
-	return d.receive(conn, res, sendDir, recvDir)
+	return d.receive(ctx, conn, res, sendDir, recvDir)
 }
 
-func (d *driver) send(conn *rtc.DataConn, res *rendezvous.Result, sendDir, recvDir wire.DirectionalKey) (*Outcome, error) {
+func (d *driver) send(ctx context.Context, conn *rtc.DataConn, res *rendezvous.Result, sendDir, recvDir wire.DirectionalKey) (*Outcome, error) {
 	if d.spec.Source == nil {
 		return nil, errors.New("transfer: a file source is required to send")
 	}
@@ -213,7 +218,7 @@ func (d *driver) send(conn *rtc.DataConn, res *rendezvous.Result, sendDir, recvD
 		OnProgress:       d.spec.OnProgress,
 	})
 	conn.OnData(sender.Handle)
-	digest, err := sender.Run()
+	digest, err := sender.Run(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -221,7 +226,7 @@ func (d *driver) send(conn *rtc.DataConn, res *rendezvous.Result, sendDir, recvD
 	return &Outcome{Name: meta.Name, Size: meta.Size, Digest: digest}, nil
 }
 
-func (d *driver) receive(conn *rtc.DataConn, res *rendezvous.Result, sendDir, recvDir wire.DirectionalKey) (*Outcome, error) {
+func (d *driver) receive(ctx context.Context, conn *rtc.DataConn, res *rendezvous.Result, sendDir, recvDir wire.DirectionalKey) (*Outcome, error) {
 	deferred := &deferredSink{}
 	var sinkPath string
 	receiver := wire.NewReceiver(wire.ReceiverOptions{
@@ -248,7 +253,7 @@ func (d *driver) receive(conn *rtc.DataConn, res *rendezvous.Result, sendDir, re
 		},
 	})
 	conn.OnData(receiver.Handle)
-	result, err := receiver.Wait()
+	result, err := receiver.Wait(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -81,9 +82,9 @@ func runLoopback(t *testing.T, data []byte, blockSize, frameSize, window int, co
 	}()
 
 	runErrCh := make(chan error, 1)
-	go func() { _, e := sender.Run(); runErrCh <- e }()
+	go func() { _, e := sender.Run(context.Background()); runErrCh <- e }()
 
-	recvRes, recvErr := receiver.Wait()
+	recvRes, recvErr := receiver.Wait(context.Background())
 	var runErr error
 	select {
 	case runErr = <-runErrCh:
