@@ -17,7 +17,7 @@ export const DEFAULT_WORD_COUNT = 2; // 2 words × 8 bits = 16 bits; configurabl
 export const WORDLIST_SIZE = 256; // one byte of entropy per word
 export const CODE_SEPARATOR = '-';
 
-/** Framing (see plan.md §6.3). Header is fixed-size and used as AES-GCM AAD. */
+/** Framing constants. The header is fixed-size and used as AES-GCM AAD. */
 export const FRAME_HEADER_BYTES = 16;
 
 /** Frame-header format version (the header's first byte). Bumped only if the header layout changes. */
@@ -32,7 +32,7 @@ export const DEFAULT_BLOCK_BYTES = 1024 * 1024;
 
 /**
  * Receiver memory bound: how many blocks the sender may have in flight ahead of the
- * receiver's confirmation. Bounds receiver RAM regardless of sink speed (plan.md M2/M3).
+ * receiver's confirmation. Bounds receiver RAM regardless of sink speed.
  */
 export const DEFAULT_INFLIGHT_BLOCKS = 8;
 
@@ -40,7 +40,7 @@ export const DEFAULT_INFLIGHT_BLOCKS = 8;
 export const BUFFERED_AMOUNT_HIGH = 8 * 1024 * 1024;
 export const BUFFERED_AMOUNT_LOW = 1 * 1024 * 1024;
 
-/** Structural caps implied by the wire header field widths (plan.md §6.3). */
+/** Structural caps implied by the wire header field widths. */
 export const MAX_FILES_PER_TRANSFER = 0xffff + 1; // fileIdx is u16
 export const MAX_BLOCKS_PER_FILE = 0xffffffff + 1; // blockIdx is u32
 

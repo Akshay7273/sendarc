@@ -1,5 +1,5 @@
 /**
- * Signaling protocol — JSON messages over the WebSocket (plan.md §6.1, M1 design §4).
+ * Signaling protocol — JSON messages over the WebSocket.
  *
  * The server is a blind pairer + forwarder: it allocates a room number, links the two
  * sockets, and forwards `pake`/`confirm`/`caps`/`sdp`/`ice`/`bye` between them without
@@ -51,7 +51,7 @@ export interface ConfirmMsg {
 
 /**
  * Peer → peer (forwarded): an opaque AES-256-GCM frame (base64url). First use of the
- * transfer codec — carries the encrypted `caps` in M1.
+ * transfer codec — carries the encrypted `caps` handshake payload.
  */
 export interface CapsMsg {
   type: 'caps';
@@ -59,7 +59,7 @@ export interface CapsMsg {
 }
 
 /**
- * Peer → peer (forwarded): SDP offer/answer, authenticated by the session key (M2).
+ * Peer → peer (forwarded): SDP offer/answer, authenticated by the session key.
  * `mac` = HMAC(k_auth, "sdp" | room | seq | body); `seq` is monotonic per sender.
  */
 export interface SdpMsg {
@@ -69,7 +69,7 @@ export interface SdpMsg {
   mac: string;
 }
 
-/** Peer → peer (forwarded): ICE candidate, authenticated like SdpMsg (M2). */
+/** Peer → peer (forwarded): ICE candidate, authenticated like SdpMsg. */
 export interface IceMsg {
   type: 'ice';
   cand: string;

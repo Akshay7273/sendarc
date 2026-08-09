@@ -23,7 +23,7 @@ type ControlMsg interface {
 // FileEntry is one file's metadata within a manifest.
 type FileEntry struct {
 	Idx          int    `json:"idx"`
-	Name         string `json:"name"` // sanitized on receipt (plan.md M4)
+	Name         string `json:"name"` // sanitized on receipt
 	Size         int64  `json:"size"`
 	Mime         string `json:"mime"`
 	LastModified int64  `json:"lastModified"`
@@ -47,7 +47,7 @@ type BlockHash struct {
 	SHA256   string `json:"sha256"`
 }
 
-// BlockRecv is the M2 window signal: the receiver has taken delivery of a block (pre-ack).
+// BlockRecv is the window signal: the receiver has taken delivery of a block (pre-ack).
 type BlockRecv struct {
 	Type     uint8 `json:"type"`
 	FileIdx  int   `json:"fileIdx"`

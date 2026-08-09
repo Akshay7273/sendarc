@@ -1,6 +1,5 @@
-// Command sendarcd is the SendArc signaling + relay server. In M0 it serves the web
-// bundle over TLS (or reverse-proxies the Vite dev server) and exposes /healthz.
-// Signaling and relay are added in M1/M5.
+// Command sendarcd serves the SendArc web bundle over TLS (or reverse-proxies the Vite
+// development server), exposes /healthz, and hosts the blind signaling endpoint.
 package main
 
 import (

@@ -6,8 +6,8 @@
 //
 // As in the browser, reconnection is limited to the initial connect. Once the socket is
 // open the server holds this session's room on this connection; a drop tears the room
-// down and notifies the peer with bye, so a fresh socket cannot resume it (recovery under
-// the same code is deferred to M6). A post-open drop is surfaced as a terminal failure.
+// down and notifies the peer with bye, so a fresh socket cannot resume it. A post-open drop
+// is surfaced as a terminal failure.
 package wsclient
 
 import (

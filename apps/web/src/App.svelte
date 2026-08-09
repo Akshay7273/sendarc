@@ -34,7 +34,7 @@
   let peerCaps = $state<CapsPayload | undefined>(undefined);
   let errorText = $state('');
 
-  // M2 transfer state, live once the handshake settles and the socket is adopted.
+  // Transfer state, live once the handshake settles and the socket is adopted.
   let role = $state<Role | undefined>(undefined);
   let pickedFile = $state<File | null>(null);
   // TransferController is an imperative identity-bearing object (methods + a terminal Promise),

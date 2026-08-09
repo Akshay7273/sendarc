@@ -12,7 +12,7 @@ const frameHeaderBytes = 16
 // layout changes.
 const FrameVersion uint8 = 1
 
-// FrameHeader is the 16-byte frame header (plan.md §6.3). Its encoded bytes are the
+// FrameHeader is the 16-byte frame header. Its encoded bytes are the
 // AES-GCM additional authenticated data, so the codec must be exact and stable.
 //
 // Layout (big-endian):
