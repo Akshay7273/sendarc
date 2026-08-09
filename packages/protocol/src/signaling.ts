@@ -110,6 +110,43 @@ export interface ByeMsg {
   reason: string;
 }
 
+/**
+ * Client → server: re-attach to a room whose partner is still present but from which
+ * this peer's socket dropped (e.g. a reload). The server seats this peer back into the
+ * vacated slot for `role`; the room and its number are unchanged. Only ever fills a
+ * previously-occupied slot — fresh pairing still goes through {@link JoinMsg}.
+ */
+export interface ResumeMsg {
+  type: 'resume';
+  room: number;
+  role: Role;
+}
+
+/** Server → client: a {@link ResumeMsg} was accepted; the partner state follows. */
+export interface ResumedMsg {
+  type: 'resumed';
+  room: number;
+}
+
+/**
+ * Server → the surviving peer: the partner's socket dropped. `resumable` reports whether
+ * the room lingered for a re-attach (`true`; wait for {@link PeerRejoinedMsg}) or was torn
+ * down (`false`, e.g. after a graceful bye or the last peer leaving — treat like `bye`).
+ */
+export interface PeerLeftMsg {
+  type: 'peer_left';
+  resumable: boolean;
+}
+
+/**
+ * Server → the waiting peer: the partner re-attached via {@link ResumeMsg}. Both sides
+ * must re-run the SPAKE2 handshake to build a fresh session; the reload discarded the old
+ * key and AEAD counters, which must never be resumed (nonce-reuse hazard).
+ */
+export interface PeerRejoinedMsg {
+  type: 'peer_rejoined';
+}
+
 /** Server → peer: protocol or limit error. */
 export interface ErrorMsg {
   type: 'error';
@@ -120,6 +157,7 @@ export interface ErrorMsg {
 export type SignalErrorCode =
   | 'unknown_room'
   | 'room_taken'
+  | 'room_full'
   | 'already_paired'
   | 'peer_gone'
   | 'rate_limited'
@@ -144,6 +182,10 @@ export type SignalMsg =
   | RelayCreditMsg
   | CreditMsg
   | ByeMsg
+  | ResumeMsg
+  | ResumedMsg
+  | PeerLeftMsg
+  | PeerRejoinedMsg
   | ErrorMsg;
 
 export type SignalMsgType = SignalMsg['type'];
