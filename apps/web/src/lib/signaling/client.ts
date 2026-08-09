@@ -21,7 +21,10 @@ import type { SignalMsg } from '@sendarc/protocol';
  */
 export interface SignalChannel {
   send(msg: SignalMsg): void;
+  sendBinary(frame: ArrayBuffer): void;
   onMessage(handler: (msg: SignalMsg) => void): void;
+  onBinary(handler: (frame: ArrayBuffer) => void): void;
+  onClose(handler: (err: Error) => void): void;
   close(): void;
 }
 
@@ -48,6 +51,7 @@ export interface SignalingClientOptions {
   url: string;
   /** A parsed inbound signaling message. */
   onMessage: (msg: SignalMsg) => void;
+  onBinary?: (frame: ArrayBuffer) => void;
   /** The socket closed after having opened. `clean` is the WebSocket close cleanliness. */
   onClose?: (clean: boolean, code: number, reason: string) => void;
   /** A transport-level problem (connect exhausted, malformed inbound frame). */
@@ -94,6 +98,7 @@ export class SignalingClient {
       return;
     }
     this.ws = ws;
+    ws.binaryType = 'arraybuffer';
 
     ws.onopen = () => {
       this.opened = true;
@@ -135,8 +140,12 @@ export class SignalingClient {
   }
 
   private dispatch(ev: MessageEvent): void {
+    if (ev.data instanceof ArrayBuffer) {
+      this.opts.onBinary?.(ev.data);
+      return;
+    }
     if (typeof ev.data !== 'string') {
-      this.opts.onError?.(new Error('signaling: non-text frame'));
+      this.opts.onError?.(new Error('signaling: unsupported frame'));
       return;
     }
     let msg: SignalMsg;
@@ -161,6 +170,12 @@ export class SignalingClient {
   send(msg: SignalMsg): void {
     if (!this.isOpen) throw new Error('signaling: socket not open');
     this.ws!.send(JSON.stringify(msg));
+  }
+
+  /** Send one opaque encrypted transfer frame over the adopted relay socket. */
+  sendBinary(frame: ArrayBuffer): void {
+    if (!this.isOpen) throw new Error('signaling: socket not open');
+    this.ws!.send(frame);
   }
 
   /** Close the socket and cancel any pending reconnect. Idempotent. */

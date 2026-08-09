@@ -1,14 +1,14 @@
 // Command sendarc is the terminal client for SendArc. It authenticates through the blind
-// rendezvous server, then uses the same socket to negotiate an end-to-end-encrypted direct
+// rendezvous server, then negotiates an end-to-end-encrypted direct or relayed
 // file transfer:
 //
 //	sendarc send <file>     # allocate a room, print the invite code + link, send the file
 //	sendarc receive <code>  # join with a code (or a pasted invite link), receive the file
 //
 // Both ends run SPAKE2 over the invite code, confirm the key (failing closed on a
-// mismatch), exchange sealed capabilities, then bring up an authenticated WebRTC channel
-// and stream the file sealed under the session key. The word half of the code never
-// reaches the server, and the server never sees the file bytes.
+// mismatch), exchange sealed capabilities, then prefer an authenticated WebRTC channel
+// with an encrypted WebSocket relay fallback. The word half of the code never reaches
+// the server, and the server never sees plaintext file bytes.
 package main
 
 import (
@@ -60,6 +60,7 @@ Usage:
 Flags:
   --server URL             signaling server (default `+defaultServer+`)
   --insecure-skip-verify   skip TLS verification; self-signed dev certs only
+  --relay-only             force the encrypted WebSocket relay instead of WebRTC
   --words N                number of words in the invite code (send only; 0 = default)
   --out DIR                directory to write the received file into (receive only; default .)
 `)
@@ -70,6 +71,7 @@ func runSend(args []string) int {
 	server := fs.String("server", defaultServer, "signaling server URL")
 	insecure := fs.Bool("insecure-skip-verify", false, "skip TLS verification (self-signed dev certs only)")
 	words := fs.Int("words", 0, "number of words in the invite code (0 = default)")
+	relayOnly := fs.Bool("relay-only", false, "force the encrypted WebSocket relay")
 	positionals := parseArgs(fs, args)
 
 	if len(positionals) == 0 {
@@ -111,6 +113,8 @@ func runSend(args []string) int {
 			OnPhase:   phasePrinter(rendezvous.RoleOfferer),
 		},
 		Sources:        sources,
+		ForceRelay:     *relayOnly,
+		OnTransport:    transportPrinter,
 		OnConnect:      connectPrinter(fmt.Sprintf("Sending %s (%s) …", label, humanBytes(totalSize))),
 		OnFileProgress: progress.reportFile,
 		OnControls:     terminalControls(),
@@ -140,6 +144,7 @@ func runReceive(args []string) int {
 	server := fs.String("server", defaultServer, "signaling server URL")
 	insecure := fs.Bool("insecure-skip-verify", false, "skip TLS verification (self-signed dev certs only)")
 	outDir := fs.String("out", ".", "directory to write the received file into")
+	relayOnly := fs.Bool("relay-only", false, "force the encrypted WebSocket relay")
 	positionals := parseArgs(fs, args)
 
 	code := ""
@@ -173,7 +178,9 @@ func runReceive(args []string) int {
 			Code:    code,
 			OnPhase: phasePrinter(rendezvous.RoleJoiner),
 		},
-		DestDir: *outDir,
+		DestDir:     *outDir,
+		ForceRelay:  *relayOnly,
+		OnTransport: transportPrinter,
 		OnManifestSet: func(manifest wire.Manifest) {
 			progress.setTotal(manifest.TotalSize)
 			files := make([]progressFile, len(manifest.Files))
@@ -267,6 +274,14 @@ func phasePrinter(role rendezvous.Role) func(rendezvous.Phase) {
 // open, just before the bytes begin to move.
 func connectPrinter(line string) func() {
 	return func() { fmt.Fprintln(os.Stderr, line) }
+}
+
+func transportPrinter(path string) {
+	if path == "relay" {
+		fmt.Fprintln(os.Stderr, "Transport: encrypted WebSocket relay")
+	} else {
+		fmt.Fprintln(os.Stderr, "Transport: direct WebRTC")
+	}
 }
 
 // handshakeError renders a transfer failure as a human-readable line, translating the
