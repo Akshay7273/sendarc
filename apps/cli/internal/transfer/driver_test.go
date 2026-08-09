@@ -105,8 +105,8 @@ func (e *relayEnd) enqueue(m rendezvous.Message) {
 	}
 }
 
-// TestDriverLoopbackTransfersFile is the M2c capstone: two drivers, wired only through the
-// in-memory relay, complete the whole pipeline — SPAKE2 rendezvous, an authenticated pion
+// TestDriverLoopbackTransfersFile wires two drivers through an in-memory relay and completes the
+// whole pipeline — SPAKE2 rendezvous, an authenticated pion
 // DataChannel over host candidates, and a sealed file transfer — and the receiver writes a
 // file byte-identical to the sender's, with matching whole-file digests and session keys.
 func TestDriverLoopbackTransfersFile(t *testing.T) {
