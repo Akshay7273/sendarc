@@ -33,19 +33,39 @@ type Port = DuplexPort<HostToWorker, WorkerToHost>;
 /** Drive one transfer to completion over `port`. Resolves on `done`, rejects on any failure. */
 export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    let engine: { handle(frame: Uint8Array): void } | undefined;
+    let engine:
+      | {
+          handle(frame: Uint8Array): void;
+          pause(): void;
+          resume(): void;
+          cancel(reason?: string): void;
+        }
+      | undefined;
     let started = false;
     const pending: Uint8Array[] = [];
+    const pendingControls: Array<'pause' | 'resume' | 'cancel'> = [];
 
     const post = (msg: WorkerToHost): void => port.postMessage(msg);
     const send = (frame: Uint8Array): void => {
       const buf = transferable(frame);
       port.postMessage({ kind: 'outbound-frame', frame: buf }, [buf]);
     };
-    const bind = (e: { handle(frame: Uint8Array): void }): void => {
+    const bind = (e: {
+      handle(frame: Uint8Array): void;
+      pause(): void;
+      resume(): void;
+      cancel(reason?: string): void;
+    }): void => {
       engine = e;
+      post({ kind: 'state', state: 'running' });
       for (const f of pending) e.handle(f);
       pending.length = 0;
+      for (const op of pendingControls) {
+        if (op === 'pause') e.pause();
+        else if (op === 'resume') e.resume();
+        else e.cancel();
+      }
+      pendingControls.length = 0;
     };
     const fail = (e: unknown): void => {
       const reason = e instanceof TransferError ? e.reason : 'integrity';
@@ -76,7 +96,15 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
           return;
         }
         case 'cancel':
-          fail(new TransferError('canceled', msg.reason ?? 'canceled'));
+          if (engine) engine.cancel(msg.reason);
+          else pendingControls.push('cancel');
+          return;
+        case 'control':
+          if (!engine) {
+            pendingControls.push(msg.op);
+          } else if (msg.op === 'pause') engine.pause();
+          else if (msg.op === 'resume') engine.resume();
+          else engine.cancel();
           return;
       }
     });
@@ -93,6 +121,7 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
           recvCounterStart: msg.recvCounter,
           createDigest: deps.createDigest,
           onProgress: (bytes) => post({ kind: 'progress', bytes }),
+          onStateChange: (state) => post({ kind: 'state', state }),
           ...(msg.blockSize !== undefined ? { blockSize: msg.blockSize } : {}),
           ...(msg.frameSize !== undefined ? { frameSize: msg.frameSize } : {}),
           ...(msg.window !== undefined ? { window: msg.window } : {}),
@@ -118,6 +147,7 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
           createDigest: deps.createDigest,
           sink: deferred,
           onProgress: (bytes) => post({ kind: 'progress', bytes }),
+          onStateChange: (state) => post({ kind: 'state', state }),
           onManifest: async (file) => {
             deferred.attach(await deps.createSink(file));
             post({ kind: 'manifest', name: file.name, size: file.size, mime: file.mime });

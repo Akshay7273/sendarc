@@ -81,7 +81,16 @@ describe('App transfer completion', () => {
     const transfer = {
       progress: vi.fn(() => 3),
       total: vi.fn(() => 3),
+      snapshot: vi.fn(() => ({
+        bytes: 3,
+        total: 3,
+        rateBps: 1024,
+        etaSeconds: 0,
+        state: 'running',
+      })),
       done: completed.promise,
+      pause: vi.fn(),
+      resume: vi.fn(),
       cancel: vi.fn(),
     };
     mocks.offer.mockReturnValue(rendezvous);
@@ -114,6 +123,13 @@ describe('App transfer completion', () => {
     input!.dispatchEvent(new Event('change', { bubbles: true }));
     await settle();
     expect(mocks.runSend).toHaveBeenCalledOnce();
+
+    const pauseButton = [...target.querySelectorAll('button')].find(
+      (button) => button.textContent?.trim() === 'Pause',
+    );
+    expect(pauseButton).toBeDefined();
+    pauseButton!.click();
+    expect(transfer.pause).toHaveBeenCalledOnce();
 
     completed.resolve({
       name: 'proof.bin',

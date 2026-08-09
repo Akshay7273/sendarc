@@ -59,4 +59,14 @@ describe('ChannelWriter', () => {
     new ChannelWriter(ch);
     expect(ch.bufferedAmountLowThreshold).toBe(1 * 1024 * 1024);
   });
+
+  it('waits for buffered bytes to drain before graceful teardown', async () => {
+    const ch = new FakeChannel();
+    const writer = new ChannelWriter(ch);
+    writer.write(new ArrayBuffer(100));
+    setTimeout(() => ch.drainTo(0), 5);
+    await writer.drain(100);
+    expect(ch.bufferedAmount).toBe(0);
+    expect(writer.pending).toBe(0);
+  });
 });

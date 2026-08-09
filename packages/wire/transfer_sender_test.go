@@ -376,3 +376,39 @@ func TestSenderBoundsTimeoutRetries(t *testing.T) {
 		t.Fatalf("outbox has %d frames, want 6", out.len())
 	}
 }
+
+func TestSenderContextCancellationNotifiesPeer(t *testing.T) {
+	keys, err := DeriveTransferKeys(senderMaster())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out outbox
+	s := NewSender(SenderOptions{
+		File: BytesSource([]byte{1, 2, 3, 4}, FileMeta{Name: "f", Size: 4}, 0),
+		Send: out.push, SendDir: keys.O2J, RecvDir: keys.J2O,
+		BlockSize: 8, FrameSize: 4, AckTimeout: time.Second,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	res := make(chan error, 1)
+	go func() { _, runErr := s.Run(ctx); res <- runErr }()
+	waitStable(t, &out, 3)
+	cancel()
+	select {
+	case runErr := <-res:
+		if runErr == nil || !strings.Contains(runErr.Error(), string(FailCanceled)) {
+			t.Fatalf("Run error = %v, want canceled", runErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not stop after context cancellation")
+	}
+	frames := out.snapshot()
+	opened, openErr := Open(keys.O2J, uint64(len(frames)-1), frames[len(frames)-1])
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	msg, decodeErr := DecodeControl(opened.Plaintext)
+	control, ok := msg.(*Control)
+	if decodeErr != nil || !ok || control.Op != ControlCancel {
+		t.Fatalf("last cancellation frame = %#v, err=%v", msg, decodeErr)
+	}
+}
