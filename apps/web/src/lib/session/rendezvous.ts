@@ -95,6 +95,8 @@ function run(
   // which point `route` is swapped to the transfer's own handler. `adopted` also suppresses the
   // success auto-close, since the transfer layer then owns the socket's lifetime.
   let route: (msg: SignalMsg) => void = (msg) => session.handle(msg);
+  let routeBinary: (frame: ArrayBuffer) => void = () => session.abort('unexpected binary frame');
+  let routeClose: (err: Error) => void = (err) => session.abort(err.message);
   let adopted = false;
 
   // The two layers reference each other, so one closure must name the other before it is
@@ -105,10 +107,13 @@ function run(
   const client = new SignalingClient({
     url,
     onMessage: (msg) => route(msg),
+    onBinary: (frame) => routeBinary(frame),
     onClose: (clean, code, reason) => {
       // A post-open drop is terminal; translate it into a session failure. If the session
       // already settled (the normal close we trigger on `done`), abort is a no-op.
-      session.abort(clean ? `signaling closed (${code})` : `signaling lost (${code} ${reason})`);
+      routeClose(
+        new Error(clean ? `signaling closed (${code})` : `signaling lost (${code} ${reason})`),
+      );
     },
     onError: (err) => session.abort(err.message),
     ...(opts.backoff !== undefined ? { backoff: opts.backoff } : {}),
@@ -144,7 +149,10 @@ function run(
       adopted = true;
       return {
         send: (msg) => client.send(msg),
+        sendBinary: (frame) => client.sendBinary(frame),
         onMessage: (handler) => (route = handler),
+        onBinary: (handler) => (routeBinary = handler),
+        onClose: (handler) => (routeClose = handler),
         close: () => client.close(),
       };
     },

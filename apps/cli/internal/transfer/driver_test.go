@@ -20,11 +20,13 @@ import (
 // partner. It lets a complete offerer↔joiner exchange — SPAKE2 handshake, authenticated
 // SDP/ICE, and the sealed file transfer — run in one process with no sockets.
 type relay struct {
-	off     *relayEnd
-	join    *relayEnd
-	room    int
-	created chan struct{} // closed once the offerer has created the room
-	once    sync.Once
+	off      *relayEnd
+	join     *relayEnd
+	room     int
+	created  chan struct{} // closed once the offerer has created the room
+	once     sync.Once
+	mu       sync.Mutex
+	captured [][]byte
 }
 
 func newRelay() *relay {
@@ -57,6 +59,20 @@ func (r *relay) route(from *relayEnd, m rendezvous.Message) {
 		<-r.created
 		r.off.enqueue(rendezvous.Message{Type: "peer-joined", Role: r.off.role})
 		r.join.enqueue(rendezvous.Message{Type: "peer-joined", Role: r.join.role})
+	case rendezvous.TypeRelayOpen:
+		r.mu.Lock()
+		from.relayOpen = true
+		other := r.partner(from)
+		ready := other.relayOpen
+		r.mu.Unlock()
+		if ready {
+			from.enqueue(rendezvous.Message{Type: rendezvous.TypeRelayReady})
+			other.enqueue(rendezvous.Message{Type: rendezvous.TypeRelayReady})
+		} else {
+			other.enqueue(rendezvous.Message{Type: rendezvous.TypeRelayRequired})
+		}
+	case rendezvous.TypeRelayCredit:
+		r.partner(from).enqueue(rendezvous.Message{Type: rendezvous.TypeCredit, Bytes: m.Bytes})
 	default:
 		r.partner(from).enqueue(m)
 	}
@@ -65,15 +81,17 @@ func (r *relay) route(from *relayEnd, m rendezvous.Message) {
 // relayEnd is one side of the relay. It satisfies transfer.Signal, so a driver adopts it
 // exactly as it would a real *wsclient.Client.
 type relayEnd struct {
-	hub  *relay
-	role string
-	in   chan rendezvous.Message
-	once sync.Once
-	done chan struct{}
+	hub       *relay
+	role      string
+	in        chan rendezvous.Message
+	bin       chan []byte
+	relayOpen bool
+	once      sync.Once
+	done      chan struct{}
 }
 
 func newRelayEnd(hub *relay, role string) *relayEnd {
-	return &relayEnd{hub: hub, role: role, in: make(chan rendezvous.Message, 256), done: make(chan struct{})}
+	return &relayEnd{hub: hub, role: role, in: make(chan rendezvous.Message, 256), bin: make(chan []byte, 256), done: make(chan struct{})}
 }
 
 func (e *relayEnd) Send(m rendezvous.Message) error {
@@ -81,16 +99,33 @@ func (e *relayEnd) Send(m rendezvous.Message) error {
 	return nil
 }
 
-func (e *relayEnd) Run(ctx context.Context, onMessage func(rendezvous.Message)) error {
+func (e *relayEnd) SendBinary(frame []byte) error {
+	e.hub.mu.Lock()
+	e.hub.captured = append(e.hub.captured, append([]byte(nil), frame...))
+	e.hub.mu.Unlock()
+	e.hub.partner(e).enqueueBinary(frame)
+	return nil
+}
+
+func (e *relayEnd) Run(ctx context.Context, onMessage func(rendezvous.Message), onBinary func([]byte)) error {
 	for {
 		select {
 		case m := <-e.in:
 			onMessage(m)
+		case frame := <-e.bin:
+			onBinary(frame)
 		case <-e.done:
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
 		}
+	}
+}
+
+func (e *relayEnd) enqueueBinary(frame []byte) {
+	select {
+	case e.bin <- append([]byte(nil), frame...):
+	case <-e.done:
 	}
 }
 
@@ -187,6 +222,73 @@ func TestDriverLoopbackTransfersFile(t *testing.T) {
 	// Both peers derived the same session key, so their SAS fingerprints would match.
 	if !bytes.Equal(send.out.Handshake.Master, recv.out.Handshake.Master) {
 		t.Error("master keys differ across peers")
+	}
+}
+
+func TestDriverForcedRelayTransfersEncryptedFile(t *testing.T) {
+	hub := newRelay()
+	payload := make([]byte, 512*1024+17)
+	for i := range payload {
+		payload[i] = byte(i*17 + 3)
+	}
+	meta := wire.FileMeta{Name: "relayed.bin", Size: int64(len(payload)), Mime: "application/octet-stream"}
+	dir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	type result struct {
+		out  *Outcome
+		err  error
+		path string
+	}
+	done := make(chan result, 2)
+	go func() {
+		path := ""
+		out, err := Run(ctx, hub.off, Spec{
+			Session: rendezvous.Options{Role: rendezvous.RoleOfferer, Words: "alpha-bravo"},
+			Source:  wire.BytesSource(payload, meta, 64*1024), ForceRelay: true,
+			OnTransport: func(selected string) { path = selected },
+		})
+		done <- result{out: out, err: err, path: path}
+	}()
+	go func() {
+		path := ""
+		out, err := Run(ctx, hub.join, Spec{
+			Session:     rendezvous.Options{Role: rendezvous.RoleJoiner, Code: "7-alpha-bravo"},
+			DestDir:     dir,
+			OnTransport: func(selected string) { path = selected },
+		})
+		done <- result{out: out, err: err, path: path}
+	}()
+	a, b := <-done, <-done
+	if a.err != nil || b.err != nil {
+		t.Fatalf("forced relay results: %v / %v", a.err, b.err)
+	}
+	if a.path != "relay" || b.path != "relay" {
+		t.Fatalf("selected paths = %q/%q", a.path, b.path)
+	}
+	var recv *Outcome
+	if a.out.Path != "" {
+		recv = a.out
+	} else {
+		recv = b.out
+	}
+	got, err := os.ReadFile(recv.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("forced relay output differs from source")
+	}
+	hub.mu.Lock()
+	captured := append([][]byte(nil), hub.captured...)
+	hub.mu.Unlock()
+	if len(captured) == 0 {
+		t.Fatal("relay did not observe any binary frames")
+	}
+	for _, frame := range captured {
+		if bytes.Contains(frame, []byte(meta.Name)) || bytes.Contains(frame, payload[:64]) {
+			t.Fatal("relay observed plaintext metadata or file content")
+		}
 	}
 }
 

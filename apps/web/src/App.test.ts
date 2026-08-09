@@ -70,7 +70,14 @@ describe('App transfer completion', () => {
   it('renders the verified outcome when the active transfer resolves', async () => {
     const handshake = deferred<unknown>();
     const completed = deferred<unknown>();
-    const signaling = { send: vi.fn(), onMessage: vi.fn(), close: vi.fn() };
+    const signaling = {
+      send: vi.fn(),
+      sendBinary: vi.fn(),
+      onMessage: vi.fn(),
+      onBinary: vi.fn(),
+      onClose: vi.fn(),
+      close: vi.fn(),
+    };
     const rendezvous = {
       code: undefined,
       phase: 'idle',
@@ -88,6 +95,7 @@ describe('App transfer completion', () => {
         etaSeconds: 0,
         state: 'running',
       })),
+      transport: vi.fn(() => 'direct'),
       done: completed.promise,
       pause: vi.fn(),
       resume: vi.fn(),

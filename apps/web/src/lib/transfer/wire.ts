@@ -49,6 +49,10 @@ export interface OutboundFrameMsg {
   kind: 'outbound-frame';
   frame: ArrayBuffer;
 }
+export interface FrameConsumedMsg {
+  kind: 'frame-consumed';
+  bytes: number;
+}
 /** Worker → host, emitted once the core is wired and ready to accept a start message. */
 export interface ReadyMsg {
   kind: 'ready';
@@ -79,7 +83,14 @@ export interface ErrorMsg {
   message: string;
 }
 export type WorkerToHost =
-  ReadyMsg | OutboundFrameMsg | ManifestMsg | ProgressMsg | StateMsg | DoneMsg | ErrorMsg;
+  | ReadyMsg
+  | OutboundFrameMsg
+  | FrameConsumedMsg
+  | ManifestMsg
+  | ProgressMsg
+  | StateMsg
+  | DoneMsg
+  | ErrorMsg;
 
 /** The slice of Worker / DedicatedWorkerGlobalScope the core needs, so a test can inject a fake. */
 export interface DuplexPort<In, Out> {

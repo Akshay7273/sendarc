@@ -62,10 +62,9 @@ type DialOptions struct {
 	Backoff BackoffOptions
 }
 
-// Client is a live signaling connection. It implements rendezvous.Sink, writing each
-// message as a WebSocket text frame. All writes happen on the goroutine that drives the
-// session (Start plus the Run read loop), so there is never more than one concurrent
-// writer; Close is the only method safe to call from another goroutine.
+// Client is a live signaling connection. It implements rendezvous.Sink, writing control
+// messages as text frames and opaque relay data as binary frames. The transfer driver
+// serializes concurrent writes; Close is safe to call from another goroutine.
 type Client struct {
 	ws        *websocket.Conn
 	closeOnce sync.Once
@@ -134,17 +133,31 @@ func (c *Client) Send(m rendezvous.Message) error {
 	return c.ws.Write(ctx, websocket.MessageText, data)
 }
 
+// SendBinary writes one opaque encrypted transfer frame on the adopted relay socket.
+func (c *Client) SendBinary(frame []byte) error {
+	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+	defer cancel()
+	return c.ws.Write(ctx, websocket.MessageBinary, frame)
+}
+
 // Run reads inbound frames and dispatches each to onMessage until the socket closes or
 // ctx is cancelled, then returns the terminating error. Closing the socket (Close) is the
 // clean way to stop it.
-func (c *Client) Run(ctx context.Context, onMessage func(rendezvous.Message)) error {
+func (c *Client) Run(ctx context.Context, onMessage func(rendezvous.Message), onBinary func([]byte)) error {
 	for {
 		typ, data, err := c.ws.Read(ctx)
 		if err != nil {
 			return err
 		}
+		if typ == websocket.MessageBinary {
+			if onBinary == nil {
+				return errors.New("wsclient: unexpected binary frame")
+			}
+			onBinary(data)
+			continue
+		}
 		if typ != websocket.MessageText {
-			return errors.New("wsclient: expected a text frame")
+			return errors.New("wsclient: unsupported frame type")
 		}
 		msg, err := rendezvous.UnmarshalMessage(data)
 		if err != nil {
@@ -183,7 +196,7 @@ func Rendezvous(ctx context.Context, url string, dopts DialOptions, sopts rendez
 	}()
 
 	sess.Start()
-	if err := client.Run(ctx, sess.Handle); err != nil {
+	if err := client.Run(ctx, sess.Handle, nil); err != nil {
 		// The read loop ended. If we were cancelled (Ctrl-C), abort with a best-effort
 		// bye; otherwise the socket dropped mid-handshake — fail closed. Either is a
 		// no-op if the session already settled (the normal close from the watcher).
