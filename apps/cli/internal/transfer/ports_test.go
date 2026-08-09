@@ -214,3 +214,137 @@ func TestDeferredSinkDelegatesAfterAttach(t *testing.T) {
 		t.Errorf("delegated file = %q, want data", got)
 	}
 }
+
+func TestNewOSFileSourcesExpandsFolderDeterministically(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "album")
+	if err := os.MkdirAll(filepath.Join(root, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{"z.txt": "z", "nested/a.txt": "alpha", "empty": ""} {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(name)), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sources, total, err := NewOSFileSources([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNames := []string{"album/empty", "album/nested/a.txt", "album/z.txt"}
+	if len(sources) != len(wantNames) || total != 6 {
+		t.Fatalf("sources=%d total=%d", len(sources), total)
+	}
+	for i, source := range sources {
+		if source.Meta().Name != wantNames[i] {
+			t.Errorf("source %d name=%q want=%q", i, source.Meta().Name, wantNames[i])
+		}
+	}
+}
+
+func TestNewOSFileSourcesRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, _, err := NewOSFileSources([]string{link}); err == nil {
+		t.Fatal("symlink source accepted")
+	}
+}
+
+func destinationManifest(names ...string) wire.Manifest {
+	files := make([]wire.FileEntry, len(names))
+	for i, name := range names {
+		files[i] = wire.FileEntry{Idx: i, Name: name, Size: 1, BlockSize: 1, Blocks: 1}
+	}
+	return *wire.NewManifest(files, int64(len(files)))
+}
+
+func TestOSDestinationWritesNestedTreeWithoutOverwrite(t *testing.T) {
+	root := t.TempDir()
+	destination, err := NewOSDestination(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := destinationManifest("folder/a.txt", "b.txt")
+	if err := destination.Prepare(manifest); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range manifest.Files {
+		sink, openErr := destination.Open(file)
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		if err := sink.Write(0, []byte{byte('a' + file.Idx)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := sink.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := destination.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(root, "folder", "a.txt")); err != nil || string(got) != "a" {
+		t.Fatalf("nested file=%q err=%v", got, err)
+	}
+
+	existing := filepath.Join(root, "existing.txt")
+	if err := os.WriteFile(existing, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewOSDestination(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := destinationManifest("existing.txt").Files[0]
+	if _, err := second.Open(file); err == nil {
+		t.Fatal("existing destination was overwritten")
+	}
+	got, _ := os.ReadFile(existing)
+	if string(got) != "keep" {
+		t.Fatalf("existing content changed to %q", got)
+	}
+}
+
+func TestOSDestinationAbortRemovesCompletedTreeAndRejectsSymlinkComponent(t *testing.T) {
+	root := t.TempDir()
+	destination, err := NewOSDestination(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := destinationManifest("folder/a.txt").Files[0]
+	sink, err := destination.Open(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Write(0, []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := destination.Abort("later file failed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "folder", "a.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("completed partial output survived abort: %v", err)
+	}
+
+	outside := t.TempDir()
+	link := filepath.Join(root, "linked")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	third, err := NewOSDestination(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := third.Open(destinationManifest("linked/escape.txt").Files[0]); err == nil {
+		t.Fatal("symlink destination component accepted")
+	}
+}

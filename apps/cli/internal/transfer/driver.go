@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/pion/webrtc/v4"
@@ -40,6 +41,8 @@ type Spec struct {
 	Session rendezvous.Options
 	// Source is the file to send; required for an offerer, ignored for a joiner.
 	Source wire.FileSource
+	// Sources is an ordered multi-file/folder set. Set either Source or Sources.
+	Sources []wire.FileSource
 	// DestDir is the directory the received file is written into; used by a joiner.
 	DestDir string
 	// ICEServers overrides rtc.DefaultICEServers. An explicit empty slice uses host candidates
@@ -49,8 +52,11 @@ type Spec struct {
 	OnConnect func()
 	// OnManifest fires on the receiver when the sender's manifest arrives (file named and sized).
 	OnManifest func(wire.FileEntry)
+	// OnManifestSet fires once with the complete validated file set.
+	OnManifestSet func(wire.Manifest)
 	// OnProgress reports cumulative bytes acknowledged after verify-and-sink.
-	OnProgress func(int64)
+	OnProgress     func(int64)
+	OnFileProgress func(fileIdx int, fileBytes, acknowledgedBytes int64)
 	// OnControls receives the live engine after the channel opens, before bytes begin moving.
 	OnControls func(Controls)
 	// OnStateChange reports pause, resume, and remote cancellation.
@@ -64,6 +70,15 @@ type Outcome struct {
 	Size      int64
 	Digest    string // whole-file SHA-256 (hex); identical on both peers
 	Path      string // receiver: the written file; empty for a sender
+	Files     []FileOutcome
+}
+
+// FileOutcome is one source or received destination within an Outcome.
+type FileOutcome struct {
+	Name   string
+	Size   int64
+	Digest string
+	Path   string
 }
 
 // Run performs the handshake over sig and then the file transfer, returning when the transfer
@@ -214,11 +229,24 @@ func (d *driver) transfer(ctx context.Context, conn *rtc.DataConn, res *rendezvo
 }
 
 func (d *driver) send(ctx context.Context, conn *rtc.DataConn, res *rendezvous.Result, sendDir, recvDir wire.DirectionalKey) (*Outcome, error) {
-	if d.spec.Source == nil {
-		return nil, errors.New("transfer: a file source is required to send")
+	if (d.spec.Source == nil) == (len(d.spec.Sources) == 0) {
+		return nil, errors.New("transfer: exactly one of Source or Sources is required to send")
+	}
+	sources := d.spec.Sources
+	if len(sources) == 0 {
+		sources = []wire.FileSource{d.spec.Source}
+	}
+	needsFolders := len(sources) > 1
+	for _, source := range sources {
+		if strings.Contains(source.Meta().Name, "/") {
+			needsFolders = true
+		}
+	}
+	if needsFolders && !containsString(res.RemoteCaps.Features, "folders") {
+		return nil, errors.New("transfer: receiver does not support files or folders as a set")
 	}
 	sender := wire.NewSender(wire.SenderOptions{
-		File:             d.spec.Source,
+		Files:            sources,
 		Send:             conn.Send,
 		SendDir:          sendDir,
 		RecvDir:          recvDir,
@@ -227,6 +255,7 @@ func (d *driver) send(ctx context.Context, conn *rtc.DataConn, res *rendezvous.R
 		BlockSize:        negotiate(res.LocalCaps.BlockSize, res.RemoteCaps.BlockSize, wire.DefaultBlockBytes),
 		FrameSize:        negotiate(res.LocalCaps.MaxFrame, res.RemoteCaps.MaxFrame, wire.DefaultFrameBytes),
 		OnProgress:       d.spec.OnProgress,
+		OnFileProgress:   d.spec.OnFileProgress,
 		OnStateChange:    d.spec.OnStateChange,
 	})
 	conn.OnData(sender.Handle)
@@ -237,31 +266,47 @@ func (d *driver) send(ctx context.Context, conn *rtc.DataConn, res *rendezvous.R
 	if err != nil {
 		return nil, err
 	}
-	meta := d.spec.Source.Meta()
-	return &Outcome{Name: meta.Name, Size: meta.Size, Digest: digest}, nil
+	files := make([]FileOutcome, len(sources))
+	var total int64
+	for i, source := range sources {
+		meta := source.Meta()
+		files[i] = FileOutcome{Name: meta.Name, Size: meta.Size}
+		total += meta.Size
+	}
+	return &Outcome{Name: files[0].Name, Size: total, Digest: digest, Files: files}, nil
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *driver) receive(ctx context.Context, conn *rtc.DataConn, res *rendezvous.Result, sendDir, recvDir wire.DirectionalKey) (*Outcome, error) {
-	deferred := &deferredSink{}
-	var sinkPath string
+	destination, err := NewOSDestination(d.spec.DestDir)
+	if err != nil {
+		return nil, wire.NewTransferError(wire.FailSinkError, err.Error())
+	}
 	receiver := wire.NewReceiver(wire.ReceiverOptions{
 		Send:             conn.Send,
 		SendDir:          sendDir,
 		RecvDir:          recvDir,
 		SendCounterStart: res.SendCounter,
 		RecvCounterStart: res.RecvCounter,
-		Sink:             deferred,
+		Destination:      destination,
 		OnProgress:       d.spec.OnProgress,
+		OnFileProgress:   d.spec.OnFileProgress,
 		OnStateChange:    d.spec.OnStateChange,
-		OnManifest: func(file wire.FileEntry) error {
-			// Open the destination lazily, named after the (sanitized) manifest file, before the
-			// first block is written — the browser DeferredSink pattern.
-			sink, err := NewOSFileSink(d.spec.DestDir, file.Name)
-			if err != nil {
-				return wire.NewTransferError(wire.FailSinkError, err.Error())
+		OnManifestSet: func(manifest wire.Manifest) error {
+			if d.spec.OnManifestSet != nil {
+				d.spec.OnManifestSet(manifest)
 			}
-			deferred.attach(sink)
-			sinkPath = sink.Path()
+			return nil
+		},
+		OnManifest: func(file wire.FileEntry) error {
 			if d.spec.OnManifest != nil {
 				d.spec.OnManifest(file)
 			}
@@ -276,7 +321,14 @@ func (d *driver) receive(ctx context.Context, conn *rtc.DataConn, res *rendezvou
 	if err != nil {
 		return nil, err
 	}
-	return &Outcome{Name: result.File.Name, Size: result.File.Size, Digest: result.Digest, Path: sinkPath}, nil
+	files := make([]FileOutcome, len(result.Files))
+	for i, file := range result.Files {
+		files[i] = FileOutcome{Name: file.Name, Size: file.Size, Digest: result.Digests[i], Path: destination.Path(file.Idx)}
+	}
+	return &Outcome{
+		Name: result.File.Name, Size: result.TotalSize, Digest: result.Digest,
+		Path: destination.Path(result.File.Idx), Files: files,
+	}, nil
 }
 
 // directionalKeys selects the seal/open keys for this peer's role, mirroring the session's
