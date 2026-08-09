@@ -33,6 +33,13 @@ const (
 	typeCredit        = "credit"
 	typeBye           = "bye"
 	typeError         = "error"
+
+	// Resumable-room control types. A peer whose socket drops unexpectedly leaves its
+	// room lingering (see hub.vacate); it re-attaches to the vacated slot with resume.
+	typeResume       = "resume"
+	typeResumed      = "resumed"
+	typePeerLeft     = "peer_left"
+	typePeerRejoined = "peer_rejoined"
 )
 
 // Role labels echoed to peers on pairing. These are routing labels only; their
@@ -66,12 +73,13 @@ const (
 	errRelayLimit    = "relay_limit"
 )
 
-// clientMsg is the envelope the server parses from a client. Only type and room are
-// read; the payloads of forwardable messages are relayed as raw bytes and never
+// clientMsg is the envelope the server parses from a client. Only type, room, and role
+// are read; the payloads of forwardable messages are relayed as raw bytes and never
 // decoded here, which is what keeps the server blind to handshake contents.
 type clientMsg struct {
 	Type  string `json:"type"`
 	Room  *int   `json:"room,omitempty"`
+	Role  string `json:"role,omitempty"`
 	Bytes int64  `json:"bytes,omitempty"`
 }
 
@@ -96,6 +104,19 @@ type peerJoinedMsg struct {
 type byeMsg struct {
 	Type   string `json:"type"`
 	Reason string `json:"reason,omitempty"`
+}
+
+// resumedMsg confirms a peer re-attached to a lingering room's vacated slot.
+type resumedMsg struct {
+	Type string `json:"type"`
+	Room int    `json:"room"`
+}
+
+// peerLeftMsg tells the surviving peer its partner's socket dropped. resumable reports
+// whether the room lingered for a re-attach (true) or was torn down (false).
+type peerLeftMsg struct {
+	Type      string `json:"type"`
+	Resumable bool   `json:"resumable"`
 }
 
 // errorMsg reports a protocol or limit error to a single socket.
@@ -125,6 +146,18 @@ func peerJoinedFrame(role string) []byte {
 
 func byeFrame(reason string) []byte {
 	return mustJSON(byeMsg{Type: typeBye, Reason: reason})
+}
+
+func resumedFrame(room int) []byte {
+	return mustJSON(resumedMsg{Type: typeResumed, Room: room})
+}
+
+func peerLeftFrame(resumable bool) []byte {
+	return mustJSON(peerLeftMsg{Type: typePeerLeft, Resumable: resumable})
+}
+
+func peerRejoinedFrame() []byte {
+	return mustJSON(relayMsg{Type: typePeerRejoined})
 }
 
 func errorFrame(code, msg string) []byte {

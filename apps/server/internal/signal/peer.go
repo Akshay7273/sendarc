@@ -48,6 +48,7 @@ type peer struct {
 	done             chan struct{}
 	farewell         []byte // final frame to flush before closing; set under closeOnce
 	closed           chan struct{}
+	graceful         bool // set when this peer sent a bye; makes teardown non-resumable
 }
 
 func newPeer(ws *websocket.Conn, h *Hub) *peer {
@@ -150,7 +151,31 @@ func (p *peer) dispatch(data []byte, msgLimiter *tokenBucket) bool {
 		other.enqueue(peerJoinedFrame(other.role))
 		return true
 
+	case typeResume:
+		if p.room >= 0 {
+			p.close(errorFrame(errProtocol, "already in a room"))
+			return false
+		}
+		if m.Room == nil {
+			p.close(errorFrame(errBadMessage, "resume requires a room"))
+			return false
+		}
+		other, code := p.hub.resume(p, *m.Room, m.Role)
+		if code != "" {
+			p.close(errorFrame(code, ""))
+			return false
+		}
+		p.logger.Info("signal: room resumed", "room", p.room)
+		p.enqueue(resumedFrame(p.room))
+		if other != nil {
+			other.enqueue(peerRejoinedFrame())
+		}
+		return true
+
 	case typeBye:
+		// A bye ends the session for both peers: mark this teardown non-resumable so the
+		// partner is closed rather than left waiting for a reload.
+		p.graceful = true
 		if other := p.hub.partner(p); other != nil {
 			other.enqueue(data)
 		}
@@ -268,11 +293,17 @@ func (p *peer) close(farewell []byte) {
 	})
 }
 
-// teardown removes the peer from its room and notifies any remaining partner, then
-// ensures this peer's socket is closed.
+// teardown detaches the peer from its room and notifies any remaining partner, then
+// ensures this peer's socket is closed. A graceful bye tears the whole room down and
+// closes the survivor; an unexpected drop only vacates this peer's slot, leaving the
+// room lingering so the departed peer can reload and re-attach within the idle window.
 func (p *peer) teardown() {
-	if other := p.hub.remove(p); other != nil {
-		other.close(byeFrame("peer left"))
+	if p.graceful {
+		if other := p.hub.discard(p); other != nil {
+			other.close(byeFrame("peer left"))
+		}
+	} else if other := p.hub.vacate(p); other != nil {
+		other.enqueue(peerLeftFrame(true))
 	}
 	p.close(nil)
 	// Wait for the writer to finish closing the socket so the goroutine cannot

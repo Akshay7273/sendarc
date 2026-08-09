@@ -311,15 +311,60 @@ func TestByeNotifiesPartner(t *testing.T) {
 	}
 }
 
-func TestDisconnectNotifiesPartner(t *testing.T) {
+func TestDisconnectLingersAndNotifiesPartner(t *testing.T) {
 	url := testServer(t, DefaultConfig())
 	offerer, joiner, _ := pair(t, url)
 
-	// Offerer drops abruptly; the joiner should be told the peer left.
+	// Offerer drops abruptly; the room lingers and the joiner is told the peer left
+	// resumably rather than being closed, so it can wait for a reload.
 	_ = offerer.conn.Close(websocket.StatusNormalClosure, "")
 	m := joiner.recv()
-	if m["type"] != typeBye {
-		t.Fatalf("expected bye on partner disconnect, got %v", m)
+	if m["type"] != typePeerLeft {
+		t.Fatalf("expected peer_left on partner disconnect, got %v", m)
+	}
+	if m["resumable"] != true {
+		t.Fatalf("expected resumable peer_left, got %v", m)
+	}
+}
+
+func TestResumeReattachOverWire(t *testing.T) {
+	url := testServer(t, DefaultConfig())
+	offerer, joiner, room := pair(t, url)
+
+	// The offerer drops; the joiner sees a resumable peer_left and keeps its socket.
+	_ = offerer.conn.Close(websocket.StatusNormalClosure, "")
+	if m := joiner.recv(); m["type"] != typePeerLeft || m["resumable"] != true {
+		t.Fatalf("expected resumable peer_left, got %v", m)
+	}
+
+	// A reloaded offerer re-attaches to the vacated slot with resume.
+	reoff := mustDial(t, url)
+	reoff.send(map[string]any{"type": typeResume, "room": room, "role": roleOfferer})
+	if m := reoff.recv(); m["type"] != typeResumed || int(m["room"].(float64)) != room {
+		t.Fatalf("expected resumed for room %d, got %v", room, m)
+	}
+	// The waiting joiner is told its partner re-attached so both re-run the handshake.
+	if m := joiner.recv(); m["type"] != typePeerRejoined {
+		t.Fatalf("expected peer_rejoined, got %v", m)
+	}
+
+	// The room is paired again: a pake frame flows offerer→joiner verbatim.
+	frame := []byte(`{"type":"pake","msg":"resumed-session"}`)
+	reoff.sendRaw(frame)
+	if got := joiner.recvRaw(); string(got) != string(frame) {
+		t.Fatalf("forwarded frame after resume = %s, want %s", got, frame)
+	}
+}
+
+func TestResumeIntoOccupiedSlotRejected(t *testing.T) {
+	url := testServer(t, DefaultConfig())
+	_, _, room := pair(t, url)
+
+	// Both slots are still occupied, so resuming the offerer role is refused.
+	c := mustDial(t, url)
+	c.send(map[string]any{"type": typeResume, "room": room, "role": roleOfferer})
+	if m := c.recv(); m["type"] != typeError || m["code"] != errRoomFull {
+		t.Fatalf("expected room_full error, got %v", m)
 	}
 }
 
