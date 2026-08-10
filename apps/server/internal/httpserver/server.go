@@ -6,6 +6,7 @@ package httpserver
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -23,11 +24,12 @@ import (
 
 // Config controls how sendarcd serves the web app and terminates TLS.
 type Config struct {
-	Addr     string // listen address, e.g. ":8443"
-	TLSCert  string // path to TLS cert (PEM); empty => plain HTTP (dev/testing only)
-	TLSKey   string // path to TLS key (PEM)
-	WebDir   string // directory of the built web bundle to serve (prod)
-	DevProxy string // URL of the Vite dev server to proxy to (dev); overrides WebDir
+	Addr      string // listen address, e.g. ":8443"
+	TLSCert   string // path to TLS cert (PEM); empty => plain HTTP (dev/testing only)
+	TLSKey    string // path to TLS key (PEM)
+	WebDir    string // directory of the built web bundle to serve (prod)
+	DevProxy  string // URL of the Vite dev server to proxy to (dev); overrides WebDir
+	PublicURL string // public base URL for invite links (e.g. https://send.example.com/); empty = auto-detect from page
 
 	Signal signal.Config // signaling limits + WSS origin allowlist
 }
@@ -35,12 +37,13 @@ type Config struct {
 // ConfigFromEnv reads configuration from SENDARC_* environment variables with defaults.
 func ConfigFromEnv() Config {
 	return Config{
-		Addr:     env("SENDARC_ADDR", ":8443"),
-		TLSCert:  os.Getenv("SENDARC_TLS_CERT"),
-		TLSKey:   os.Getenv("SENDARC_TLS_KEY"),
-		WebDir:   os.Getenv("SENDARC_WEB_DIR"),
-		DevProxy: os.Getenv("SENDARC_WEB_DEV_PROXY"),
-		Signal:   signal.ConfigFromEnv(),
+		Addr:      env("SENDARC_ADDR", ":8443"),
+		TLSCert:   os.Getenv("SENDARC_TLS_CERT"),
+		TLSKey:    os.Getenv("SENDARC_TLS_KEY"),
+		WebDir:    os.Getenv("SENDARC_WEB_DIR"),
+		DevProxy:  os.Getenv("SENDARC_WEB_DEV_PROXY"),
+		PublicURL: os.Getenv("SENDARC_PUBLIC_URL"),
+		Signal:    signal.ConfigFromEnv(),
 	}
 }
 
@@ -109,6 +112,12 @@ func router(ctx context.Context, cfg Config, logger *slog.Logger) (http.Handler,
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+
+	r.Get("/config.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-cache")
+		_ = json.NewEncoder(w).Encode(map[string]string{"publicUrl": cfg.PublicURL})
 	})
 
 	// Signaling endpoint: origin-checked WebSocket rendezvous.
