@@ -326,20 +326,20 @@ func (l *lab) setup() error {
 	}
 
 	// Services in the public segment: signaling + STUN.
-	if c, err := l.nsSpawn(pub, []string{"SENDARC_ADDR=" + pubHost + ":8443"}, l.server); err != nil {
+	c, err := l.nsSpawn(pub, []string{"SENDARC_ADDR=" + pubHost + ":8443"}, l.server)
+	if err != nil {
 		return fmt.Errorf("sendarcd: %w", err)
-	} else {
-		l.mu.Lock()
-		l.keep = append(l.keep, c)
-		l.mu.Unlock()
 	}
-	if c, err := l.nsSpawn(pub, nil, l.stund, "-addr", pubHost+":3478"); err != nil {
+	l.mu.Lock()
+	l.keep = append(l.keep, c)
+	l.mu.Unlock()
+	c, err = l.nsSpawn(pub, nil, l.stund, "-addr", pubHost+":3478")
+	if err != nil {
 		return fmt.Errorf("stund: %w", err)
-	} else {
-		l.mu.Lock()
-		l.keep = append(l.keep, c)
-		l.mu.Unlock()
 	}
+	l.mu.Lock()
+	l.keep = append(l.keep, c)
+	l.mu.Unlock()
 
 	time.Sleep(500 * time.Millisecond)
 	return nil

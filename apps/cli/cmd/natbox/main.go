@@ -294,20 +294,20 @@ func (n *natbox) tcpProxy(dst string) {
 		log.Printf("natbox: tcp proxy: %v", err)
 		return
 	}
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 	for {
 		c, err := l.Accept()
 		if err != nil {
 			return
 		}
 		go func() {
-			defer c.Close()
+			defer func() { _ = c.Close() }()
 			up, err := net.DialTimeout("tcp", dst, 5*time.Second)
 			if err != nil {
 				log.Printf("natbox: tcp proxy dial: %v", err)
 				return
 			}
-			defer up.Close()
+			defer func() { _ = up.Close() }()
 			if tc, ok := c.(*net.TCPConn); ok {
 				_ = tc.SetNoDelay(true)
 			}
@@ -361,7 +361,7 @@ func (n *natbox) sweeper() {
 		n.mu.Lock()
 		for k, m := range n.mappings {
 			if time.Since(m.lastSeen) > 90*time.Second {
-				m.conn.Close()
+				_ = m.conn.Close()
 				delete(n.mappings, k)
 			}
 		}

@@ -29,7 +29,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("stund: listen: %v", err)
 	}
-	defer pc.Close()
+	defer func() { _ = pc.Close() }()
 	fmt.Fprintf(os.Stderr, "stund: listening on %s\n", pc.LocalAddr())
 
 	buf := make([]byte, 2048)
