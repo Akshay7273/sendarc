@@ -288,6 +288,14 @@ function run(
       try {
         const output = msg.output;
         if (output?.kind === 'opfs') {
+          // The transfer is done and the peer was already told (the done ack goes out
+          // before this `done`). Tear down the wire before the slow OPFS read so a peer
+          // disconnect can't trigger a relay fallback into a room the sender has already
+          // left — the server would refuse it and drop our socket. cleanup() below repeats
+          // this teardown; every piece is idempotent.
+          signaling.close();
+          relay?.close();
+          peer?.close();
           const file = await readOpfsOutput(output.key, output.name, output.mime);
           finish({
             name: output.name,
