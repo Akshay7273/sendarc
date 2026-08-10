@@ -1,140 +1,128 @@
 # SendArc
 
+**Encrypted peer-to-peer file transfer for the browser and the terminal. No accounts, no uploads, no server-side storage.**
+
 [![CI](https://github.com/Akshay7273/sendarc/actions/workflows/ci.yml/badge.svg)](https://github.com/Akshay7273/sendarc/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Akshay7273/sendarc/blob/main/LICENSE)
+[![Image](https://img.shields.io/badge/image-ghcr.io%2Fakshay7273%2Fsendarc-blue.svg)](https://github.com/Akshay7273/sendarc/pkgs/container/sendarc)
 
-**Send files securely. Share only a short code. Keep plaintext off the server.**
+[Quick start](#quick-start) · [CLI](#cli) · [Self-hosting](#self-hosting) · [Security](#security) · [Documentation](#documentation) · [Development](#development)
 
-SendArc is a self-hostable, end-to-end-encrypted file-transfer application for the browser
-and terminal. It authenticates two peers with a short invite code, prefers a direct WebRTC
-connection, and falls back to a bounded encrypted relay when a direct path is unavailable.
-Files stream without being loaded entirely into memory.
+## About
 
-> [!NOTE]
-> SendArc is pre-release software. File and folder transfers are working over direct and relayed
-> connections, but there is no stable release or compatibility guarantee yet.
+SendArc is an open-source, end-to-end-encrypted file transfer application for the browser
+and the command line. Files stream directly between two peers over WebRTC; a blind
+rendezvous server negotiates the connection and never stores, inspects, or decrypts file
+data. When a direct path is blocked by a restrictive NAT, an encrypted relay on the server
+carries opaque ciphertext while the transfer stays end-to-end-encrypted.
 
-## Why SendArc
+Two clients share one wire protocol: the web application and a Go CLI. Send from a browser
+tab and receive in the CLI — or any other combination — with the same invite code, even
+across different networks.
 
-- **End-to-end encrypted.** File contents, names, digests, and session keys are encrypted
-  between the two peers. The rendezvous server cannot read them.
-- **Authenticated by a human-friendly code.** SPAKE2 binds the cryptographic handshake to
-  the invite code and fails closed when the code is wrong.
-- **Direct when possible, relayed when necessary.** SendArc prefers an authenticated WebRTC
-  DataChannel and automatically falls back to an end-to-end-encrypted WebSocket relay. The relay
-  is credit-gated and bounded, and never stores transfer data.
-- **Streams large files with bounded memory.** Fixed-size blocks, transport backpressure,
-  and a bounded in-flight window keep memory use independent of file size.
-- **Files and folders.** Each file is independently verified; browsers can write directly to a
-  chosen destination or stream a portable ZIP fallback without buffering the file set in memory.
-- **Reliable and controllable.** Verified block acknowledgements drive progress and recovery;
-  missing blocks are retried, an interrupted direct path can continue through the relay, and either
-  peer can pause, resume, or cancel a transfer.
-- **Verifiable completion.** Every block is authenticated and hashed; the final streaming
-  SHA-256 digest is compatible with `sha256sum`.
-- **Browser and CLI interoperability.** Send or receive with either client using the same
-  protocol and invite code.
+The design is documented in the [protocol specification](docs/protocol.md) and the
+[threat model](docs/threat-model.md).
 
-## How it works
+## Quick start
 
-```text
- Sender                      Blind rendezvous                     Receiver
-   │  create room ─────────────────▶│                                │
-   │◀──────────── room number       │◀────────────── join room ─────│
-   │                                │                                │
-   │  SPAKE2 + key confirmation ◀───┼───▶ SPAKE2 + key confirmation │
-   │  authenticated SDP / ICE   ◀───┼───▶ authenticated SDP / ICE   │
-   │                                │                                │
-   ├════ encrypted WebRTC DataChannel, direct when available ═══════┤
-   └──── or opaque encrypted frames through the bounded relay ──────┘
-```
-
-The room number is only a routing token. The random words stay on the clients—in browser
-links they live after `#`, which is not sent in HTTP requests. Both peers use the complete
-code as the SPAKE2 password, confirm the derived key, and authenticate WebRTC signaling.
-Transfer frames remain end-to-end encrypted on both direct and relay paths.
-
-The server can observe connection metadata, WebRTC signaling, and—when relay fallback is
-used—encrypted frame sizes and timing. It cannot derive the session key or decrypt file
-metadata and content. The security section below summarizes the trust boundary.
-
-## Supported paths
-
-| Sender  | Receiver | Preferred path         | Fallback        |
-| ------- | -------- | ---------------------- | --------------- |
-| Browser | Browser  | Direct WebRTC          | Encrypted relay |
-| Browser | CLI      | Direct WebRTC          | Encrypted relay |
-| CLI     | Browser  | Direct WebRTC          | Encrypted relay |
-| CLI     | CLI      | Direct WebRTC via Pion | Encrypted relay |
-
-## Quickstart with Docker
-
-The public image is published to GHCR on every push to `main` (and each `v*` tag) for
-`linux/amd64` and `linux/arm64`. Run it with Docker alone:
+The easiest way to try SendArc is the public container image — no toolchain required:
 
 ```bash
 docker run -d --name sendarc -p 8443:8443 ghcr.io/akshay7273/sendarc
 ```
 
-Open `http://localhost:8443` on both peers and send your first file. Plain HTTP on
-`localhost` counts as a secure context for WebRTC; for access from other machines,
-put TLS in front — see `docs/HOSTING.md` for TLS, STUN/TURN, and relay limits.
+Open `http://localhost:8443` in two browser tabs, create a room, and share the link (or
+the short code) with the receiver. No account, no install, no configuration. Files stream
+with bounded memory — size is not a limit — and the receiver can verify the final SHA-256
+against `sha256sum`.
 
-## Run locally
+## Browser
 
-### Requirements
+The web application works in any evergreen browser:
 
-- Node.js 22 or newer
-- Go 1.24 or newer
-- [pnpm](https://pnpm.io/) through Corepack
-- [just](https://github.com/casey/just)
-- [mkcert](https://github.com/FiloSottile/mkcert)
+- **Direct by default.** Peers connect over an authenticated WebRTC DataChannel; the
+  encrypted relay takes over automatically when a direct path is unavailable.
+- **Large files, small memory.** Files are streamed in fixed-size encrypted blocks; memory
+  stays bounded regardless of file size.
+- **Files and folders.** Receivers on Chromium can write straight to a chosen file; all
+  browsers fall back to an in-browser filesystem or a portable ZIP archive.
+- **Verified completion.** Every block is authenticated and hashed; the final digest is
+  `sha256sum`-compatible.
 
-### Browser application
+## CLI
 
-```bash
-git clone https://github.com/Akshay7273/sendarc.git
-cd sendarc
-corepack enable
-just install
-just dev
-```
+Send and receive from terminals, servers, and scripts.
 
-Open `https://localhost:8443` on both peers. The first run creates a local TLS certificate.
-Run `mkcert -install` once if your browser does not trust the development certificate.
-
-### Terminal client
-
-With the local server running, build the CLI:
+Install with the project's task runner, or build from source:
 
 ```bash
-(cd apps/cli && go build -o ../../bin/sendarc ./cmd/sendarc)
+just install-cli                      # installs sendarc into ~/.local/bin
+git clone https://github.com/Akshay7273/sendarc.git && cd sendarc
+go build -o ~/.local/bin/sendarc ./apps/cli/cmd/sendarc
 ```
 
-Send one or more files or folders:
+Then send and receive with short, plain commands:
 
 ```bash
-bin/sendarc send ./photos ./notes.txt --insecure-skip-verify
+sendarc send photo.jpg
+sendarc receive 4-brave-otter --out ./downloads
 ```
 
-Receive it from another terminal:
+Both clients produce the same invite code and link, so browser and CLI peers can mix freely.
+Run `sendarc help` for all options.
+
+## Self-hosting
+
+Prefer your own infrastructure? The single container runs the web app, the signaling
+endpoint, and the encrypted relay from one port — for `linux/amd64` and `linux/arm64`:
 
 ```bash
-bin/sendarc receive 4-brave-otter --out ./downloads --insecure-skip-verify
+docker pull ghcr.io/akshay7273/sendarc
+docker run -d --name sendarc -p 8443:8443 ghcr.io/akshay7273/sendarc
 ```
 
-`--insecure-skip-verify` is only for the self-signed local development certificate. Do not
-use it with a deployed server. Add `--relay-only` to either command to require the encrypted
-relay path, which is useful for connectivity checks. Run `bin/sendarc help` for all options.
+The image rebuilds on every push to `main` and on each `v*` tag. Configuration, TLS, STUN,
+relay limits, and a `/metrics` endpoint in Prometheus format are covered in
+[docs/HOSTING.md](docs/HOSTING.md).
+
+## Security
+
+SendArc treats the rendezvous server and the network as untrusted for confidentiality and
+integrity. Peers authenticate with SPAKE2 (RFC 9382) keyed by the invite code — a wrong code
+fails closed, and the server cannot offline-guess it or undetectably intercept the
+handshake. Files are encrypted with AES-256-GCM under per-direction monotonic nonces, on
+both the direct and the relayed path. The server can observe room numbers and ciphertext
+metadata only; it never sees file contents, names, digests, or keys.
+
+Full analysis, accepted limitations, and the trust boundary are in the
+[threat model](docs/threat-model.md). Cryptographic test vectors are published in
+[docs/test-vectors/](docs/test-vectors/), and dependency audits run in CI.
+
+> [!NOTE]
+> SendArc is pre-release software without a stable release or an independent security
+> audit. Do not use it for irreplaceable or highly sensitive data.
+
+## Documentation
+
+- [Self-hosting](docs/HOSTING.md) — deployment, TLS, STUN/TURN, relay limits, metrics
+- [Protocol specification](docs/protocol.md) — `sendarc/1` wire protocol
+- [Threat model](docs/threat-model.md) — trust boundary, attacks, mitigations
+- [Compatibility matrix](docs/compat-matrix.md) — NAT topologies, degraded networks, browsers
+- [Benchmarks](docs/BENCHMARKS.md) — throughput, memory, methodology
+- [Test vectors](docs/test-vectors/) — cross-language crypto and transfer vectors
 
 ## Development
 
 ```bash
+just install     # install JS + Go dependencies
+just dev         # web app with HMR + Go server over https://localhost:8443
 just build       # build the web application and server binary
 just lint        # lint TypeScript, Svelte, and every Go module
-just typecheck   # run TypeScript and Svelte diagnostics
 just test        # run JavaScript and Go test suites
-just serve       # serve a production-style local build over TLS
 ```
+
+For a CLI peer against the local development server, add `--insecure-skip-verify`
+(the local certificate is self-signed); never use it with a deployed server.
 
 The repository is a pnpm and Go workspace:
 
@@ -146,18 +134,14 @@ packages/protocol   TypeScript protocol, cryptography, and transfer engine
 packages/wire       Go implementation of the shared wire protocol
 ```
 
-## Security
+## Contributing
 
-SendArc treats the rendezvous server and network as untrusted for confidentiality and
-integrity. Bulk encryption uses AES-256-GCM with monotonic per-direction nonces; the sequence
-counter and frame header are authenticated as associated data. SPAKE2 with RFC 9382 key
-confirmation protects the short invite code from offline guessing by the server and prevents
-an undetected man-in-the-middle handshake.
-
-SendArc has not yet received an independent security audit. Please do not use pre-release
-builds for irreplaceable or highly sensitive data.
+Contributions are welcome — open an [issue](https://github.com/Akshay7273/sendarc/issues)
+for bugs or feature requests, and submit pull requests against `main`. To report a
+vulnerability, see the [security policy](docs/threat-model.md).
 
 ## License
 
-No license has been granted yet. Until a `LICENSE` file is added, the source is available
-for inspection only; do not assume permission to copy, modify, or distribute it.
+MIT License, Copyright (c) 2026 Akshay7273. See [LICENSE](LICENSE) for details.
+
+Open source. Built for everyone.
