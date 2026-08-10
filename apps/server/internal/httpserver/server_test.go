@@ -95,6 +95,33 @@ func TestMetricsEndpoint(t *testing.T) {
 	}
 }
 
+func TestConfigEndpoint(t *testing.T) {
+	h := testRouter(t, Config{PublicURL: "https://send.example.com"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/config.json", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if body["publicUrl"] != "https://send.example.com" {
+		t.Errorf("publicUrl = %q, want https://send.example.com", body["publicUrl"])
+	}
+}
+
+func TestConfigEndpointEmpty(t *testing.T) {
+	h := testRouter(t, Config{})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/config.json", nil))
+	var body map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if body["publicUrl"] != "" {
+		t.Errorf("publicUrl = %q, want empty when not configured", body["publicUrl"])
+	}
+}
+
 func TestModeReporting(t *testing.T) {
 	cases := map[string]Config{
 		"dev-proxy": {DevProxy: "http://localhost:5173"},
