@@ -31,21 +31,21 @@ so web + signaling + relay all share the published port.
 
 ## Environment variables
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `SENDARC_ADDR` | `:8443` | Listen address. |
-| `SENDARC_TLS_CERT` / `SENDARC_TLS_KEY` | unset | PEM cert/key paths; when both are set `sendarcd` terminates TLS itself. |
-| `SENDARC_WEB_DIR` | unset | Directory of the built web bundle to serve; set to `/srv/web` in the image. |
-| `SENDARC_WEB_DEV_PROXY` | unset | Vite dev-server URL to proxy to (development only; overrides `SENDARC_WEB_DIR`). |
-| `SENDARC_ALLOWED_ORIGINS` | empty | Comma-separated WSS origin allowlist. Empty allows only same-origin browser sockets; native CLI clients (no `Origin` header) are always allowed. |
-| `SENDARC_SIGNAL_IDLE_TIMEOUT` | `2m` | Close a socket silent this long; also bounds how long an unpaired room lingers. |
-| `SENDARC_SIGNAL_MAX_MESSAGE_BYTES` | `65536` | Cap on a single inbound signaling message. |
-| `SENDARC_RELAY_MAX_FRAME_BYTES` | `131072` | Cap on a single relay frame. |
-| `SENDARC_RELAY_WINDOW_BYTES` | `1048576` | In-flight window per relay connection. |
-| `SENDARC_RELAY_QUEUE_BYTES` | `2097152` | Bounded per-connection relay queue. |
-| `SENDARC_RELAY_BURST_BYTES` | `8388608` | Token-bucket burst for relay throughput. |
-| `SENDARC_RELAY_BYTES_PER_SEC` | `33554432` | Relay throughput ceiling (32 MiB/s by default). |
-| `SENDARC_RELAY_MAX_SESSION_BYTES` | `17179869184` | Lifetime bytes relayed per session (16 GiB). |
+| Variable                               | Default       | Purpose                                                                                                                                          |
+| -------------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `SENDARC_ADDR`                         | `:8443`       | Listen address.                                                                                                                                  |
+| `SENDARC_TLS_CERT` / `SENDARC_TLS_KEY` | unset         | PEM cert/key paths; when both are set `sendarcd` terminates TLS itself.                                                                          |
+| `SENDARC_WEB_DIR`                      | unset         | Directory of the built web bundle to serve; set to `/srv/web` in the image.                                                                      |
+| `SENDARC_WEB_DEV_PROXY`                | unset         | Vite dev-server URL to proxy to (development only; overrides `SENDARC_WEB_DIR`).                                                                 |
+| `SENDARC_ALLOWED_ORIGINS`              | empty         | Comma-separated WSS origin allowlist. Empty allows only same-origin browser sockets; native CLI clients (no `Origin` header) are always allowed. |
+| `SENDARC_SIGNAL_IDLE_TIMEOUT`          | `2m`          | Close a socket silent this long; also bounds how long an unpaired room lingers.                                                                  |
+| `SENDARC_SIGNAL_MAX_MESSAGE_BYTES`     | `65536`       | Cap on a single inbound signaling message.                                                                                                       |
+| `SENDARC_RELAY_MAX_FRAME_BYTES`        | `131072`      | Cap on a single relay frame.                                                                                                                     |
+| `SENDARC_RELAY_WINDOW_BYTES`           | `1048576`     | In-flight window per relay connection.                                                                                                           |
+| `SENDARC_RELAY_QUEUE_BYTES`            | `2097152`     | Bounded per-connection relay queue.                                                                                                              |
+| `SENDARC_RELAY_BURST_BYTES`            | `8388608`     | Token-bucket burst for relay throughput.                                                                                                         |
+| `SENDARC_RELAY_BYTES_PER_SEC`          | `33554432`    | Relay throughput ceiling (32 MiB/s by default).                                                                                                  |
+| `SENDARC_RELAY_MAX_SESSION_BYTES`      | `17179869184` | Lifetime bytes relayed per session (16 GiB).                                                                                                     |
 
 Durations use Go's `time.ParseDuration` syntax (`30s`, `5m`); sizes use
 plain integers (bytes). Overrides apply only to the signaling/relay layer;
@@ -112,13 +112,13 @@ The relay is the only place an operator spends bandwidth and memory, so
 every layer is bounded. Defaults are in the table above; raise or lower
 them per instance:
 
-| What | Default | Effect |
-|---|---|---|
-| Frame size | 128 KiB | A single relay frame cannot exceed this. |
-| Window | 1 MiB | Unacked in-flight bytes per connection. |
-| Queue | 2 MiB | Buffered bytes per connection before backpressure. |
-| Throughput | 32 MiB/s | Token-bucket ceiling shared across connections. |
-| Session lifetime | 16 GiB | Bytes relayed per session before the session is torn down. |
+| What             | Default  | Effect                                                     |
+| ---------------- | -------- | ---------------------------------------------------------- |
+| Frame size       | 128 KiB  | A single relay frame cannot exceed this.                   |
+| Window           | 1 MiB    | Unacked in-flight bytes per connection.                    |
+| Queue            | 2 MiB    | Buffered bytes per connection before backpressure.         |
+| Throughput       | 32 MiB/s | Token-bucket ceiling shared across connections.            |
+| Session lifetime | 16 GiB   | Bytes relayed per session before the session is torn down. |
 
 These keep a busy instance's memory in the low tens of MiB regardless of
 how many transfers run.
