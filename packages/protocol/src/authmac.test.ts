@@ -5,7 +5,7 @@ import { hexToBytes, bytesToHex } from './bytes.js';
 import { signSignal, verifySignal, signalMacInput, u32be } from './authmac.js';
 
 function loadVectors<T>(name: string): T {
-  const url = new URL(`../../../test-vectors/${name}`, import.meta.url);
+  const url = new URL(`../../../docs/test-vectors/${name}`, import.meta.url);
   return JSON.parse(readFileSync(fileURLToPath(url), 'utf8')) as T;
 }
 interface V {

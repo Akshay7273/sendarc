@@ -12,7 +12,7 @@ import {
 import { bytesToHex, hexToBytes, utf8 } from './bytes.js';
 
 function loadVectors<T>(name: string): T {
-  const url = new URL(`../../../test-vectors/${name}`, import.meta.url);
+  const url = new URL(`../../../docs/test-vectors/${name}`, import.meta.url);
   return JSON.parse(readFileSync(fileURLToPath(url), 'utf8')) as T;
 }
 
