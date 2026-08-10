@@ -49,6 +49,45 @@ jobs:
       - name: Build
         run: pnpm run build
 
+  e2e:
+    name: e2e (chromium, firefox)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: apps/server/go.sum
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Build protocol package
+        run: pnpm --filter @sendarc/protocol build
+
+      - name: Install Playwright browsers
+        run: pnpm --filter @sendarc/web exec playwright install --with-deps chromium firefox
+
+      - name: Run e2e
+        run: pnpm --filter @sendarc/web e2e
+
+      - name: Upload failure traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: apps/web/test-results/
+          retention-days: 7
+
   go:
     name: ${{ matrix.module }} (vet, test, build)
     runs-on: ubuntu-latest

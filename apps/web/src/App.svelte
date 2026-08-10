@@ -145,14 +145,16 @@
     ctrl.done.then(
       async (res) => {
         if (controller !== ctrl) return; // superseded by a restart
+        // Take over the still-open signaling socket before the first await: the rendezvous
+        // layer auto-closes an unadopted socket on the next macrotask, and computing the
+        // fingerprint can yield past that point (slow WebCrypto on some engines).
+        signaling = ctrl.adoptSignaling();
         fingerprint = await sasFingerprint(res.master);
         peerCaps = res.remoteCaps;
         handshake = res;
         role = res.role;
-        // Take over the still-open signaling socket so the WebRTC negotiation can reuse it,
-        // then drop onto the transfer screen. The offerer waits for a file pick; the joiner
-        // begins receiving straight away.
-        signaling = ctrl.adoptSignaling();
+        // The WebRTC negotiation reuses the adopted socket; the offerer waits for a file pick,
+        // the joiner begins receiving straight away.
         screen = 'done';
         startTransferIfReady();
       },

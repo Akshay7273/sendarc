@@ -9,13 +9,16 @@
     "preview": "vite preview",
     "typecheck": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run --passWithNoTests",
-    "lint": "eslint . --max-warnings 0"
+    "lint": "eslint . --max-warnings 0",
+    "e2e": "playwright test",
+    "e2e:serve": "pnpm build && cd ../server && SENDARC_ADDR=127.0.0.1:8443 SENDARC_WEB_DIR=../web/dist go run ./cmd/sendarcd"
   },
   "dependencies": {
     "@sendarc/protocol": "workspace:*",
     "hash-wasm": "^4.12.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@sveltejs/vite-plugin-svelte": "^5.0.3",
     "jsdom": "^30.0.1",
     "svelte": "^5.16.0",
