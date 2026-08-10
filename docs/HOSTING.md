@@ -19,6 +19,11 @@ reachable from another machine, put TLS in front (see [TLS](#tls)).
 Health: `GET /healthz` returns `{"status":"ok"}`; the container also
 exposes a `HEALTHCHECK` against it.
 
+Metrics: `GET /metrics` serves Prometheus text with active rooms
+(`sendarc_rooms`), relayed ciphertext bytes (`sendarc_relay_bytes_total`),
+and refusal/error codes (`sendarc_errors_total{code=...}`). Point a scraper
+or a dashboard at it; nothing content-bearing is ever exposed.
+
 ## What the image contains
 
 - The built web bundle (`apps/web`), served with SPA fallback by `sendarcd`

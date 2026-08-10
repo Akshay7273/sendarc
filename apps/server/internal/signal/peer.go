@@ -85,7 +85,7 @@ func (p *peer) serve(ctx context.Context) {
 		switch typ {
 		case websocket.MessageText:
 			if int64(len(data)) > p.hub.cfg.MaxMessageBytes {
-				p.close(errorFrame(errBadMessage, "message too large"))
+				p.fail(errBadMessage, "message too large")
 				return
 			}
 			if !p.dispatch(data, msgLimiter) {
@@ -93,11 +93,11 @@ func (p *peer) serve(ctx context.Context) {
 			}
 		case websocket.MessageBinary:
 			if code := p.hub.forwardRelay(p, data); code != "" {
-				p.close(errorFrame(code, "relay frame refused"))
+				p.fail(code, "relay frame refused")
 				return
 			}
 		default:
-			p.close(errorFrame(errBadMessage, "unsupported frame type"))
+			p.fail(errBadMessage, "unsupported frame type")
 			return
 		}
 	}
@@ -109,23 +109,23 @@ func (p *peer) serve(ctx context.Context) {
 func (p *peer) dispatch(data []byte, msgLimiter *tokenBucket) bool {
 	var m clientMsg
 	if err := json.Unmarshal(data, &m); err != nil || m.Type == "" {
-		p.close(errorFrame(errBadMessage, "invalid message"))
+		p.fail(errBadMessage, "invalid message")
 		return false
 	}
 	if m.Type == typeRelayCredit {
 		if !p.relayControlRate.allow() {
-			p.close(errorFrame(errRateLimited, "too many relay credit messages"))
+			p.fail(errRateLimited, "too many relay credit messages")
 			return false
 		}
 	} else if !msgLimiter.allow() {
-		p.close(errorFrame(errRateLimited, "too many messages"))
+		p.fail(errRateLimited, "too many messages")
 		return false
 	}
 
 	switch m.Type {
 	case typeCreate:
 		if p.room >= 0 {
-			p.close(errorFrame(errProtocol, "already in a room"))
+			p.fail(errProtocol, "already in a room")
 			return false
 		}
 		room := p.hub.createRoom(p)
@@ -135,16 +135,16 @@ func (p *peer) dispatch(data []byte, msgLimiter *tokenBucket) bool {
 
 	case typeJoin:
 		if p.room >= 0 {
-			p.close(errorFrame(errProtocol, "already in a room"))
+			p.fail(errProtocol, "already in a room")
 			return false
 		}
 		if m.Room == nil {
-			p.close(errorFrame(errBadMessage, "join requires a room"))
+			p.fail(errBadMessage, "join requires a room")
 			return false
 		}
 		other, code := p.hub.join(p, *m.Room)
 		if code != "" {
-			p.close(errorFrame(code, ""))
+			p.fail(code, "")
 			return false
 		}
 		p.logger.Info("signal: room paired", "room", p.room)
@@ -154,16 +154,16 @@ func (p *peer) dispatch(data []byte, msgLimiter *tokenBucket) bool {
 
 	case typeResume:
 		if p.room >= 0 {
-			p.close(errorFrame(errProtocol, "already in a room"))
+			p.fail(errProtocol, "already in a room")
 			return false
 		}
 		if m.Room == nil {
-			p.close(errorFrame(errBadMessage, "resume requires a room"))
+			p.fail(errBadMessage, "resume requires a room")
 			return false
 		}
 		other, code := p.hub.resume(p, *m.Room, m.Role)
 		if code != "" {
-			p.close(errorFrame(code, ""))
+			p.fail(code, "")
 			return false
 		}
 		p.logger.Info("signal: room resumed", "room", p.room)
@@ -186,7 +186,7 @@ func (p *peer) dispatch(data []byte, msgLimiter *tokenBucket) bool {
 	case typeRelayOpen:
 		other, ready, code := p.hub.openRelay(p)
 		if code != "" {
-			p.close(errorFrame(code, "relay unavailable"))
+			p.fail(code, "relay unavailable")
 			return false
 		}
 		if ready {
@@ -200,7 +200,7 @@ func (p *peer) dispatch(data []byte, msgLimiter *tokenBucket) bool {
 	case typeRelayCredit:
 		sender, granted, code := p.hub.grantRelayCredit(p, m.Bytes)
 		if code != "" {
-			p.close(errorFrame(code, "invalid relay credit"))
+			p.fail(code, "invalid relay credit")
 			return false
 		}
 		if granted > 0 {
@@ -210,12 +210,12 @@ func (p *peer) dispatch(data []byte, msgLimiter *tokenBucket) bool {
 
 	default:
 		if !forwardable[m.Type] {
-			p.close(errorFrame(errBadMessage, "unknown message type"))
+			p.fail(errBadMessage, "unknown message type")
 			return false
 		}
 		other := p.hub.partner(p)
 		if other == nil {
-			p.close(errorFrame(errNotPaired, "not paired yet"))
+			p.fail(errNotPaired, "not paired yet")
 			return false
 		}
 		other.enqueue(data)
@@ -260,7 +260,7 @@ func (p *peer) rawWrite(ctx context.Context, typ websocket.MessageType, data []b
 // longer than that partner's own write timeout.
 func (p *peer) enqueue(data []byte) {
 	if !p.tryEnqueue(websocket.MessageText, data) {
-		p.close(errorFrame(errRelayLimit, "outbound queue full"))
+		p.fail(errRelayLimit, "outbound queue full")
 	}
 }
 
@@ -296,6 +296,12 @@ func (p *peer) close(farewell []byte) {
 		p.farewell = farewell
 		close(p.done)
 	})
+}
+
+// fail closes the connection with an error frame and counts it in the metrics.
+func (p *peer) fail(code, msg string) {
+	p.hub.recordError(code)
+	p.close(errorFrame(code, msg))
 }
 
 // teardown detaches the peer from its room and notifies any remaining partner, then
