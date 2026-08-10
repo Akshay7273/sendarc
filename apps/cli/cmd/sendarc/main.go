@@ -26,6 +26,8 @@ import (
 	"github.com/sendarc/cli/internal/transfer"
 	"github.com/sendarc/cli/internal/wsclient"
 	"github.com/sendarc/wire"
+
+	"github.com/pion/webrtc/v4"
 )
 
 const defaultServer = "wss://localhost:8443/ws"
@@ -60,6 +62,8 @@ Usage:
 Flags:
   --server URL             signaling server (default `+defaultServer+`)
   --insecure-skip-verify   skip TLS verification; self-signed dev certs only
+  --ice-server URL         STUN server for direct-path candidates (repeatable;
+                           default stun:stun.l.google.com:19302)
   --relay-only             force the encrypted WebSocket relay instead of WebRTC
   --words N                number of words in the invite code (send only; 0 = default)
   --out DIR                directory to write the received file into (receive only; default .)
@@ -72,6 +76,7 @@ func runSend(args []string) int {
 	insecure := fs.Bool("insecure-skip-verify", false, "skip TLS verification (self-signed dev certs only)")
 	words := fs.Int("words", 0, "number of words in the invite code (0 = default)")
 	relayOnly := fs.Bool("relay-only", false, "force the encrypted WebSocket relay")
+	iceServer := fs.String("ice-server", "", "STUN server URL for direct-path candidates (repeatable; default stun:stun.l.google.com:19302)")
 	positionals := parseArgs(fs, args)
 
 	if len(positionals) == 0 {
@@ -114,6 +119,7 @@ func runSend(args []string) int {
 		},
 		Sources:        sources,
 		ForceRelay:     *relayOnly,
+		ICEServers:     iceServers(*iceServer),
 		OnTransport:    transportPrinter,
 		OnConnect:      connectPrinter(fmt.Sprintf("Sending %s (%s) …", label, humanBytes(totalSize))),
 		OnFileProgress: progress.reportFile,
@@ -145,6 +151,7 @@ func runReceive(args []string) int {
 	insecure := fs.Bool("insecure-skip-verify", false, "skip TLS verification (self-signed dev certs only)")
 	outDir := fs.String("out", ".", "directory to write the received file into")
 	relayOnly := fs.Bool("relay-only", false, "force the encrypted WebSocket relay")
+	iceServer := fs.String("ice-server", "", "STUN server URL for direct-path candidates (repeatable; default stun:stun.l.google.com:19302)")
 	positionals := parseArgs(fs, args)
 
 	code := ""
@@ -180,6 +187,7 @@ func runReceive(args []string) int {
 		},
 		DestDir:     *outDir,
 		ForceRelay:  *relayOnly,
+		ICEServers:  iceServers(*iceServer),
 		OnTransport: transportPrinter,
 		OnManifestSet: func(manifest wire.Manifest) {
 			progress.setTotal(manifest.TotalSize)
@@ -215,6 +223,15 @@ func runReceive(args []string) int {
 		fmt.Printf("  File-set SHA-256: %s\n", out.Digest)
 	}
 	return 0
+}
+
+// iceServers parses a --ice-server URL list into pion ICE server config. The flag is
+// repeatable; an empty value leaves the package default (Google STUN) in place.
+func iceServers(flagValue string) []webrtc.ICEServer {
+	if flagValue == "" {
+		return nil
+	}
+	return []webrtc.ICEServer{{URLs: []string{flagValue}}}
 }
 
 // dial opens the signaling socket, reporting the server it is contacting. The transfer
