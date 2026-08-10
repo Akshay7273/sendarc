@@ -5,6 +5,9 @@
   import { offer, join, type RendezvousController } from './lib/session/rendezvous.js';
   import type { SignalChannel } from './lib/signaling/client.js';
   import type { ReceiveDestinationSpec } from './lib/transfer/wire.js';
+  import { baseUrl, loadConfig } from './lib/config.js';
+
+  loadConfig();
   import {
     runSend,
     runReceive,
@@ -96,7 +99,7 @@
         onPhase: (p) => (phase = p),
         onCode: (c) => {
           code = c;
-          link = typeof window === 'undefined' ? '' : inviteLinkFor(window.location.href, c);
+          link = inviteLinkFor(baseUrl(), c);
         },
       }),
     );
