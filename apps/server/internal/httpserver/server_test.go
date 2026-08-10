@@ -116,7 +116,7 @@ func TestConfigEndpointEmpty(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/config.json", nil))
 	var body map[string]string
-	json.Unmarshal(rec.Body.Bytes(), &body)
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
 	if body["publicUrl"] != "" {
 		t.Errorf("publicUrl = %q, want empty when not configured", body["publicUrl"])
 	}

@@ -5,9 +5,9 @@
   import { offer, join, type RendezvousController } from './lib/session/rendezvous.js';
   import type { SignalChannel } from './lib/signaling/client.js';
   import type { ReceiveDestinationSpec } from './lib/transfer/wire.js';
-  import { baseUrl, loadConfig } from "./lib/config.js";
+  import { baseUrl, loadConfig } from './lib/config.js';
 
-loadConfig();
+  loadConfig();
   import {
     runSend,
     runReceive,
