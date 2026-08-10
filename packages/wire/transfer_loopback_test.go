@@ -26,11 +26,18 @@ type loopbackResult struct {
 	sink    *MemorySink
 }
 
+// testTB is the shared subset of *testing.T / *testing.B used by loopback helpers so the
+// same harness drives both the correctness tests and the throughput benchmarks.
+type testTB interface {
+	Helper()
+	Fatal(args ...any)
+}
+
 // runLoopback wires a Sender (offerer, o2j) to a Receiver (joiner) over two buffered channels,
 // each drained by its own goroutine so delivery is ordered and genuinely concurrent — the same
 // shape as a real reliable, ordered DataChannel. When corrupt is set, one byte of the second
 // frame the sender emits is flipped in flight, forcing an integrity abort.
-func runLoopback(t *testing.T, data []byte, blockSize, frameSize, window int, corrupt bool) loopbackResult {
+func runLoopback(t testTB, data []byte, blockSize, frameSize, window int, corrupt bool) loopbackResult {
 	t.Helper()
 	keys, err := DeriveTransferKeys(loopbackMaster())
 	if err != nil {
