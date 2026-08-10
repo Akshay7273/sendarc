@@ -79,6 +79,7 @@ func (p *peer) serve(ctx context.Context) {
 		typ, data, err := p.ws.Read(readCtx)
 		cancel()
 		if err != nil {
+			p.logger.Warn("peer read ended", "err", err)
 			return
 		}
 		switch typ {
@@ -247,7 +248,11 @@ func (p *peer) writeLoop(ctx context.Context) {
 func (p *peer) rawWrite(ctx context.Context, typ websocket.MessageType, data []byte) bool {
 	writeCtx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
-	return p.ws.Write(writeCtx, typ, data) == nil
+	if err := p.ws.Write(writeCtx, typ, data); err != nil {
+		p.logger.Warn("peer write failed", "err", err)
+		return false
+	}
+	return true
 }
 
 // enqueue hands a frame to this peer's writer. It blocks only until the buffer has
