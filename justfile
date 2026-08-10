@@ -37,6 +37,10 @@ build:
     pnpm -r build
     cd apps/server && go build -o ../../bin/sendarcd ./cmd/sendarcd
 
+# Build and install the CLI into ~/.local/bin (on PATH), so it runs as `sendarc`
+install-cli:
+    go build -o ~/.local/bin/sendarc ./apps/cli/cmd/sendarc
+
 # Run the production-style server (serves the built web bundle over TLS)
 serve: build certs
     cd apps/server && SENDARC_TLS_CERT="{{CERT_DIR}}/localhost.pem" SENDARC_TLS_KEY="{{CERT_DIR}}/localhost-key.pem" SENDARC_WEB_DIR="../web/dist" go run ./cmd/sendarcd
