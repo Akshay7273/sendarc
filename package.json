@@ -2,6 +2,7 @@
   "name": "sendarc",
   "version": "0.0.0",
   "private": true,
+  "license": "MIT",
   "description": "Secure, end-to-end-encrypted, peer-to-peer browser file transfer",
   "type": "module",
   "packageManager": "pnpm@11.20.0",

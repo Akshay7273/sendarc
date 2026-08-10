@@ -114,6 +114,7 @@ func router(ctx context.Context, cfg Config, logger *slog.Logger) (http.Handler,
 	// Signaling endpoint: origin-checked WebSocket rendezvous.
 	hub := signal.NewHub(ctx, cfg.Signal, logger)
 	r.Handle("/ws", hub.Handler(ctx))
+	r.Handle("/metrics", hub.MetricsHandler())
 
 	// Web app: dev proxy takes precedence, then a static build dir.
 	switch {

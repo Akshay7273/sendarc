@@ -18,6 +18,12 @@ type Hub struct {
 	mu    sync.Mutex
 	rooms map[int]*room
 
+	// relayBytes counts ciphertext relayed since start (metrics); per-room
+	// relay budget lives in room.relayBytes. errors counts refusal codes by
+	// code string (metrics). Both are guarded by mu.
+	relayBytes int64
+	errors     map[string]int64
+
 	// connLimiters is the per-IP connection-rate limiter, checked at upgrade time.
 	connMu       sync.Mutex
 	connLimiters map[string]*tokenBucket
@@ -106,6 +112,7 @@ func (h *Hub) forwardRelay(sender *peer, data []byte) string {
 	}
 	sender.relayCredit -= size
 	r.relayBytes += size
+	h.relayBytes += size
 	r.lastSeen = time.Now()
 	h.mu.Unlock()
 
@@ -131,6 +138,7 @@ func NewHub(ctx context.Context, cfg Config, logger *slog.Logger) *Hub {
 		cfg:          cfg,
 		logger:       orDiscard(logger),
 		rooms:        make(map[int]*room),
+		errors:       make(map[string]int64),
 		connLimiters: make(map[string]*tokenBucket),
 	}
 	go h.reap(ctx)
