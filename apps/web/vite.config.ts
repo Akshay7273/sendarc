@@ -1,10 +1,11 @@
 import { defineConfig } from 'vitest/config';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { viteSri } from './sri';
 
 // The Go server proxies non-asset requests here in dev (see justfile `dev`).
 // We keep this a static SPA — no SSR — so it can be served by the Go binary in prod.
 export default defineConfig({
-  plugins: [svelte()],
+  plugins: [svelte(), viteSri()],
   // Component tests run in jsdom and must resolve Svelte's browser runtime rather than its
   // SSR-only export (where mount/unmount intentionally throw).
   resolve: {
