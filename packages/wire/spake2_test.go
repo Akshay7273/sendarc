@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-const vectorsDir = "../../test-vectors"
+const vectorsDir = "../../docs/test-vectors"
 
 func loadVectors(t *testing.T, name string, v any) {
 	t.Helper()
