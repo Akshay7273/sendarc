@@ -76,6 +76,25 @@ func TestSPAFallback(t *testing.T) {
 	}
 }
 
+func TestMetricsEndpoint(t *testing.T) {
+	h := testRouter(t, Config{})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/plain") {
+		t.Errorf("Content-Type = %q, want text/plain metrics", got)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"sendarc_rooms", "sendarc_relay_bytes_total", "sendarc_errors_total"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q", want)
+		}
+	}
+}
+
 func TestModeReporting(t *testing.T) {
 	cases := map[string]Config{
 		"dev-proxy": {DevProxy: "http://localhost:5173"},
