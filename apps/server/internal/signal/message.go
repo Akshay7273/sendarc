@@ -207,7 +207,7 @@ type Config struct {
 // enough for ordinary transfers while keeping memory, bandwidth, and lifetime bytes explicit.
 func DefaultConfig() Config {
 	return Config{
-		IdleTimeout:          2 * time.Minute,
+		IdleTimeout:          10 * time.Minute,
 		MaxMessageBytes:      64 * 1024,
 		MsgBurst:             32,
 		MsgPerSec:            16,

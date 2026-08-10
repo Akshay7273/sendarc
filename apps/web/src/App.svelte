@@ -6,6 +6,7 @@
   import type { SignalChannel } from './lib/signaling/client.js';
   import type { ReceiveDestinationSpec } from './lib/transfer/wire.js';
   import { baseUrl, loadConfig } from './lib/config.js';
+  import QrCode from './lib/QrCode.svelte';
 
   loadConfig();
   import {
@@ -324,7 +325,10 @@
           <button class="copy" onclick={() => copy(code)}>{copied ? 'Copied' : 'Copy'}</button>
         </div>
         {#if link}
-          <button class="link" onclick={() => copy(link)} title="Copy invite link">{link}</button>
+          <div class="link-row">
+            <button class="link" onclick={() => copy(link)} title="Copy invite link">{link}</button>
+            <QrCode data={link} size={120} />
+          </div>
         {/if}
       {/if}
       <p class="status" aria-live="polite">{phaseLabel(phase)}</p>

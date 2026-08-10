@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -117,7 +118,10 @@ func router(ctx context.Context, cfg Config, logger *slog.Logger) (http.Handler,
 	r.Get("/config.json", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-cache")
-		_ = json.NewEncoder(w).Encode(map[string]string{"publicUrl": cfg.PublicURL})
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"publicUrl": cfg.PublicURL,
+			"lanIp":     firstLanIP(),
+		})
 	})
 
 	// Signaling endpoint: origin-checked WebSocket rendezvous.
@@ -174,4 +178,18 @@ func env(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// firstLanIP returns the first non-loopback IPv4 address, or "" if none is found.
+func firstLanIP() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	for _, a := range addrs {
+		if ipnet, ok := a.(*net.IPNet); ok && !ipnet.IP.IsLoopback() && ipnet.IP.To4() != nil {
+			return ipnet.IP.String()
+		}
+	}
+	return ""
 }
