@@ -35,6 +35,18 @@ reproducing. `sendarc-crypto.json` and `rfc9382-p256.json` were produced once by
 original implementation; only touch them with a protocol change, and update every
 consumer test in the same change.
 
+## Validation status
+
+- **In-repo cross-language check (done, CI-gated):** the Go (nistec) and TypeScript
+  (noble-curves/WebCrypto) implementations reproduce every vector byte-identically.
+  They are two independent implementations of the same spec, but both were written by
+  the same author, so this is a consistency check, not independent validation.
+- **Independent reimplementation (open):** no third-party implementation has yet
+  reproduced these vectors. This is the remaining M7 exit criterion. Validation
+  requires no SendArc code: load the JSON files and recompute the values with your own
+  primitives (see below). If you have done this, please report it in an issue so the
+  status can be updated.
+
 ## Validating your own implementation
 
 1. Load the JSON file(s).
