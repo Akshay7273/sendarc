@@ -66,6 +66,19 @@ metadata and content. The security section below summarizes the trust boundary.
 | CLI     | Browser  | Direct WebRTC          | Encrypted relay |
 | CLI     | CLI      | Direct WebRTC via Pion | Encrypted relay |
 
+## Quickstart with Docker
+
+The public image is published to GHCR on every push to `main` (and each `v*` tag) for
+`linux/amd64` and `linux/arm64`. Run it with Docker alone:
+
+```bash
+docker run -d --name sendarc -p 8443:8443 ghcr.io/akshay7273/sendarc
+```
+
+Open `http://localhost:8443` on both peers and send your first file. Plain HTTP on
+`localhost` counts as a secure context for WebRTC; for access from other machines,
+put TLS in front — see `docs/HOSTING.md` for TLS, STUN/TURN, and relay limits.
+
 ## Run locally
 
 ### Requirements
