@@ -9,7 +9,7 @@ covers running it yourself, including TLS, STUN/TURN, and relay limits.
 Requires Docker (or any OCI-compatible runtime) and nothing else:
 
 ```sh
-docker run -d --name sendarc -p 8443:8443 ghcr.io/sendarc/sendarc
+docker run -d --name sendarc -p 8443:8443 ghcr.io/akshay7273/sendarc
 ```
 
 Then open <http://localhost:8443> and send your first file. Plain HTTP on
@@ -65,7 +65,7 @@ docker run -d --name sendarc \
   -e SENDARC_TLS_CERT=/certs/fullchain.pem \
   -e SENDARC_TLS_KEY=/certs/privkey.pem \
   -e SENDARC_ALLOWED_ORIGINS=https://example.com \
-  ghcr.io/sendarc/sendarc
+  ghcr.io/akshay7273/sendarc
 ```
 
 Minimum TLS 1.2 is enforced server-side.
@@ -82,7 +82,7 @@ example.com {
 ```sh
 docker run -d --name sendarc -p 127.0.0.1:8443:8443 \
   -e SENDARC_ALLOWED_ORIGINS=https://example.com \
-  ghcr.io/sendarc/sendarc
+  ghcr.io/akshay7273/sendarc
 ```
 
 With a proxy, set `SENDARC_ALLOWED_ORIGINS` to your public origin so the
@@ -137,7 +137,7 @@ how many transfers run.
 ## Updating
 
 ```sh
-docker pull ghcr.io/sendarc/sendarc
+docker pull ghcr.io/akshay7273/sendarc
 docker restart sendarc
 ```
 
