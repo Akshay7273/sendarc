@@ -144,5 +144,5 @@ jobs:
             sleep 1
           done
           curl -fsS http://127.0.0.1:8443/healthz | grep -q '"ok"'
-          curl -fsS http://127.0.0.1:8443/ | grep -q '<title>SendArc'
+          curl -fsS http://127.0.0.1:8443/ | grep -q '<title>SendBeam'
           curl -fsS http://127.0.0.1:8443/ | grep -q 'integrity="sha384-'
