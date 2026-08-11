@@ -5,7 +5,7 @@
  * since async iteration over a ReadableStream is not supported across all target browsers.
  */
 
-import type { FileMeta, FileSource } from '@sendarc/protocol';
+import type { FileMeta, FileSource } from '@sendbeam/protocol';
 
 const DEFAULT_CHUNK = 64 * 1024;
 

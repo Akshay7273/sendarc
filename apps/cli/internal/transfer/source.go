@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/sendarc/wire"
+	"github.com/sendbeam/wire"
 )
 
 // sourceChunkBytes is the streaming granularity when reading a file from disk. It mirrors the

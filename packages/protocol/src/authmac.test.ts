@@ -18,7 +18,7 @@ interface V {
     mac: string;
   };
 }
-const sa = loadVectors<V>('sendarc-crypto.json');
+const sa = loadVectors<V>('sendbeam-crypto.json');
 
 describe('authmac', () => {
   it('u32be encodes big-endian', () => {

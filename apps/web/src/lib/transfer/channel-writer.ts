@@ -4,7 +4,7 @@
  * watermark, flush in order when the channel signals it has drained below the low watermark.
  */
 
-import { BUFFERED_AMOUNT_HIGH, BUFFERED_AMOUNT_LOW } from '@sendarc/protocol';
+import { BUFFERED_AMOUNT_HIGH, BUFFERED_AMOUNT_LOW } from '@sendbeam/protocol';
 
 export interface ChannelLike {
   bufferedAmount: number;

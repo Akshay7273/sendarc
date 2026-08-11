@@ -1,11 +1,12 @@
 <script lang="ts">
-  import type { CapsPayload, RendezvousPhase, RendezvousResult, Role } from '@sendarc/protocol';
-  import { RendezvousError } from '@sendarc/protocol';
+  import type { CapsPayload, RendezvousPhase, RendezvousResult, Role } from '@sendbeam/protocol';
+  import { RendezvousError } from '@sendbeam/protocol';
 
   import { offer, join, type RendezvousController } from './lib/session/rendezvous.js';
   import type { SignalChannel } from './lib/signaling/client.js';
   import type { ReceiveDestinationSpec } from './lib/transfer/wire.js';
   import { baseUrl, loadConfig } from './lib/config.js';
+  import QrCode from './lib/QrCode.svelte';
 
   loadConfig();
   import {
@@ -280,7 +281,7 @@
 
 <main>
   <header>
-    <h1>SendArc</h1>
+    <h1>SendBeam</h1>
     <p class="tagline">Secure, end-to-end-encrypted, peer-to-peer file transfer.</p>
   </header>
 
@@ -324,7 +325,10 @@
           <button class="copy" onclick={() => copy(code)}>{copied ? 'Copied' : 'Copy'}</button>
         </div>
         {#if link}
-          <button class="link" onclick={() => copy(link)} title="Copy invite link">{link}</button>
+          <div class="link-row">
+            <button class="link" onclick={() => copy(link)} title="Copy invite link">{link}</button>
+            <QrCode data={link} size={120} />
+          </div>
         {/if}
       {/if}
       <p class="status" aria-live="polite">{phaseLabel(phase)}</p>

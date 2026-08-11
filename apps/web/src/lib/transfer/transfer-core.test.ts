@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { deriveTransferKeys, sha256, bytesToHex, MemorySink } from '@sendarc/protocol';
+import { deriveTransferKeys, sha256, bytesToHex, MemorySink } from '@sendbeam/protocol';
 import { runTransferCore, type TransferCoreDeps } from './transfer-core.js';
 import { blobFileSource } from './file-source.js';
 import { createSha256DigestFactory } from './digest.js';

@@ -1,4 +1,4 @@
-import type { TransferRunState } from '@sendarc/protocol';
+import type { TransferRunState } from '@sendbeam/protocol';
 
 export interface TransferSnapshot {
   bytes: number;

@@ -6,7 +6,7 @@
  */
 
 /** Protocol version string, embedded in the handshake transcript and caps. */
-export const PROTOCOL_VERSION = 'sendarc/1';
+export const PROTOCOL_VERSION = 'sendbeam/1';
 
 /**
  * Invite code (e.g. `4-brave-otter`). The room number is server-allocated and routes
@@ -59,15 +59,15 @@ export const AEAD_SALT_BYTES = 4;
 
 /**
  * SPAKE2 (RFC 9382, P-256) domain separation. `CONFIRMATION_KEYS_INFO` is fixed by the
- * RFC (§4) and MUST NOT change. The `sendarc/1 …` labels are SendArc's own key schedule
+ * RFC (§4) and MUST NOT change. The `sendbeam/1 …` labels are SendBeam's own key schedule
  * layered on top of the RFC's `Ke` output.
  */
 export const HKDF_INFO = {
-  /** Maps the invite code to the SPAKE2 password scalar w (SendArc-specific). */
+  /** Maps the invite code to the SPAKE2 password scalar w (SendBeam-specific). */
   spake2W: `${PROTOCOL_VERSION} spake2 w`,
   /** RFC 9382 §4: KcA || KcB = HKDF(Ka, nil, "ConfirmationKeys", 32). Do not change. */
   confirmationKeys: 'ConfirmationKeys',
-  /** SendArc master key from the RFC `Ke` output, bound to the transcript. */
+  /** SendBeam master key from the RFC `Ke` output, bound to the transcript. */
   master: `${PROTOCOL_VERSION} master`,
   /** Directional transfer keys derived from the master key. */
   dirOffererToJoiner: `${PROTOCOL_VERSION} o2j`,

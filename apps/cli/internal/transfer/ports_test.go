@@ -7,14 +7,14 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sendarc/wire"
+	"github.com/sendbeam/wire"
 )
 
 func TestOSFileSourceMetaAndStream(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "greeting.txt")
 	// Larger than sourceChunkBytes so Stream must loop and reassemble across reads.
-	content := bytes.Repeat([]byte("sendarc-"), 20000) // 160000 bytes
+	content := bytes.Repeat([]byte("sendbeam-"), 20000) // 160000 bytes
 	if err := os.WriteFile(path, content, 0o644); err != nil {
 		t.Fatal(err)
 	}

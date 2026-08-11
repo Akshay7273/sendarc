@@ -8,13 +8,13 @@ import (
 	"sync"
 
 	"github.com/pion/webrtc/v4"
-	"github.com/sendarc/cli/internal/rendezvous"
-	"github.com/sendarc/wire"
+	"github.com/sendbeam/cli/internal/rendezvous"
+	"github.com/sendbeam/wire"
 )
 
 // This file brings up the WebRTC DataChannel between two paired CLI peers over the
 // already-authenticated signaling channel. It is the Go twin of
-// apps/web/src/lib/transfer/peer.ts: the offerer creates the "sendarc" channel and the offer,
+// apps/web/src/lib/transfer/peer.ts: the offerer creates the "sendbeam" channel and the offer,
 // the joiner answers, and both trickle ICE. Every SDP/ICE frame is signed and verified with the
 // SPAKE2 key (see [SignalAuthenticator]); an unverifiable frame is dropped, so a malicious
 // signaling server can pair sockets but can neither inject a peer nor tamper with the
@@ -108,7 +108,7 @@ func NewPeer(opts PeerOptions) (*Peer, error) {
 	})
 
 	if opts.Role == wire.RoleOfferer {
-		ch, err := pc.CreateDataChannel("sendarc", &webrtc.DataChannelInit{Ordered: boolPtr(true)})
+		ch, err := pc.CreateDataChannel("sendbeam", &webrtc.DataChannelInit{Ordered: boolPtr(true)})
 		if err != nil {
 			_ = pc.Close()
 			return nil, fmt.Errorf("rtc: create data channel: %w", err)

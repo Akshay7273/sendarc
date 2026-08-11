@@ -1,4 +1,4 @@
-module github.com/sendarc/server
+module github.com/sendbeam/server
 
 go 1.24
 

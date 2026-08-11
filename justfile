@@ -27,7 +27,7 @@ dev: certs
     set -uo pipefail
     ( cd apps/web && pnpm dev ) &
     WEB_PID=$!
-    ( cd apps/server && SENDARC_TLS_CERT="{{CERT_DIR}}/localhost.pem" SENDARC_TLS_KEY="{{CERT_DIR}}/localhost-key.pem" SENDARC_WEB_DEV_PROXY="http://localhost:5173" go run ./cmd/sendarcd ) &
+    ( cd apps/server && SENDARC_TLS_CERT="{{CERT_DIR}}/localhost.pem" SENDARC_TLS_KEY="{{CERT_DIR}}/localhost-key.pem" SENDARC_WEB_DEV_PROXY="http://localhost:5173" go run ./cmd/sendbeamd ) &
     SRV_PID=$!
     trap "kill $WEB_PID $SRV_PID 2>/dev/null" EXIT INT TERM
     wait
@@ -35,15 +35,15 @@ dev: certs
 # Build the web bundle and the Go server binary
 build:
     pnpm -r build
-    cd apps/server && go build -o ../../bin/sendarcd ./cmd/sendarcd
+    cd apps/server && go build -o ../../bin/sendbeamd ./cmd/sendbeamd
 
-# Build and install the CLI into ~/.local/bin (on PATH), so it runs as `sendarc`
+# Build and install the CLI into ~/.local/bin (on PATH), so it runs as `sendbeam`
 install-cli:
-    go build -o ~/.local/bin/sendarc ./apps/cli/cmd/sendarc
+    go build -o ~/.local/bin/sendbeam ./apps/cli/cmd/sendbeam
 
 # Run the production-style server (serves the built web bundle over TLS)
 serve: build certs
-    cd apps/server && SENDARC_TLS_CERT="{{CERT_DIR}}/localhost.pem" SENDARC_TLS_KEY="{{CERT_DIR}}/localhost-key.pem" SENDARC_WEB_DIR="../web/dist" go run ./cmd/sendarcd
+    cd apps/server && SENDARC_TLS_CERT="{{CERT_DIR}}/localhost.pem" SENDARC_TLS_KEY="{{CERT_DIR}}/localhost-key.pem" SENDARC_WEB_DIR="../web/dist" go run ./cmd/sendbeamd
 
 # Lint everything
 lint:

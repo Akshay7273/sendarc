@@ -1,4 +1,4 @@
-module github.com/sendarc/wire
+module github.com/sendbeam/wire
 
 go 1.24.0
 

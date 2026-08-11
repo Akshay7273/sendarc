@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	clitransfer "github.com/sendarc/cli/internal/transfer"
-	"github.com/sendarc/wire"
+	clitransfer "github.com/sendbeam/cli/internal/transfer"
+	"github.com/sendbeam/wire"
 )
 
 type progressSample struct {

@@ -38,7 +38,7 @@ function bareName(url: string): string {
 /** Vite plugin: add SRI to every local script and stylesheet in the built HTML. */
 export function viteSri(): Plugin {
   return {
-    name: 'sendarc-sri',
+    name: 'sendbeam-sri',
     apply: 'build',
     enforce: 'post',
     transformIndexHtml: {

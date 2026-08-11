@@ -1,6 +1,6 @@
 # Compatibility matrix
 
-Scope: how SendArc behaves across NAT topologies, degraded networks, and browsers — on
+Scope: how SendBeam behaves across NAT topologies, degraded networks, and browsers — on
 both the direct WebRTC path and the WebSocket relay path. The network data comes from the
 NAT lab (`apps/cli/cmd/natlab`), which builds five Linux network namespaces — two peer
 hosts, two userspace NAT boxes, and a public segment with the signaling/relay server and a
@@ -33,11 +33,11 @@ All rows end with the receiver's recomputed SHA-256 matching the sender's (diges
 ```sh
 cd apps/cli
 go build -o ../../bin/natlab ./cmd/natlab
-go build -o ../../bin/sendarcd ../server/cmd/sendarcd
+go build -o ../../bin/sendbeamd ../server/cmd/sendbeamd
 # All NAT combos, no degradation:
-sudo unshare -Urnm ../../bin/natlab -server-bin ../../bin/sendarcd
+sudo unshare -Urnm ../../bin/natlab -server-bin ../../bin/sendbeamd
 # Degraded networks (loss / delay / bandwidth cap), direct + relay:
-sudo unshare -Urnm ../../bin/natlab -server-bin ../../bin/sendarcd \
+sudo unshare -Urnm ../../bin/natlab -server-bin ../../bin/sendbeamd \
   -combos full-cone/full-cone,symmetric/symmetric -netem "loss 3%"
 ```
 
@@ -47,7 +47,7 @@ Profiles: `loss 3%`, `delay 50ms`, `rate 10mbit`.
 
 ## Browser compatibility
 
-SendArc targets evergreen desktop browsers. The browser E2E suite (Playwright) runs in CI
+SendBeam targets evergreen desktop browsers. The browser E2E suite (Playwright) runs in CI
 on every change and round-trips a 100 MiB file both ways through the real server; WebKit
 is opt-in locally and not part of CI.
 

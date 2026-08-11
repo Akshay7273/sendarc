@@ -7,7 +7,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/sendarc/cli/internal/rendezvous"
+	"github.com/sendbeam/cli/internal/rendezvous"
 )
 
 const (

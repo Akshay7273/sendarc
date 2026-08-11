@@ -1,4 +1,4 @@
-import type { SignalMsg } from '@sendarc/protocol';
+import type { SignalMsg } from '@sendbeam/protocol';
 import type { SignalChannel } from '../signaling/client.js';
 
 const WINDOW_BYTES = 1024 * 1024;
