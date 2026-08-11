@@ -1,4 +1,4 @@
-// Package rendezvous drives one CLI peer through the SendArc handshake over the blind
+// Package rendezvous drives one CLI peer through the SendBeam handshake over the blind
 // signaling channel: create/join → peer-joined → pake → confirm → an
 // AEAD-sealed caps round-trip, ending with a shared master key and both directional
 // transfer keys.
@@ -40,7 +40,7 @@ const (
 	TypeCredit        = "credit"
 )
 
-// Message is the SendArc signaling envelope. One flat struct covers every message type;
+// Message is the SendBeam signaling envelope. One flat struct covers every message type;
 // the fields used depend on Type, and omitempty keeps each serialized frame minimal and
 // byte-compatible with the TypeScript union in signaling.ts. The word code is never a
 // field here — only the SPAKE2 share, the confirmation MAC, and the sealed caps travel.

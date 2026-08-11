@@ -1,8 +1,8 @@
 /**
- * SendArc key schedule — derives the transfer keys from the SPAKE2 output.
+ * SendBeam key schedule — derives the transfer keys from the SPAKE2 output.
  *
  * RFC 9382 yields `Ke` (a shared secret) and the confirmation MACs. On top of that,
- * SendArc derives a transcript-bound master key and two directional AEAD keys (one per
+ * SendBeam derives a transcript-bound master key and two directional AEAD keys (one per
  * flow direction), each with a 4-byte nonce salt. All derivations use HKDF-SHA256 via
  * native WebCrypto, mirrored byte-for-byte by Go stdlib in `packages/wire`.
  */
@@ -27,7 +27,7 @@ export interface TransferKeys {
 
 /**
  * Master key, bound to the full handshake transcript so any tampering that survived key
- * confirmation still changes every downstream key: `HKDF(Ke, "sendarc/1 master" || TT)`.
+ * confirmation still changes every downstream key: `HKDF(Ke, "sendbeam/1 master" || TT)`.
  */
 export function deriveMaster(Ke: Uint8Array, transcript: Uint8Array): Promise<Uint8Array> {
   return hkdfSha256(

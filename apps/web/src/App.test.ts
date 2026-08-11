@@ -114,7 +114,7 @@ describe('App transfer completion', () => {
     handshake.resolve({
       master: new Uint8Array(32),
       remoteCaps: {
-        version: 'sendarc/1',
+        version: 'sendbeam/1',
         maxFrame: 16 * 1024,
         blockSize: 1024 * 1024,
         features: [],

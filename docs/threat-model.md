@@ -1,6 +1,6 @@
 # Threat model
 
-Scope: SendArc transfers a file directly between two peers (browser or terminal). This
+Scope: SendBeam transfers a file directly between two peers (browser or terminal). This
 document states what we defend against, what we deliberately do not, and why. The wire
 protocol it refers to is specified in [`protocol.md`](./protocol.md).
 

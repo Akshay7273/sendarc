@@ -47,7 +47,7 @@ func TestSignSignalVector(t *testing.T) {
 			MAC      string `json:"mac"`
 		} `json:"authmac"`
 	}
-	loadVectors(t, "sendarc-crypto.json", &doc)
+	loadVectors(t, "sendbeam-crypto.json", &doc)
 	v := doc.AuthMAC
 	kAuth := mustHex(t, v.KAuthHex)
 

@@ -14,7 +14,7 @@ type TransferKeys struct {
 
 // DeriveMaster derives the master key, bound to the full handshake transcript so any
 // tampering that survived key confirmation still changes every downstream key:
-// HKDF(Ke, "sendarc/1 master" || TT).
+// HKDF(Ke, "sendbeam/1 master" || TT).
 func DeriveMaster(ke, transcript []byte) ([]byte, error) {
 	info := append([]byte(infoMaster), transcript...)
 	return hkdfSHA256(ke, nil, info, aeadKeyBytes)

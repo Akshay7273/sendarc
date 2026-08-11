@@ -41,10 +41,10 @@ func TestMetricsHandlerRendersPrometheusText(t *testing.T) {
 	}
 	body := rec.Body.String()
 	for _, want := range []string{
-		"# TYPE sendarc_rooms gauge",
-		"sendarc_rooms 0",
-		"sendarc_relay_bytes_total 0",
-		`sendarc_errors_total{code="room_full"} 1`,
+		"# TYPE sendbeam_rooms gauge",
+		"sendbeam_rooms 0",
+		"sendbeam_relay_bytes_total 0",
+		`sendbeam_errors_total{code="room_full"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body missing %q:\n%s", want, body)

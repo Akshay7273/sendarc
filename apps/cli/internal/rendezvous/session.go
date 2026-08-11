@@ -8,7 +8,7 @@ import (
 	"math/big"
 	"sync"
 
-	"github.com/sendarc/wire"
+	"github.com/sendbeam/wire"
 )
 
 // Phase is where a session is in the handshake. It advances monotonically until

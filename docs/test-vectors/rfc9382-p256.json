@@ -1,6 +1,6 @@
 {
   "source": "RFC 9382, Appendix B — SPAKE2-P256-SHA256-HKDF-HMAC",
-  "note": "Canonical SPAKE2 known-answer vectors. All hex is unprefixed. Points are uncompressed SEC1 (0x04 prefix). w/x/y are big-endian scalars. Loaded byte-for-byte by both the TypeScript (@sendarc/protocol) and Go (packages/wire) test suites.",
+  "note": "Canonical SPAKE2 known-answer vectors. All hex is unprefixed. Points are uncompressed SEC1 (0x04 prefix). w/x/y are big-endian scalars. Loaded byte-for-byte by both the TypeScript (@sendbeam/protocol) and Go (packages/wire) test suites.",
   "M": "02886e2f97ace46e55ba9dd7242579f2993b64e16ef3dcab95afd497333d8fa12f",
   "N": "03d8bbd6c639c62937b04d997f38c3770719c629d7014d49a24b4f98baa1292b49",
   "vectors": [

@@ -1,5 +1,5 @@
 /**
- * @sendarc/protocol — shared wire contract for the SendArc secure file-transfer app.
+ * @sendbeam/protocol — shared wire contract for the SendBeam secure file-transfer app.
  * Imported by the web client and TS tests; mirrored by the Go server, CLI, and the
  * `packages/wire` module.
  */

@@ -1,13 +1,13 @@
 /**
  * SPAKE2 over NIST P-256 (RFC 9382), the ciphersuite SPAKE2-P256-SHA256-HKDF-HMAC.
  *
- * SendArc uses SPAKE2 to turn a short invite code into a mutually authenticated key
+ * SendBeam uses SPAKE2 to turn a short invite code into a mutually authenticated key
  * without revealing the code to the blind server. Only the elliptic-curve point
  * arithmetic uses `@noble/curves`; the hash, KDF and MAC use native WebCrypto (mirrored
  * by Go stdlib in `packages/wire`), so the two implementations stay byte-identical —
  * verified against the RFC 9382 Appendix B vectors.
  *
- * Role mapping: the SendArc offerer plays RFC party "A" (seed point M); the joiner
+ * Role mapping: the SendBeam offerer plays RFC party "A" (seed point M); the joiner
  * plays party "B" (seed point N).
  */
 
@@ -27,7 +27,7 @@ const ORDER = Point.Fn.ORDER;
 const M = Point.fromHex('02886e2f97ace46e55ba9dd7242579f2993b64e16ef3dcab95afd497333d8fa12f');
 const N = Point.fromHex('03d8bbd6c639c62937b04d997f38c3770719c629d7014d49a24b4f98baa1292b49');
 
-/** The RFC transcript identity strings SendArc binds into every handshake. */
+/** The RFC transcript identity strings SendBeam binds into every handshake. */
 export const IDENTITY_OFFERER = utf8(`${PROTOCOL_VERSION} offerer`);
 export const IDENTITY_JOINER = utf8(`${PROTOCOL_VERSION} joiner`);
 
@@ -56,7 +56,7 @@ export function randomScalar(): bigint {
 }
 
 /**
- * Map a normalized invite code to the SPAKE2 password scalar w. SendArc-specific
+ * Map a normalized invite code to the SPAKE2 password scalar w. SendBeam-specific
  * (RFC 9382 leaves the password mapping to the application): w is derived by HKDF over
  * the UTF-8 code, then reduced mod n. 48 bytes before reduction leaves negligible bias.
  */
@@ -87,7 +87,7 @@ export interface Spake2Output {
   readonly K: Uint8Array;
   /** RFC transcript TT — the input to the hash and both confirmation MACs. */
   readonly transcript: Uint8Array;
-  /** Shared secret Ke = Hash(TT)[0:16] — the input to SendArc's key schedule. */
+  /** Shared secret Ke = Hash(TT)[0:16] — the input to SendBeam's key schedule. */
   readonly Ke: Uint8Array;
   /** Confirmation-key material Ka = Hash(TT)[16:32]. */
   readonly Ka: Uint8Array;
@@ -104,7 +104,7 @@ export interface Spake2Output {
 /**
  * Finish the exchange from this role's secret and the peer's share element. Recovers
  * the shared point K, assembles the RFC transcript, and derives Ke/Ka and both
- * confirmation MACs. `w` must be reduced-safe; identities default to SendArc's.
+ * confirmation MACs. `w` must be reduced-safe; identities default to SendBeam's.
  */
 export async function finish(
   role: Role,

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sendarc/cli/internal/rendezvous"
-	"github.com/sendarc/wire"
+	"github.com/sendbeam/cli/internal/rendezvous"
+	"github.com/sendbeam/wire"
 )
 
 const testRoom = 42

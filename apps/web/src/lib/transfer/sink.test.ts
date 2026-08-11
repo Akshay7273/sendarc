@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { FrameType, type Manifest } from '@sendarc/protocol';
+import { FrameType, type Manifest } from '@sendbeam/protocol';
 import {
   ArchiveDestination,
   createBrowserDestination,
@@ -104,7 +104,7 @@ describe('browser destinations', () => {
     expect(Math.max(...writable.writes)).toBeLessThan(writable.bytes.length);
     expect(destination.result()).toMatchObject({ kind: 'opfs', name: 'folder.zip' });
 
-    const dir = mkdtempSync(join(tmpdir(), 'sendarc-zip-test-'));
+    const dir = mkdtempSync(join(tmpdir(), 'sendbeam-zip-test-'));
     try {
       const path = join(dir, 'folder.zip');
       writeFileSync(path, writable.bytes);

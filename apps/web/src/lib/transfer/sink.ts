@@ -5,7 +5,7 @@ import {
   type FileEntry,
   type Manifest,
   type Sink,
-} from '@sendarc/protocol';
+} from '@sendbeam/protocol';
 import { streamSink, type WritableFileLike } from './stream-sink.js';
 import type { ReceiveDestinationSpec } from './wire.js';
 
@@ -154,7 +154,7 @@ export class ArchiveDestination implements BrowserDestination {
   private root: FileSystemDirectoryHandle | undefined;
   private writable: WritableFileLike | undefined;
   private key = '';
-  private name = 'sendarc-files.zip';
+  private name = 'sendbeam-files.zip';
   private position = 0;
   private readonly entries: ZipEntry[] = [];
   private active: ArchiveEntrySink | undefined;
@@ -262,7 +262,7 @@ async function ensureQuota(required: number): Promise<void> {
 
 function uniqueKey(name: string): string {
   const base = name.replace(/^.*\//, '').replace(/[^\p{L}\p{N}._-]+/gu, '_') || 'download';
-  return `sendarc-${crypto.randomUUID()}-${base}`;
+  return `sendbeam-${crypto.randomUUID()}-${base}`;
 }
 
 /**

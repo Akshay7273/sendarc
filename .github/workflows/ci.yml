@@ -32,7 +32,7 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Build protocol package
-        run: pnpm --filter @sendarc/protocol build
+        run: pnpm --filter @sendbeam/protocol build
 
       - name: Check formatting
         run: pnpm run format:check
@@ -72,13 +72,13 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Build protocol package
-        run: pnpm --filter @sendarc/protocol build
+        run: pnpm --filter @sendbeam/protocol build
 
       - name: Install Playwright browsers
-        run: pnpm --filter @sendarc/web exec playwright install --with-deps chromium firefox
+        run: pnpm --filter @sendbeam/web exec playwright install --with-deps chromium firefox
 
       - name: Run e2e
-        run: pnpm --filter @sendarc/web e2e
+        run: pnpm --filter @sendbeam/web e2e
 
       - name: Upload failure traces
         if: failure()
@@ -133,16 +133,16 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build image
-        run: docker build -t sendarc .
+        run: docker build -t sendbeam .
 
       - name: Smoke test
         run: |
-          docker run -d --name sendarc-smoke -p 127.0.0.1:8443:8443 sendarc
-          trap 'docker rm -f sendarc-smoke >/dev/null 2>&1' EXIT
+          docker run -d --name sendbeam-smoke -p 127.0.0.1:8443:8443 sendbeam
+          trap 'docker rm -f sendbeam-smoke >/dev/null 2>&1' EXIT
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8443/healthz >/dev/null; then break; fi
             sleep 1
           done
           curl -fsS http://127.0.0.1:8443/healthz | grep -q '"ok"'
-          curl -fsS http://127.0.0.1:8443/ | grep -q '<title>SendArc'
+          curl -fsS http://127.0.0.1:8443/ | grep -q '<title>SendBeam'
           curl -fsS http://127.0.0.1:8443/ | grep -q 'integrity="sha384-'

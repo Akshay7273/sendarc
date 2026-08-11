@@ -8,7 +8,7 @@ import (
 )
 
 func TestKeyScheduleSendarcVector(t *testing.T) {
-	sa := loadSendarc(t)
+	sa := loadSendBeam(t)
 	ks := sa.Keyschedule
 
 	master, err := DeriveMaster(mustHex(t, sa.Spake2.Ke), mustHex(t, sa.Spake2.Transcript))
@@ -30,7 +30,7 @@ func TestKeyScheduleSendarcVector(t *testing.T) {
 }
 
 func TestAeadSealMatchesSendarcVector(t *testing.T) {
-	sa := loadSendarc(t)
+	sa := loadSendBeam(t)
 	if sa.Aead.Direction != "o2j" {
 		t.Fatalf("vector direction %q, expected o2j", sa.Aead.Direction)
 	}

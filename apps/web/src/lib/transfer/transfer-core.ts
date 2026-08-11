@@ -17,7 +17,7 @@ import {
   type FileEntry,
   type FileSource,
   type Sink,
-} from '@sendarc/protocol';
+} from '@sendbeam/protocol';
 import type {
   DuplexPort,
   HostToWorker,

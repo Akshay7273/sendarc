@@ -5,7 +5,7 @@
  * this protocol are exercised end-to-end by the Node loopback test, so the shapes are the contract.
  */
 
-import type { ControlOp, DirectionalKey, TransferRunState } from '@sendarc/protocol';
+import type { ControlOp, DirectionalKey, TransferRunState } from '@sendbeam/protocol';
 
 /** Session crypto state handed to the worker at start — counters continue, never reset. */
 export interface SessionCrypto {

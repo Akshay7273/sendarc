@@ -1,9 +1,9 @@
-// Command sendarc is the terminal client for SendArc. It authenticates through the blind
+// Command sendbeam is the terminal client for SendBeam. It authenticates through the blind
 // rendezvous server, then negotiates an end-to-end-encrypted direct or relayed
 // file transfer:
 //
-//	sendarc send <file>     # allocate a room, print the invite code + link, send the file
-//	sendarc receive <code>  # join with a code (or a pasted invite link), receive the file
+//	sendbeam send <file>     # allocate a room, print the invite code + link, send the file
+//	sendbeam receive <code>  # join with a code (or a pasted invite link), receive the file
 //
 // Both ends run SPAKE2 over the invite code, confirm the key (failing closed on a
 // mismatch), exchange sealed capabilities, then prefer an authenticated WebRTC channel
@@ -22,10 +22,10 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/sendarc/cli/internal/rendezvous"
-	"github.com/sendarc/cli/internal/transfer"
-	"github.com/sendarc/cli/internal/wsclient"
-	"github.com/sendarc/wire"
+	"github.com/sendbeam/cli/internal/rendezvous"
+	"github.com/sendbeam/cli/internal/transfer"
+	"github.com/sendbeam/cli/internal/wsclient"
+	"github.com/sendbeam/wire"
 
 	"github.com/pion/webrtc/v4"
 )
@@ -46,18 +46,18 @@ func main() {
 		usage(os.Stdout)
 		os.Exit(0)
 	default:
-		fmt.Fprintf(os.Stderr, "sendarc: unknown command %q\n\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "sendbeam: unknown command %q\n\n", os.Args[1])
 		usage(os.Stderr)
 		os.Exit(2)
 	}
 }
 
 func usage(w *os.File) {
-	_, _ = fmt.Fprint(w, `sendarc — secure peer-to-peer file transfer
+	_, _ = fmt.Fprint(w, `sendbeam — secure peer-to-peer file transfer
 
 Usage:
-  sendarc send <file-or-folder>... [flags]
-  sendarc receive <code|link> [flags]
+  sendbeam send <file-or-folder>... [flags]
+  sendbeam receive <code|link> [flags]
 
 Flags:
   --server URL             signaling server (default `+defaultServer+`)
@@ -80,12 +80,12 @@ func runSend(args []string) int {
 	positionals := parseArgs(fs, args)
 
 	if len(positionals) == 0 {
-		fmt.Fprintln(os.Stderr, "sendarc send: a file to send is required")
+		fmt.Fprintln(os.Stderr, "sendbeam send: a file to send is required")
 		return 2
 	}
 	sources, totalSize, err := transfer.NewOSFileSources(positionals)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "sendarc send: %s\n", err)
+		fmt.Fprintf(os.Stderr, "sendbeam send: %s\n", err)
 		return 1
 	}
 	progressFiles := make([]progressFile, len(sources))
@@ -159,11 +159,11 @@ func runReceive(args []string) int {
 		code = normalizeCodeArg(positionals[0])
 	}
 	if code == "" {
-		fmt.Fprintln(os.Stderr, "sendarc receive: an invite code (or link) is required")
+		fmt.Fprintln(os.Stderr, "sendbeam receive: an invite code (or link) is required")
 		return 2
 	}
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "sendarc receive: %s\n", err)
+		fmt.Fprintf(os.Stderr, "sendbeam receive: %s\n", err)
 		return 1
 	}
 
@@ -332,7 +332,7 @@ func errorsAs(err error, target **rendezvous.Error) bool {
 // raw key bytes are exposed) truncated to 32 bits and shown as two hex groups. Both peers
 // derive the same value, giving the humans an out-of-band check on top of SPAKE2.
 func fingerprint(master []byte) string {
-	sum := sha256.Sum256(append([]byte("sendarc/sas\x00"), master...))
+	sum := sha256.Sum256(append([]byte("sendbeam/sas\x00"), master...))
 	return fmt.Sprintf("%02x%02x %02x%02x", sum[0], sum[1], sum[2], sum[3])
 }
 

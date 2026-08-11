@@ -63,7 +63,7 @@ describe('length prefixing (RFC 9382 transcript encoding)', () => {
 
 describe('base64url', () => {
   it('round-trips without padding characters', () => {
-    const b = utf8('sendarc/1 offerer');
+    const b = utf8('sendbeam/1 offerer');
     const encoded = bytesToBase64url(b);
     expect(encoded).not.toContain('=');
     expect(encoded).not.toContain('+');
