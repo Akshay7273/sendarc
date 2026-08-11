@@ -136,7 +136,7 @@ pump:
 
 	digest := sha256.Sum256(data)
 	doc := TransferVector{
-		Description: "Full sendarc/1 transfer vector produced by the Go transfer engine " +
+		Description: "Full sendbeam/1 transfer vector produced by the Go transfer engine " +
 			"(packages/wire). Replay the s2r frames into any receiver implementation and " +
 			"expect the recorded r2s replies and the canonical SHA-256 below.",
 		Master:    hex.EncodeToString(master),

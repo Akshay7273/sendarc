@@ -15,7 +15,7 @@ import {
   type Role,
   type SdpMsg,
   type Spake2Output,
-} from '@sendarc/protocol';
+} from '@sendbeam/protocol';
 
 export interface AuthKeyPair {
   sign: Uint8Array;

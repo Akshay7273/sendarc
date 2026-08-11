@@ -68,7 +68,7 @@ export interface RendezvousResult {
   readonly room: number;
   /** The full normalized invite code (`<room>-<words>`); the SPAKE2 password. */
   readonly code: string;
-  /** SendArc master key, bound to the handshake transcript. */
+  /** SendBeam master key, bound to the handshake transcript. */
   readonly master: Uint8Array;
   /** Both directional AEAD keys + nonce salts. */
   readonly keys: TransferKeys;

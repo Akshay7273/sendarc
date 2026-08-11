@@ -8,7 +8,7 @@
  * Browser-only (needs `RTCPeerConnection`); not unit-tested — exercised by the e2e transfer.
  */
 
-import type { IceMsg, Role, SdpMsg } from '@sendarc/protocol';
+import type { IceMsg, Role, SdpMsg } from '@sendbeam/protocol';
 import type { SignalAuthenticator } from './authed-signaling.js';
 
 /** A public STUN server is sufficient for the common NAT case. */
@@ -104,7 +104,7 @@ export function createPeer(opts: CreatePeerOptions): Peer {
   };
 
   if (opts.role === 'offerer') {
-    wireChannel(pc.createDataChannel('sendarc', { ordered: true }));
+    wireChannel(pc.createDataChannel('sendbeam', { ordered: true }));
     void (async () => {
       try {
         const offer = await pc.createOffer();

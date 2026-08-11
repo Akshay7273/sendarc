@@ -1,11 +1,11 @@
-module github.com/sendarc/cli
+module github.com/sendbeam/cli
 
 go 1.25.0
 
 require (
 	github.com/coder/websocket v1.8.15
 	github.com/pion/webrtc/v4 v4.2.18
-	github.com/sendarc/wire v0.0.0
+	github.com/sendbeam/wire v0.0.0
 )
 
 require (
@@ -35,4 +35,4 @@ require (
 
 // The wire crypto core is a sibling module in this repo. A local replace keeps it resolvable
 // both under the go.work workspace and in standalone module builds (as CI runs each module).
-replace github.com/sendarc/wire => ../../packages/wire
+replace github.com/sendbeam/wire => ../../packages/wire

@@ -12,7 +12,7 @@ import {
   utf8,
   type CapsPayload,
   type RendezvousPhase,
-} from '@sendarc/protocol';
+} from '@sendbeam/protocol';
 
 /** The minimal shape describeError reads — satisfied by a RendezvousError instance. */
 export interface ErrorLike {
@@ -43,7 +43,7 @@ export function phaseLabel(p: RendezvousPhase): string {
  * can read the same value to each other as an out-of-band check on top of SPAKE2.
  */
 export async function sasFingerprint(master: Uint8Array): Promise<string> {
-  const digest = await sha256(concatBytes(utf8('sendarc/sas\0'), master));
+  const digest = await sha256(concatBytes(utf8('sendbeam/sas\0'), master));
   const hex = bytesToHex(digest.subarray(0, 4));
   return `${hex.slice(0, 4)} ${hex.slice(4, 8)}`;
 }

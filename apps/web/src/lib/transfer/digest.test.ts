@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sha256, bytesToHex } from '@sendarc/protocol';
+import { sha256, bytesToHex } from '@sendbeam/protocol';
 import { createSha256DigestFactory } from './digest.js';
 
 /** Reference digest via WebCrypto (available in node 22 and browsers) — an independent impl. */

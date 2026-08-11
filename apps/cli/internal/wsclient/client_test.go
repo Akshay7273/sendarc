@@ -13,11 +13,11 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/sendarc/cli/internal/rendezvous"
-	"github.com/sendarc/cli/internal/wsclient"
+	"github.com/sendbeam/cli/internal/rendezvous"
+	"github.com/sendbeam/cli/internal/wsclient"
 )
 
-// blindHub is a minimal stand-in for the SendArc signaling server, enough to drive one
+// blindHub is a minimal stand-in for the SendBeam signaling server, enough to drive one
 // two-peer handshake over a real WebSocket. It allocates a room on create, pairs the peers
 // on join, and forwards every subsequent frame to the other peer verbatim — it never parses
 // pake/confirm/caps, mirroring the real server's blindness. It exists so this package can be

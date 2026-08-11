@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/sendarc/cli/internal/rendezvous"
-	"github.com/sendarc/wire"
+	"github.com/sendbeam/cli/internal/rendezvous"
+	"github.com/sendbeam/wire"
 )
 
 // SignalAuthenticator signs one peer's outbound sdp/ice messages and verifies the peer's

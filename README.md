@@ -1,16 +1,16 @@
-# SendArc
+# SendBeam
 
 **Encrypted peer-to-peer file transfer for the browser and the terminal. No accounts, no uploads, no server-side storage.**
 
-[![CI](https://github.com/Akshay7273/sendarc/actions/workflows/ci.yml/badge.svg)](https://github.com/Akshay7273/sendarc/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Akshay7273/sendarc/blob/main/LICENSE)
-[![Image](https://img.shields.io/badge/image-ghcr.io%2Fakshay7273%2Fsendarc-blue.svg)](https://github.com/Akshay7273/sendarc/pkgs/container/sendarc)
+[![CI](https://github.com/Akshay7273/sendbeam/actions/workflows/ci.yml/badge.svg)](https://github.com/Akshay7273/sendbeam/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Akshay7273/sendbeam/blob/main/LICENSE)
+[![Image](https://img.shields.io/badge/image-ghcr.io%2Fakshay7273%2Fsendarc-blue.svg)](https://github.com/Akshay7273/sendbeam/pkgs/container/sendarc)
 
 [Quick start](#quick-start) · [CLI](#cli) · [Self-hosting](#self-hosting) · [Security](#security) · [Documentation](#documentation) · [Development](#development)
 
 ## About
 
-SendArc is an open-source, end-to-end-encrypted file transfer application for the browser
+SendBeam is an open-source, end-to-end-encrypted file transfer application for the browser
 and the command line. Files stream directly between two peers over WebRTC; a blind
 rendezvous server negotiates the connection and never stores, inspects, or decrypts file
 data. When a direct path is blocked by a restrictive NAT, an encrypted relay on the server
@@ -25,10 +25,10 @@ The design is documented in the [protocol specification](docs/protocol.md) and t
 
 ## Quick start
 
-The easiest way to try SendArc is the public container image — no toolchain required:
+The easiest way to try SendBeam is the public container image — no toolchain required:
 
 ```bash
-docker run -d --name sendarc -p 8443:8443 ghcr.io/akshay7273/sendarc
+docker run -d --name sendbeam -p 8443:8443 ghcr.io/akshay7273/sendbeam
 ```
 
 Open `http://localhost:8443` in two browser tabs, create a room, and share the link (or
@@ -57,8 +57,8 @@ Install with the project's task runner, or build from source:
 
 ```bash
 just install-cli                      # installs sendarc into ~/.local/bin
-git clone https://github.com/Akshay7273/sendarc.git && cd sendarc
-go build -o ~/.local/bin/sendarc ./apps/cli/cmd/sendarc
+git clone https://github.com/Akshay7273/sendbeam.git && cd sendarc
+go build -o ~/.local/bin/sendarc ./apps/cli/cmd/sendbeam
 ```
 
 Then send and receive with short, plain commands:
@@ -77,8 +77,8 @@ Prefer your own infrastructure? The single container runs the web app, the signa
 endpoint, and the encrypted relay from one port — for `linux/amd64` and `linux/arm64`:
 
 ```bash
-docker pull ghcr.io/akshay7273/sendarc
-docker run -d --name sendarc -p 8443:8443 ghcr.io/akshay7273/sendarc
+docker pull ghcr.io/akshay7273/sendbeam
+docker run -d --name sendbeam -p 8443:8443 ghcr.io/akshay7273/sendbeam
 ```
 
 The image rebuilds on every push to `main` and on each `v*` tag. Configuration, TLS, STUN,
@@ -87,7 +87,7 @@ relay limits, and a `/metrics` endpoint in Prometheus format are covered in
 
 ## Security
 
-SendArc treats the rendezvous server and the network as untrusted for confidentiality and
+SendBeam treats the rendezvous server and the network as untrusted for confidentiality and
 integrity. Peers authenticate with SPAKE2 (RFC 9382) keyed by the invite code — a wrong code
 fails closed, and the server cannot offline-guess it or undetectably intercept the
 handshake. Files are encrypted with AES-256-GCM under per-direction monotonic nonces, on
@@ -99,7 +99,7 @@ Full analysis, accepted limitations, and the trust boundary are in the
 [docs/test-vectors/](docs/test-vectors/), and dependency audits run in CI.
 
 > [!NOTE]
-> SendArc is pre-release software without a stable release or an independent security
+> SendBeam is pre-release software without a stable release or an independent security
 > audit. Do not use it for irreplaceable or highly sensitive data.
 
 ## Documentation
@@ -136,7 +136,7 @@ packages/wire       Go implementation of the shared wire protocol
 
 ## Contributing
 
-Contributions are welcome — open an [issue](https://github.com/Akshay7273/sendarc/issues)
+Contributions are welcome — open an [issue](https://github.com/Akshay7273/sendbeam/issues)
 for bugs or feature requests, and submit pull requests against `main`. To report a
 vulnerability, see the [security policy](docs/threat-model.md).
 

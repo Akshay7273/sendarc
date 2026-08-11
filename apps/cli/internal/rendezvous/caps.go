@@ -1,6 +1,6 @@
 package rendezvous
 
-import "github.com/sendarc/wire"
+import "github.com/sendbeam/wire"
 
 // Default caps values. These mirror the protocol constants in
 // packages/protocol/src/constants.ts (DEFAULT_FRAME_BYTES, DEFAULT_BLOCK_BYTES); they are

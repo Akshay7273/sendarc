@@ -4,8 +4,8 @@ import (
 	"errors"
 	"sync"
 
-	relaytransport "github.com/sendarc/cli/internal/relay"
-	"github.com/sendarc/cli/internal/rtc"
+	relaytransport "github.com/sendbeam/cli/internal/relay"
+	"github.com/sendbeam/cli/internal/rtc"
 )
 
 // adaptiveConn starts on an open direct channel and atomically converges onto the session relay.

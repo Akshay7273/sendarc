@@ -4,7 +4,7 @@
  * abort (discards the partial file) and finalise nothing; only if abort is unavailable do we close.
  */
 
-import type { Sink } from '@sendarc/protocol';
+import type { Sink } from '@sendbeam/protocol';
 
 export interface WritableFileLike {
   write(data: { type: 'write'; position: number; data: Uint8Array }): Promise<void>;

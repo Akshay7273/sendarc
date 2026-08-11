@@ -34,7 +34,7 @@ func TestHKDFEmptySaltEquivalence(t *testing.T) {
 	// A nil salt must behave as RFC 5869's default (HashLen zero bytes), which is the
 	// cross-language interop guarantee against WebCrypto's zero-length salt.
 	ikm := []byte("input keying material")
-	info := []byte("sendarc/1 test")
+	info := []byte("sendbeam/1 test")
 	withNil, err := hkdfSHA256(ikm, nil, info, 32)
 	if err != nil {
 		t.Fatal(err)

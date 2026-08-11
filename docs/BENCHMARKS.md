@@ -1,6 +1,6 @@
 # Benchmarks
 
-Reproducible numbers for the `sendarc/1` transfer engine. These measure the engine
+Reproducible numbers for the `sendbeam/1` transfer engine. These measure the engine
 itself (crypto + block/ack state machine) on loopback; end-to-end throughput is bounded
 by the transport and the network, not by these figures — see the notes and
 [compat-matrix.md](./compat-matrix.md) for path-level numbers.

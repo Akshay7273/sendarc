@@ -21,7 +21,7 @@ import {
   type RendezvousPhase,
   type RendezvousResult,
   type SignalMsg,
-} from '@sendarc/protocol';
+} from '@sendbeam/protocol';
 
 import { SignalingClient, type BackoffOptions, type SignalChannel } from '../signaling/client.js';
 

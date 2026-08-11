@@ -57,7 +57,7 @@ func newPeer(ws *websocket.Conn, h *Hub) *peer {
 		hub:              h,
 		logger:           h.logger,
 		room:             -1,
-		send:             make(chan outboundFrame, sendBuffer),
+		send:             make(chan outboundFrame, 16),
 		relayRate:        newTokenBucket(int(h.cfg.RelayBurstBytes), float64(h.cfg.RelayBytesPerSec)),
 		relayControlRate: newTokenBucket(128, 64),
 		done:             make(chan struct{}),

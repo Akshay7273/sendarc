@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { authKeys, type Spake2Output } from '@sendarc/protocol';
+import { authKeys, type Spake2Output } from '@sendbeam/protocol';
 import { SignalAuthenticator } from './authed-signaling.js';
 
 function pairKeys() {

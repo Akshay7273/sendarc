@@ -68,7 +68,7 @@ describe('SPAKE2 — RFC 9382 Appendix B known-answer vectors', () => {
   }
 });
 
-interface SendarcVectors {
+interface SendbeamVectors {
   code: string;
   spake2: {
     w: string;
@@ -84,10 +84,10 @@ interface SendarcVectors {
     confirmB: string;
   };
 }
-const sa = loadVectors<SendarcVectors>('sendarc-crypto.json');
+const sa = loadVectors<SendbeamVectors>('sendbeam-crypto.json');
 
-describe('SPAKE2 — SendArc deterministic vector', () => {
-  it('derives w from the invite code via the SendArc mapping', async () => {
+describe('SPAKE2 — SendBeam deterministic vector', () => {
+  it('derives w from the invite code via the SendBeam mapping', async () => {
     const w = await passwordToScalar(sa.code);
     expect(bytesToHex(hexToBytes(sa.spake2.w))).toBe(sa.spake2.w); // fixture sanity
     expect(w).toBe(scalar(sa.spake2.w));
@@ -105,9 +105,9 @@ describe('SPAKE2 — SendArc deterministic vector', () => {
     expect(bytesToHex(out.confirmB)).toBe(sa.spake2.confirmB);
   });
 
-  it('uses the documented SendArc identity strings', () => {
-    expect(new TextDecoder().decode(IDENTITY_OFFERER)).toBe('sendarc/1 offerer');
-    expect(new TextDecoder().decode(IDENTITY_JOINER)).toBe('sendarc/1 joiner');
+  it('uses the documented SendBeam identity strings', () => {
+    expect(new TextDecoder().decode(IDENTITY_OFFERER)).toBe('sendbeam/1 offerer');
+    expect(new TextDecoder().decode(IDENTITY_JOINER)).toBe('sendbeam/1 joiner');
   });
 });
 

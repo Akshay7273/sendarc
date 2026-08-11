@@ -6,7 +6,7 @@
  */
 
 import { createSHA256, type IHasher } from 'hash-wasm';
-import type { Digest } from '@sendarc/protocol';
+import type { Digest } from '@sendbeam/protocol';
 
 /**
  * Resolve once the SHA-256 wasm is instantiated, returning a factory that yields a fresh,

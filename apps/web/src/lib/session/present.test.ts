@@ -16,10 +16,10 @@ import {
 
 describe('sasFingerprint', () => {
   it('matches the canonical cross-implementation vector', async () => {
-    // master = 0,1,…,31. The Go CLI and a Python reference both derive "7948 2d83"; the
+    // master = 0,1,…,31. The Go CLI and a Python reference both derive "c696 7914"; the
     // browser must agree, since the two humans read this value to each other out of band.
     const master = Uint8Array.from({ length: 32 }, (_, i) => i);
-    expect(await sasFingerprint(master)).toBe('7948 2d83');
+    expect(await sasFingerprint(master)).toBe('c696 7914');
   });
 
   it('formats as two space-separated 16-bit hex groups', async () => {
