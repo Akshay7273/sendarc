@@ -6,7 +6,7 @@
  */
 
 /** Protocol version string, embedded in the handshake transcript and caps. */
-export const PROTOCOL_VERSION = "sendbeam/1";
+export const PROTOCOL_VERSION = 'sendbeam/1';
 
 /**
  * Invite code (e.g. `4-brave-otter`). The room number is server-allocated and routes

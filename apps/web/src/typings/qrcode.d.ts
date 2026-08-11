@@ -4,7 +4,11 @@ declare module 'qrcode' {
     margin?: number;
     color?: { dark: string; light: string };
   }
-  function toCanvas(canvas: HTMLCanvasElement, text: string, options?: QRCodeOptions): Promise<void>;
+  function toCanvas(
+    canvas: HTMLCanvasElement,
+    text: string,
+    options?: QRCodeOptions,
+  ): Promise<void>;
   export { toCanvas };
   export default { toCanvas };
 }

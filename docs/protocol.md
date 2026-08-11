@@ -122,8 +122,8 @@ other as an out-of-band check layered on top of SPAKE2. Canonical vector:
 
 All keys derive from the master key by HKDF-SHA256 with these `info` labels:
 
-| Label                     | Output                                  |
-| ------------------------- | --------------------------------------- |
+| Label                      | Output                                  |
+| -------------------------- | --------------------------------------- |
 | `sendbeam/1 master` (+ TT) | Master key, from the RFC 9382 `Ke`.     |
 | `sendbeam/1 o2j`           | Directional AEAD key, offerer → joiner. |
 | `sendbeam/1 j2o`           | Directional AEAD key, joiner → offerer. |

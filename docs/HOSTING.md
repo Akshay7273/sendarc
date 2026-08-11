@@ -36,21 +36,21 @@ so web + signaling + relay all share the published port.
 
 ## Environment variables
 
-| Variable                               | Default       | Purpose                                                                                                                                          |
-| -------------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `SENDBEAM_ADDR`                         | `:8443`       | Listen address.                                                                                                                                  |
-| `SENDBEAM_TLS_CERT` / `SENDBEAM_TLS_KEY` | unset         | PEM cert/key paths; when both are set `sendbeamd` terminates TLS itself.                                                                          |
-| `SENDBEAM_WEB_DIR`                      | unset         | Directory of the built web bundle to serve; set to `/srv/web` in the image.                                                                      |
-| `SENDBEAM_WEB_DEV_PROXY`                | unset         | Vite dev-server URL to proxy to (development only; overrides `SENDBEAM_WEB_DIR`).                                                                 |
-| `SENDBEAM_ALLOWED_ORIGINS`              | empty         | Comma-separated WSS origin allowlist. Empty allows only same-origin browser sockets; native CLI clients (no `Origin` header) are always allowed. |
-| `SENDBEAM_SIGNAL_IDLE_TIMEOUT`          | `2m`          | Close a socket silent this long; also bounds how long an unpaired room lingers.                                                                  |
-| `SENDBEAM_SIGNAL_MAX_MESSAGE_BYTES`     | `65536`       | Cap on a single inbound signaling message.                                                                                                       |
-| `SENDBEAM_RELAY_MAX_FRAME_BYTES`        | `131072`      | Cap on a single relay frame.                                                                                                                     |
-| `SENDBEAM_RELAY_WINDOW_BYTES`           | `1048576`     | In-flight window per relay connection.                                                                                                           |
-| `SENDBEAM_RELAY_QUEUE_BYTES`            | `2097152`     | Bounded per-connection relay queue.                                                                                                              |
-| `SENDBEAM_RELAY_BURST_BYTES`            | `8388608`     | Token-bucket burst for relay throughput.                                                                                                         |
-| `SENDBEAM_RELAY_BYTES_PER_SEC`          | `33554432`    | Relay throughput ceiling (32 MiB/s by default).                                                                                                  |
-| `SENDBEAM_RELAY_MAX_SESSION_BYTES`      | `17179869184` | Lifetime bytes relayed per session (16 GiB).                                                                                                     |
+| Variable                                 | Default       | Purpose                                                                                                                                          |
+| ---------------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `SENDBEAM_ADDR`                          | `:8443`       | Listen address.                                                                                                                                  |
+| `SENDBEAM_TLS_CERT` / `SENDBEAM_TLS_KEY` | unset         | PEM cert/key paths; when both are set `sendbeamd` terminates TLS itself.                                                                         |
+| `SENDBEAM_WEB_DIR`                       | unset         | Directory of the built web bundle to serve; set to `/srv/web` in the image.                                                                      |
+| `SENDBEAM_WEB_DEV_PROXY`                 | unset         | Vite dev-server URL to proxy to (development only; overrides `SENDBEAM_WEB_DIR`).                                                                |
+| `SENDBEAM_ALLOWED_ORIGINS`               | empty         | Comma-separated WSS origin allowlist. Empty allows only same-origin browser sockets; native CLI clients (no `Origin` header) are always allowed. |
+| `SENDBEAM_SIGNAL_IDLE_TIMEOUT`           | `2m`          | Close a socket silent this long; also bounds how long an unpaired room lingers.                                                                  |
+| `SENDBEAM_SIGNAL_MAX_MESSAGE_BYTES`      | `65536`       | Cap on a single inbound signaling message.                                                                                                       |
+| `SENDBEAM_RELAY_MAX_FRAME_BYTES`         | `131072`      | Cap on a single relay frame.                                                                                                                     |
+| `SENDBEAM_RELAY_WINDOW_BYTES`            | `1048576`     | In-flight window per relay connection.                                                                                                           |
+| `SENDBEAM_RELAY_QUEUE_BYTES`             | `2097152`     | Bounded per-connection relay queue.                                                                                                              |
+| `SENDBEAM_RELAY_BURST_BYTES`             | `8388608`     | Token-bucket burst for relay throughput.                                                                                                         |
+| `SENDBEAM_RELAY_BYTES_PER_SEC`           | `33554432`    | Relay throughput ceiling (32 MiB/s by default).                                                                                                  |
+| `SENDBEAM_RELAY_MAX_SESSION_BYTES`       | `17179869184` | Lifetime bytes relayed per session (16 GiB).                                                                                                     |
 
 Durations use Go's `time.ParseDuration` syntax (`30s`, `5m`); sizes use
 plain integers (bytes). Overrides apply only to the signaling/relay layer;
