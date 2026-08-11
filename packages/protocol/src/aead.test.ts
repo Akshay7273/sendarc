@@ -12,7 +12,7 @@ function loadVectors<T>(name: string): T {
   return JSON.parse(readFileSync(fileURLToPath(url), 'utf8')) as T;
 }
 
-interface SendarcVectors {
+interface SendbeamVectors {
   spake2: { Ke: string; transcript: string };
   keyschedule: {
     master: string;
@@ -29,9 +29,9 @@ interface SendarcVectors {
     frameHex: string;
   };
 }
-const sa = loadVectors<SendarcVectors>('sendarc-crypto.json');
+const sa = loadVectors<SendbeamVectors>('sendbeam-crypto.json');
 
-describe('key schedule — SendArc deterministic vector', () => {
+describe('key schedule — SendBeam deterministic vector', () => {
   it('derives the transcript-bound master key from Ke', async () => {
     const master = await deriveMaster(hexToBytes(sa.spake2.Ke), hexToBytes(sa.spake2.transcript));
     expect(bytesToHex(master)).toBe(sa.keyschedule.master);
@@ -62,7 +62,7 @@ const CAPS_HEADER: FrameHeaderInput = {
   frameOff: 0,
 };
 
-describe('AEAD frame codec — SendArc deterministic vector', () => {
+describe('AEAD frame codec — SendBeam deterministic vector', () => {
   it('seals the caps payload to the committed frame bytes', async () => {
     const { o2j } = await deriveTransferKeys(hexToBytes(sa.keyschedule.master));
     const frame = await seal(o2j, sa.aead.counter, CAPS_HEADER, utf8(sa.aead.plaintextUtf8));

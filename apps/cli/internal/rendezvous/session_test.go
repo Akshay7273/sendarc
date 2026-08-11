@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sendarc/wire"
+	"github.com/sendbeam/wire"
 )
 
 // mockHub stands in for the blind signaling server: it allocates a room, pairs the two

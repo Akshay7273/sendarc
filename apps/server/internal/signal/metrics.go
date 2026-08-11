@@ -46,21 +46,21 @@ func (h *Hub) MetricsHandler() http.Handler {
 		m := h.Metrics()
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		var b strings.Builder
-		b.WriteString("# HELP sendarc_rooms Active signaling rooms (live sessions).\n")
-		b.WriteString("# TYPE sendarc_rooms gauge\n")
-		fmt.Fprintf(&b, "sendarc_rooms %d\n", m.Rooms)
-		b.WriteString("# HELP sendarc_relay_bytes_total Ciphertext bytes relayed since server start.\n")
-		b.WriteString("# TYPE sendarc_relay_bytes_total counter\n")
-		fmt.Fprintf(&b, "sendarc_relay_bytes_total %d\n", m.RelayBytes)
-		b.WriteString("# HELP sendarc_errors_total Error frames sent, by refusal code.\n")
-		b.WriteString("# TYPE sendarc_errors_total counter\n")
+		b.WriteString("# HELP sendbeam_rooms Active signaling rooms (live sessions).\n")
+		b.WriteString("# TYPE sendbeam_rooms gauge\n")
+		fmt.Fprintf(&b, "sendbeam_rooms %d\n", m.Rooms)
+		b.WriteString("# HELP sendbeam_relay_bytes_total Ciphertext bytes relayed since server start.\n")
+		b.WriteString("# TYPE sendbeam_relay_bytes_total counter\n")
+		fmt.Fprintf(&b, "sendbeam_relay_bytes_total %d\n", m.RelayBytes)
+		b.WriteString("# HELP sendbeam_errors_total Error frames sent, by refusal code.\n")
+		b.WriteString("# TYPE sendbeam_errors_total counter\n")
 		codes := make([]string, 0, len(m.Errors))
 		for code := range m.Errors {
 			codes = append(codes, code)
 		}
 		sort.Strings(codes)
 		for _, code := range codes {
-			fmt.Fprintf(&b, "sendarc_errors_total{code=%q} %d\n", code, m.Errors[code])
+			fmt.Fprintf(&b, "sendbeam_errors_total{code=%q} %d\n", code, m.Errors[code])
 		}
 		_, _ = w.Write([]byte(b.String()))
 	})

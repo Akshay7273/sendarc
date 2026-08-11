@@ -10,7 +10,7 @@
  * have their own tests, and the whole path is covered by the e2e transfer.
  */
 
-import type { RendezvousResult } from '@sendarc/protocol';
+import type { RendezvousResult } from '@sendbeam/protocol';
 import { WakeLockManager } from './wake-lock.js';
 import type { SignalChannel } from '../signaling/client.js';
 import { SignalAuthenticator } from '../transfer/authed-signaling.js';

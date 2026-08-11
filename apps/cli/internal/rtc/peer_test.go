@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/pion/webrtc/v4"
-	"github.com/sendarc/cli/internal/rendezvous"
-	"github.com/sendarc/wire"
+	"github.com/sendbeam/cli/internal/rendezvous"
+	"github.com/sendbeam/wire"
 )
 
 // hostOnly forces ICE to gather host candidates only (no STUN), so the loopback test needs no

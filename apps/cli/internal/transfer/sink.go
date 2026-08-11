@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/sendarc/wire"
+	"github.com/sendbeam/wire"
 )
 
 // errSinkClosed is returned when a block is written after the sink has been closed or aborted.

@@ -1,15 +1,15 @@
 # Wire protocol
 
-**Protocol version: `sendarc/1`.**
+**Protocol version: `sendbeam/1`.**
 
-This is the normative reference for what goes over the wire between two SendArc peers and
+This is the normative reference for what goes over the wire between two SendBeam peers and
 between a peer and the server. It is the source both client implementations follow: the
 browser via `packages/protocol` (TypeScript) and the CLI via `packages/wire` (Go). The two
 are kept in sync by a cross-language vector test; where a value appears below it is defined
 once in `packages/protocol/src/constants.ts` and mirrored in Go.
 
 Any change to a wire value or layout is a protocol change: bump the version and negotiate it
-in `caps`. Per-version compatibility is what lets one peer run `sendarc/1` and another a
+in `caps`. Per-version compatibility is what lets one peer run `sendbeam/1` and another a
 future version; the caps round-trip settles the common subset.
 
 ## Roles
@@ -94,7 +94,7 @@ argument.
 ## Authenticated handshake
 
 1. **SPAKE2 (RFC 9382, group P-256).** The invite code is mapped to the scalar `w` by
-   `w = HKDF(code, salt=nil, info="sendarc/1 spake2 w", L=48) mod n` — 48 bytes of HKDF
+   `w = HKDF(code, salt=nil, info="sendbeam/1 spake2 w", L=48) mod n` — 48 bytes of HKDF
    output reduced into the 256-bit scalar field, leaving negligible modular bias
    (`SPAKE2_W_HKDF_BYTES = 48`). The offerer sends `T = X + w·M`, the joiner sends
    `S = Y + w·N`, each as a base64url raw SEC1 point in a `pake` message.
@@ -102,8 +102,8 @@ argument.
    `KcA || KcB = HKDF(Ka, nil, "ConfirmationKeys", 32)` — this label is fixed by the RFC
    and must not change — then exchange confirmation MACs in `confirm` (offerer `cA`, joiner
    `cB`). A mismatch aborts the handshake **closed**; there is no fallback.
-3. **Master key.** The RFC's shared secret `Ke` is expanded into the SendArc master key,
-   bound to the handshake transcript: `master = HKDF(Ke, "sendarc/1 master" || TT)`, where
+3. **Master key.** The RFC's shared secret `Ke` is expanded into the SendBeam master key,
+   bound to the handshake transcript: `master = HKDF(Ke, "sendbeam/1 master" || TT)`, where
    `TT` is the RFC 9382 transcript. Every downstream key is therefore transcript-bound.
 
 ### Short authentication string
@@ -124,9 +124,9 @@ All keys derive from the master key by HKDF-SHA256 with these `info` labels:
 
 | Label                     | Output                                  |
 | ------------------------- | --------------------------------------- |
-| `sendarc/1 master` (+ TT) | Master key, from the RFC 9382 `Ke`.     |
-| `sendarc/1 o2j`           | Directional AEAD key, offerer → joiner. |
-| `sendarc/1 j2o`           | Directional AEAD key, joiner → offerer. |
+| `sendbeam/1 master` (+ TT) | Master key, from the RFC 9382 `Ke`.     |
+| `sendbeam/1 o2j`           | Directional AEAD key, offerer → joiner. |
+| `sendbeam/1 j2o`           | Directional AEAD key, joiner → offerer. |
 
 Each directional key carries its own 4-byte nonce salt; the AEAD nonce is
 `salt[4] || counter_be[8]` (see below), so the two directions can never collide on a
@@ -186,7 +186,7 @@ The `caps` frame is the first thing sent after key confirmation and negotiates t
 parameters (`CapsPayload`):
 
 ```
-version    protocol version string ("sendarc/1")
+version    protocol version string ("sendbeam/1")
 maxFrame   maximum frame payload the sender will use (default 16 KiB, max 64 KiB)
 blockSize  logical block size — the unit of ack/retry/resume (default 1 MiB)
 features   negotiated features: folders | resume | relay | archive

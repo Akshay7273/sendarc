@@ -1,4 +1,4 @@
-// Package signal implements the SendArc rendezvous server: a blind WebSocket
+// Package signal implements the SendBeam rendezvous server: a blind WebSocket
 // forwarder and pairer. It allocates room numbers, links exactly two sockets per
 // room, and relays the peers' SPAKE2 handshake and encrypted capability frames
 // without inspecting them. It never sees the word code, any key, or any plaintext —
@@ -222,38 +222,38 @@ func DefaultConfig() Config {
 	}
 }
 
-// ConfigFromEnv layers SENDARC_* overrides onto DefaultConfig.
+// ConfigFromEnv layers SENDBEAM_* overrides onto DefaultConfig.
 func ConfigFromEnv() Config {
 	cfg := DefaultConfig()
-	if v := os.Getenv("SENDARC_ALLOWED_ORIGINS"); v != "" {
+	if v := os.Getenv("SENDBEAM_ALLOWED_ORIGINS"); v != "" {
 		for _, o := range strings.Split(v, ",") {
 			if o = strings.TrimSpace(o); o != "" {
 				cfg.AllowedOrigins = append(cfg.AllowedOrigins, o)
 			}
 		}
 	}
-	if d, ok := envDuration("SENDARC_SIGNAL_IDLE_TIMEOUT"); ok {
+	if d, ok := envDuration("SENDBEAM_SIGNAL_IDLE_TIMEOUT"); ok {
 		cfg.IdleTimeout = d
 	}
-	if n, ok := envInt("SENDARC_SIGNAL_MAX_MESSAGE_BYTES"); ok {
+	if n, ok := envInt("SENDBEAM_SIGNAL_MAX_MESSAGE_BYTES"); ok {
 		cfg.MaxMessageBytes = int64(n)
 	}
-	if n, ok := envInt64("SENDARC_RELAY_MAX_FRAME_BYTES"); ok {
+	if n, ok := envInt64("SENDBEAM_RELAY_MAX_FRAME_BYTES"); ok {
 		cfg.MaxRelayFrameBytes = n
 	}
-	if n, ok := envInt64("SENDARC_RELAY_WINDOW_BYTES"); ok {
+	if n, ok := envInt64("SENDBEAM_RELAY_WINDOW_BYTES"); ok {
 		cfg.RelayWindowBytes = n
 	}
-	if n, ok := envInt64("SENDARC_RELAY_QUEUE_BYTES"); ok {
+	if n, ok := envInt64("SENDBEAM_RELAY_QUEUE_BYTES"); ok {
 		cfg.RelayQueueBytes = n
 	}
-	if n, ok := envInt64("SENDARC_RELAY_BURST_BYTES"); ok {
+	if n, ok := envInt64("SENDBEAM_RELAY_BURST_BYTES"); ok {
 		cfg.RelayBurstBytes = n
 	}
-	if n, ok := envInt64("SENDARC_RELAY_BYTES_PER_SEC"); ok {
+	if n, ok := envInt64("SENDBEAM_RELAY_BYTES_PER_SEC"); ok {
 		cfg.RelayBytesPerSec = n
 	}
-	if n, ok := envInt64("SENDARC_RELAY_MAX_SESSION_BYTES"); ok {
+	if n, ok := envInt64("SENDBEAM_RELAY_MAX_SESSION_BYTES"); ok {
 		cfg.RelayMaxSessionBytes = n
 	}
 	return cfg

@@ -1,4 +1,4 @@
-// Command sendarcd serves the SendArc web bundle over TLS (or reverse-proxies the Vite
+// Command sendbeamd serves the SendBeam web bundle over TLS (or reverse-proxies the Vite
 // development server), exposes /healthz, and hosts the blind signaling endpoint.
 package main
 
@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sendarc/server/internal/httpserver"
+	"github.com/sendbeam/server/internal/httpserver"
 )
 
 func main() {
@@ -30,7 +30,7 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("sendarcd listening",
+		logger.Info("sendbeamd listening",
 			"addr", cfg.Addr,
 			"tls", cfg.TLSCert != "",
 			"mode", cfg.Mode(),

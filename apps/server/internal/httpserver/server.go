@@ -1,4 +1,4 @@
-// Package httpserver wires the HTTP surface for sendarcd: health, security headers,
+// Package httpserver wires the HTTP surface for sendbeamd: health, security headers,
 // and serving the web app — either from a built directory (prod) or by proxying the
 // Vite dev server (dev). The signaling handler mounts on the same router.
 package httpserver
@@ -20,10 +20,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
-	"github.com/sendarc/server/internal/signal"
+	"github.com/sendbeam/server/internal/signal"
 )
 
-// Config controls how sendarcd serves the web app and terminates TLS.
+// Config controls how sendbeamd serves the web app and terminates TLS.
 type Config struct {
 	Addr      string // listen address, e.g. ":8443"
 	TLSCert   string // path to TLS cert (PEM); empty => plain HTTP (dev/testing only)
@@ -35,15 +35,15 @@ type Config struct {
 	Signal signal.Config // signaling limits + WSS origin allowlist
 }
 
-// ConfigFromEnv reads configuration from SENDARC_* environment variables with defaults.
+// ConfigFromEnv reads configuration from SENDBEAM_* environment variables with defaults.
 func ConfigFromEnv() Config {
 	return Config{
-		Addr:      env("SENDARC_ADDR", ":8443"),
-		TLSCert:   os.Getenv("SENDARC_TLS_CERT"),
-		TLSKey:    os.Getenv("SENDARC_TLS_KEY"),
-		WebDir:    os.Getenv("SENDARC_WEB_DIR"),
-		DevProxy:  os.Getenv("SENDARC_WEB_DEV_PROXY"),
-		PublicURL: os.Getenv("SENDARC_PUBLIC_URL"),
+		Addr:      env("SENDBEAM_ADDR", ":8443"),
+		TLSCert:   os.Getenv("SENDBEAM_TLS_CERT"),
+		TLSKey:    os.Getenv("SENDBEAM_TLS_KEY"),
+		WebDir:    os.Getenv("SENDBEAM_WEB_DIR"),
+		DevProxy:  os.Getenv("SENDBEAM_WEB_DEV_PROXY"),
+		PublicURL: os.Getenv("SENDBEAM_PUBLIC_URL"),
 		Signal:    signal.ConfigFromEnv(),
 	}
 }
@@ -60,14 +60,14 @@ func (c Config) Mode() string {
 	}
 }
 
-// Server wraps *http.Server with SendArc's config so it can choose TLS vs plain HTTP.
+// Server wraps *http.Server with SendBeam's config so it can choose TLS vs plain HTTP.
 type Server struct {
 	http   *http.Server
 	cfg    Config
 	cancel context.CancelFunc
 }
 
-// New builds a Server with the SendArc router and sensible timeouts.
+// New builds a Server with the SendBeam router and sensible timeouts.
 func New(cfg Config, logger *slog.Logger) (*Server, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	handler, err := router(ctx, cfg, logger)
@@ -150,7 +150,7 @@ func router(ctx context.Context, cfg Config, logger *slog.Logger) (http.Handler,
 func devProxy(target string) (http.Handler, error) {
 	u, err := url.Parse(target)
 	if err != nil {
-		return nil, fmt.Errorf("invalid SENDARC_WEB_DEV_PROXY %q: %w", target, err)
+		return nil, fmt.Errorf("invalid SENDBEAM_WEB_DEV_PROXY %q: %w", target, err)
 	}
 	return httputil.NewSingleHostReverseProxy(u), nil
 }

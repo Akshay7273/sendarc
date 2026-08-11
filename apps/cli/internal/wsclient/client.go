@@ -1,4 +1,4 @@
-// Package wsclient binds a rendezvous.Session to the SendArc signaling server over a
+// Package wsclient binds a rendezvous.Session to the SendBeam signaling server over a
 // WebSocket. It is the CLI's counterpart to the browser's SignalingClient +
 // rendezvous orchestrator (apps/web/src/lib/signaling, .../session): it dials the
 // server, JSON-encodes the session's outbound messages as text frames, decodes inbound
@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/sendarc/cli/internal/rendezvous"
+	"github.com/sendbeam/cli/internal/rendezvous"
 )
 
 const (

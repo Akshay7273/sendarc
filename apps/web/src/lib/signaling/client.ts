@@ -1,6 +1,6 @@
 /**
  * Browser signaling transport — a thin, typed wrapper over the native `WebSocket` that
- * speaks the SendArc signaling messages (`@sendarc/protocol`). It JSON-encodes outbound
+ * speaks the SendBeam signaling messages (`@sendbeam/protocol`). It JSON-encodes outbound
  * frames, parses inbound ones back into {@link SignalMsg}, and retries the *initial*
  * connection with exponential backoff so a briefly-unreachable server (cold start, a
  * flaky network) does not fail the session before it begins.
@@ -12,7 +12,7 @@
  * event for the caller to handle.
  */
 
-import type { SignalMsg } from '@sendarc/protocol';
+import type { SignalMsg } from '@sendbeam/protocol';
 
 /**
  * A live, bidirectional signaling channel with a swappable inbound handler. The rendezvous layer

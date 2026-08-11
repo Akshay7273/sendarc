@@ -1,5 +1,5 @@
 /**
- * Thin typed wrappers over the native WebCrypto primitives SendArc relies on. Confining
+ * Thin typed wrappers over the native WebCrypto primitives SendBeam relies on. Confining
  * them here keeps the one-line buffer normalization (WebCrypto's typings want an
  * ArrayBuffer-backed view) out of the crypto logic, and gives the Go module `packages/
  * wire` a single list of primitives to match: SHA-256, HKDF-SHA256, HMAC-SHA256, and

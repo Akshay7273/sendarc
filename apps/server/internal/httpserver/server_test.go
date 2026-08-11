@@ -88,7 +88,7 @@ func TestMetricsEndpoint(t *testing.T) {
 		t.Errorf("Content-Type = %q, want text/plain metrics", got)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"sendarc_rooms", "sendarc_relay_bytes_total", "sendarc_errors_total"} {
+	for _, want := range []string{"sendbeam_rooms", "sendbeam_relay_bytes_total", "sendbeam_errors_total"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body missing %q", want)
 		}

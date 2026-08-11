@@ -1,6 +1,6 @@
 <script lang="ts">
-  import type { CapsPayload, RendezvousPhase, RendezvousResult, Role } from '@sendarc/protocol';
-  import { RendezvousError } from '@sendarc/protocol';
+  import type { CapsPayload, RendezvousPhase, RendezvousResult, Role } from '@sendbeam/protocol';
+  import { RendezvousError } from '@sendbeam/protocol';
 
   import { offer, join, type RendezvousController } from './lib/session/rendezvous.js';
   import type { SignalChannel } from './lib/signaling/client.js';
@@ -281,7 +281,7 @@
 
 <main>
   <header>
-    <h1>SendArc</h1>
+    <h1>SendBeam</h1>
     <p class="tagline">Secure, end-to-end-encrypted, peer-to-peer file transfer.</p>
   </header>
 

@@ -41,7 +41,7 @@ importers:
 
   apps/web:
     dependencies:
-      '@sendarc/protocol':
+      '@sendbeam/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
       hash-wasm:

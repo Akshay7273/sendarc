@@ -14,10 +14,10 @@ import (
 	"time"
 
 	"github.com/pion/webrtc/v4"
-	relaytransport "github.com/sendarc/cli/internal/relay"
-	"github.com/sendarc/cli/internal/rendezvous"
-	"github.com/sendarc/cli/internal/rtc"
-	"github.com/sendarc/wire"
+	relaytransport "github.com/sendbeam/cli/internal/relay"
+	"github.com/sendbeam/cli/internal/rendezvous"
+	"github.com/sendbeam/cli/internal/rtc"
+	"github.com/sendbeam/wire"
 )
 
 // Signal is the live signaling connection the driver adopts for the whole exchange — first the

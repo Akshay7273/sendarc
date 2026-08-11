@@ -1,7 +1,7 @@
-// Command natlab runs a hermetic NAT lab for SendArc's transport selection. It builds
+// Command natlab runs a hermetic NAT lab for SendBeam's transport selection. It builds
 // two isolated private networks, each behind a userspace NAT box (cmd/natbox) with a
 // configurable mapping policy, joined by a shared public segment that hosts a signaling
-// server (sendarcd) and a STUN server (cmd/stund). For each policy pair it runs one real
+// server (sendbeamd) and a STUN server (cmd/stund). For each policy pair it runs one real
 // CLI transfer and reports whether the file moved over the direct WebRTC path or fell
 // back to the encrypted relay, then verifies the received bytes.
 //
@@ -45,7 +45,7 @@ type netns struct {
 
 func main() {
 	fileSize := flag.Int("file-size", 4*1024*1024, "payload size in bytes")
-	serverBin := flag.String("server-bin", "", "path to the built sendarcd binary (required)")
+	serverBin := flag.String("server-bin", "", "path to the built sendbeamd binary (required)")
 	combos := flag.String("combos",
 		"full-cone/full-cone,restricted/restricted,port-restricted/port-restricted,symmetric/symmetric,full-cone/symmetric",
 		"comma-separated NAT policy pairs (A/B)")
@@ -57,7 +57,7 @@ func main() {
 		log.Fatal("natlab: must run as root inside a user namespace: unshare -Urnm natlab [flags]")
 	}
 	if *serverBin == "" {
-		log.Fatal("natlab: -server-bin is required (build apps/server/cmd/sendarcd first)")
+		log.Fatal("natlab: -server-bin is required (build apps/server/cmd/sendbeamd first)")
 	}
 
 	binDir, err := os.MkdirTemp("", "natlab")
@@ -77,7 +77,7 @@ func main() {
 		}
 		return out
 	}
-	sendarc := binPath("sendarc", "./cmd/sendarc")
+	sendbeam := binPath("sendbeam", "./cmd/sendbeam")
 	natbox := binPath("natbox", "./cmd/natbox")
 	stund := binPath("stund", "./cmd/stund")
 
@@ -93,7 +93,7 @@ func main() {
 	_ = os.RemoveAll(dstDir)
 
 	lab := &lab{
-		sendarc: sendarc,
+		sendbeam: sendbeam,
 		natbox:  natbox,
 		stund:   stund,
 		server:  *serverBin,
@@ -143,7 +143,7 @@ func main() {
 }
 
 type lab struct {
-	sendarc, natbox, stund, server string
+	sendbeam, natbox, stund, server string
 	src, dstDir                    string
 	expect                         [32]byte
 	noproxy                        bool
@@ -326,9 +326,9 @@ func (l *lab) setup() error {
 	}
 
 	// Services in the public segment: signaling + STUN.
-	c, err := l.nsSpawn(pub, []string{"SENDARC_ADDR=" + pubHost + ":8443"}, l.server)
+	c, err := l.nsSpawn(pub, []string{"SENDBEAM_ADDR=" + pubHost + ":8443"}, l.server)
 	if err != nil {
-		return fmt.Errorf("sendarcd: %w", err)
+		return fmt.Errorf("sendbeamd: %w", err)
 	}
 	l.mu.Lock()
 	l.keep = append(l.keep, c)
@@ -428,7 +428,7 @@ func (l *lab) runTransfer(polA, polB string) (bool, string, error) {
 	defer l.killCombo()
 
 	sender := exec.Command("nsenter", "-t", fmt.Sprint(nsA.pid), "-n",
-		l.sendarc, "send", l.src,
+		l.sendbeam, "send", l.src,
 		"--server", "ws://"+privAIP+":8443/ws",
 		"--ice-server", "stun:"+pubHost+":3478")
 	var senderOut, senderErr strings.Builder
@@ -456,7 +456,7 @@ func (l *lab) runTransfer(polA, polB string) (bool, string, error) {
 	}
 
 	receiver := exec.Command("nsenter", "-t", fmt.Sprint(nsB.pid), "-n",
-		l.sendarc, "receive", code,
+		l.sendbeam, "receive", code,
 		"--server", "ws://"+privBIP+":8443/ws",
 		"--ice-server", "stun:"+pubHost+":3478",
 		"--out", dst)
@@ -544,7 +544,7 @@ func (l *lab) runPlainRelay(dst string) (bool, string, error) {
 	}
 
 	runPeer := func(role string, args ...string) (*exec.Cmd, *strings.Builder, *strings.Builder, error) {
-		argv := append([]string{l.sendarc, role, "--relay-only", "--server", "ws://" + pubHost + ":8443/ws"}, args...)
+		argv := append([]string{l.sendbeam, role, "--relay-only", "--server", "ws://" + pubHost + ":8443/ws"}, args...)
 		c := exec.Command("nsenter", append([]string{"-t", fmt.Sprint(pub.pid), "-n"}, argv...)...)
 		var out, errb strings.Builder
 		c.Stdout = &out

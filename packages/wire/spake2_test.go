@@ -124,7 +124,7 @@ func checkHex(t *testing.T, i int, field string, got []byte, want string) {
 	}
 }
 
-type sendarcVectors struct {
+type sendbeamVectors struct {
 	Code   string `json:"code"`
 	Spake2 struct {
 		W          string `json:"w"`
@@ -155,17 +155,17 @@ type sendarcVectors struct {
 	} `json:"aead"`
 }
 
-func loadSendarc(t *testing.T) sendarcVectors {
+func loadSendBeam(t *testing.T) sendbeamVectors {
 	t.Helper()
-	var sa sendarcVectors
-	loadVectors(t, "sendarc-crypto.json", &sa)
+	var sa sendbeamVectors
+	loadVectors(t, "sendbeam-crypto.json", &sa)
 	return sa
 }
 
 func TestSpake2SendarcVector(t *testing.T) {
-	sa := loadSendarc(t)
+	sa := loadSendBeam(t)
 
-	// w is derived from the invite code via the SendArc mapping.
+	// w is derived from the invite code via the SendBeam mapping.
 	w, err := PasswordToScalar(sa.Code)
 	if err != nil {
 		t.Fatalf("PasswordToScalar: %v", err)

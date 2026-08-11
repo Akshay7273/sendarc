@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/pion/webrtc/v4"
-	"github.com/sendarc/cli/internal/rendezvous"
-	"github.com/sendarc/wire"
+	"github.com/sendbeam/cli/internal/rendezvous"
+	"github.com/sendbeam/wire"
 )
 
 // relay is an in-memory stand-in for the signaling server, faithful to apps/server's peer
