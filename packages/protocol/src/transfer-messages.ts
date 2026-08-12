@@ -21,6 +21,7 @@ import {
   type TransferMsg,
 } from './transfer.js';
 import { utf8 } from './bytes.js';
+import { MAX_TRANSFER_FILES } from './safe-path.js';
 
 const decoder = new TextDecoder();
 
@@ -93,6 +94,10 @@ function asFileEntry(v: unknown): FileEntry {
 function asManifest(m: Record<string, unknown>): Manifest {
   if (!Array.isArray(m.files) || m.files.length === 0)
     throw new Error('control frame: manifest.files');
+  if (m.files.length > MAX_TRANSFER_FILES)
+    throw new Error(
+      `control frame: manifest has ${m.files.length} files, maximum is ${MAX_TRANSFER_FILES}`,
+    );
   // transferId is optional; when present it must be a string and keeps its position right after
   // `type` so the re-encoded wire bytes match the original ordering.
   const transferId = m.transferId === undefined ? undefined : str(m, 'transferId');
@@ -147,6 +152,10 @@ function asResumeFileState(v: unknown): ResumeFileState {
 function asResumeState(m: Record<string, unknown>): ResumeState {
   if (!Array.isArray(m.files) || m.files.length === 0)
     throw new Error('control frame: resume_state.files');
+  if (m.files.length > MAX_TRANSFER_FILES)
+    throw new Error(
+      `control frame: resume_state has ${m.files.length} files, maximum is ${MAX_TRANSFER_FILES}`,
+    );
   return {
     type: FrameType.ResumeState,
     transferId: str(m, 'transferId'),

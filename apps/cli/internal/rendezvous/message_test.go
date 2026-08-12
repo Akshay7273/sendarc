@@ -116,3 +116,37 @@ func keysOf(m map[string]any) []string {
 	}
 	return ks
 }
+
+// SB-1140: fuzz the signaling envelope decoder. Every JSON frame must decode or
+// fail without panicking, and a successfully decoded message must round-trip so
+// the session can act on it consistently.
+func FuzzUnmarshalMessage(f *testing.F) {
+	seeds := []string{
+		`{"type":"create"}`,
+		`{"type":"created","room":7}`,
+		`{"type":"join","room":1}`,
+		`{"type":"pake","msg":"AQID"}`,
+		`{"type":"confirm","mac":"AQID"}`,
+		`{"type":"caps","frame":"AQID"}`,
+		`{"type":"sdp","seq":0,"sdp":"v=0","mac":"AA"}`,
+		`{"type":"ice","seq":1,"cand":"c","mac":"AA"}`,
+		`{"type":"relay_credit","bytes":1024}`,
+		`{}`,
+		`not-json`,
+		`{"type":"unknown","room":999999999999999999999}`,
+	}
+	for _, s := range seeds {
+		f.Add([]byte(s))
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		msg, err := UnmarshalMessage(data)
+		if err != nil {
+			return
+		}
+		// A decoded message must be re-marshalable, providing a stable wire frame
+		// the session can round-trip through MarshalMessage.
+		if _, err := MarshalMessage(msg); err != nil {
+			t.Fatalf("round-trip marshal failed for %+v: %v", msg, err)
+		}
+	})
+}
