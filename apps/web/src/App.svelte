@@ -5,7 +5,7 @@
   import { offer, join, type RendezvousController } from './lib/session/rendezvous.js';
   import type { SignalChannel } from './lib/signaling/client.js';
   import type { ReceiveDestinationSpec } from './lib/transfer/wire.js';
-  import { baseUrl, loadConfig } from './lib/config.js';
+  import { baseUrl, iceServers, loadConfig } from './lib/config.js';
   import QrCode from './lib/QrCode.svelte';
 
   loadConfig();
@@ -187,11 +187,19 @@
    */
   function startTransferIfReady() {
     if (transfer || handshake === undefined || signaling === undefined) return;
+    const ice = iceServers();
     if (role === 'offerer') {
       if (pickedFiles.length === 0) return;
-      beginTransfer(runSend(handshake, signaling, { files: pickedFiles }));
+      beginTransfer(
+        runSend(handshake, signaling, {
+          files: pickedFiles,
+          ...(ice ? { iceServers: ice } : {}),
+        }),
+      );
     } else {
-      beginTransfer(runReceive(handshake, signaling, receiveDestination));
+      beginTransfer(
+        runReceive(handshake, signaling, receiveDestination, ice ? { iceServers: ice } : {}),
+      );
     }
   }
 
