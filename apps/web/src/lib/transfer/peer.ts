@@ -43,6 +43,10 @@ export interface PeerDiagnostics {
 export interface ICEState {
   gathering: RTCIceGatheringState;
   connection: RTCIceConnectionState;
+  /** True once a server-reflexive/peer-reflexive/relay candidate has been gathered. */
+  hasServerReflexive: boolean;
+  /** True once any candidate (including host) has been gathered. */
+  hasAnyCandidate: boolean;
 }
 
 export interface Peer {
@@ -73,10 +77,17 @@ export function createPeer(opts: CreatePeerOptions): Peer {
   const gatheringStates: RTCIceGatheringState[] = [pc.iceGatheringState];
   const connectionStates: RTCIceConnectionState[] = [pc.iceConnectionState];
   let selectedPairType = '';
+  let hasServerReflexive = false;
+  let hasAnyCandidate = false;
   const publishIceState = (): void => {
     const lastGathering = gatheringStates[gatheringStates.length - 1]!;
     const lastConnection = connectionStates[connectionStates.length - 1]!;
-    opts.onIceState?.({ gathering: lastGathering, connection: lastConnection });
+    opts.onIceState?.({
+      gathering: lastGathering,
+      connection: lastConnection,
+      hasServerReflexive,
+      hasAnyCandidate,
+    });
   };
 
   let resolveChannel!: (ch: RTCDataChannel) => void;
@@ -136,7 +147,14 @@ export function createPeer(opts: CreatePeerOptions): Peer {
   };
 
   pc.onicecandidate = (ev) => {
-    if (ev.candidate) void opts.auth.signIce(JSON.stringify(ev.candidate)).then(opts.send);
+    if (ev.candidate) {
+      // Candidate type is not exposed on the RTCIceCandidate typing; parse it from the SDP
+      // candidate string ("... typ host|srflx|prflx|relay ...").
+      hasAnyCandidate = true;
+      const type = candidateType(ev.candidate.candidate);
+      if (type === 'srflx' || type === 'prflx' || type === 'relay') hasServerReflexive = true;
+      void opts.auth.signIce(JSON.stringify(ev.candidate)).then(opts.send);
+    }
   };
   pc.onicegatheringstatechange = () => {
     gatheringStates.push(pc.iceGatheringState);
@@ -248,4 +266,14 @@ export function createPeer(opts: CreatePeerOptions): Peer {
 
 function toError(err: unknown): Error {
   return err instanceof Error ? err : new Error(String(err));
+}
+
+/**
+ * Extract the ICE candidate type ("host" | "srflx" | "prflx" | "relay") from an SDP candidate
+ * string, e.g. "candidate:842163049 1 udp 1677729535 192.0.2.1 57621 typ srflx raddr ...".
+ * Returns "" if no type field is present.
+ */
+function candidateType(candidate: string): string {
+  const m = /\btyp ([a-z]+)\b/.exec(candidate);
+  return m ? m[1]! : '';
 }
