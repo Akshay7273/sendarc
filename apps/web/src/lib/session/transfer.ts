@@ -103,6 +103,9 @@ function run(
   const progress = new ProgressTracker(total);
   const wakeLock = new WakeLockManager();
   let settled = false;
+  // Monotonic generation: every async continuation captures it at creation and
+  // bails before mutating controller state once it is stale (ADR 0001 §5).
+  let generation = 0;
   let peer: Peer | undefined;
   let worker: Worker | undefined;
   let writer: ChannelWriter | undefined;
@@ -119,6 +122,7 @@ function run(
   });
 
   const cleanup = (): void => {
+    generation++;
     clearTimeout(cancelTimer);
     wakeLock.setActive(false);
     worker?.terminate();
@@ -151,16 +155,24 @@ function run(
       const relayPath = new RelayTransport(signaling);
       relay = relayPath;
       signaling.onClose((err) => {
+        const gen = generation;
+        if (gen !== generation) return;
         relayPath.fail(err);
         if (transport !== 'direct' || switchPromise) {
           fail(err);
         }
       });
       signaling.onMessage((msg) => {
+        const gen = generation;
+        if (gen !== generation) return;
         if (relayPath.handleMessage(msg)) return;
         if (msg.type === 'sdp' || msg.type === 'ice') p.accept(msg);
       });
-      signaling.onBinary((frame) => relayPath.handleBinary(frame));
+      signaling.onBinary((frame) => {
+        const gen = generation;
+        if (gen !== generation) return;
+        relayPath.handleBinary(frame);
+      });
 
       const w = new Worker(new URL('../transfer/transfer.worker.ts', import.meta.url), {
         type: 'module',
@@ -183,11 +195,14 @@ function run(
       const receive = (frame: ArrayBuffer): void =>
         w.postMessage({ kind: 'inbound-frame', frame } satisfies HostToWorker, [frame]);
       const switchToRelay = (): Promise<void> => {
+        const gen = generation;
+        if (gen !== generation) return Promise.resolve();
         if (transport === 'relay') return Promise.resolve();
         if (switchPromise) return switchPromise;
         switchPromise = (async () => {
           relayPath.open();
           await relayPath.ready;
+          if (gen !== generation) return;
           if (settled) return;
           transport = 'relay';
           w.postMessage({ kind: 'transport-changed' } satisfies HostToWorker);
@@ -201,6 +216,8 @@ function run(
         return switchPromise;
       };
       const sendOutbound = async (frame: ArrayBuffer): Promise<void> => {
+        const gen = generation;
+        if (gen !== generation) return;
         if (transport === 'relay') {
           await relayPath.write(frame);
           return;
@@ -220,21 +237,35 @@ function run(
 
       if (selected.kind === 'direct') {
         p.onData((frame) => {
+          const gen = generation;
+          if (gen !== generation) return;
           if (transport === 'direct' && !switchPromise) receive(frame);
         });
-        p.onDisconnect(() => void switchToRelay().catch(() => {}));
+        p.onDisconnect(() => {
+          const gen = generation;
+          if (gen !== generation) return;
+          void switchToRelay().catch(() => {});
+        });
         void relayPath.ready.then(switchToRelay).catch(() => {});
         relayPath.onData((frame) => {
+          const gen = generation;
+          if (gen !== generation) return;
           void switchToRelay()
             .then(() => receive(frame))
             .catch(() => {});
         });
       } else {
-        relayPath.onData(receive);
+        relayPath.onData((frame) => {
+          const gen = generation;
+          if (gen !== generation) return;
+          receive(frame);
+        });
       }
 
       // Worker → host events.
       w.addEventListener('message', (ev: MessageEvent) => {
+        const gen = generation;
+        if (gen !== generation) return;
         const msg = ev.data as WorkerToHost;
         switch (msg.kind) {
           case 'outbound-frame':
@@ -283,6 +314,8 @@ function run(
   })();
 
   async function completeTransfer(msg: Extract<WorkerToHost, { kind: 'done' }>): Promise<void> {
+    const gen = generation;
+    if (gen !== generation) return;
     const first = msg.files[0]!;
     if (spec.role === 'receive') {
       try {

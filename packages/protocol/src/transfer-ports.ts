@@ -6,6 +6,7 @@
  */
 
 import type { Fail, FileEntry, Manifest } from './transfer.js';
+import { ErrorCode, type ErrorCode as ErrorCodeType } from './errors.js';
 
 /** Minimal file metadata carried in the manifest. */
 export interface FileMeta {
@@ -68,18 +69,32 @@ export interface Digest {
   hexDigest(): string | Promise<string>;
 }
 
+/** Map a wire `fail` reason onto its taxonomy class (ADR 0002). */
+const codeForReason: Record<Fail['reason'], ErrorCodeType> = {
+  digest_mismatch: ErrorCode.Protocol,
+  integrity: ErrorCode.Protocol,
+  sink_error: ErrorCode.DestIO,
+  canceled: ErrorCode.Canceled,
+  quota: ErrorCode.Storage,
+  retry_exhausted: ErrorCode.RetryExhausted,
+};
+
 /**
- * A transfer failure carrying one of the protocol's `fail` reasons. The `reason` is the
- * machine-readable tag sent on the wire; it is always prefixed onto `message` so the reason
- * survives in `error.message` (logs, `toThrow` matchers) even when a detail string is given.
+ * A transfer failure carrying one of the protocol's `fail` reasons plus its taxonomy
+ * class. The `reason` is the machine-readable tag sent on the wire; it is always
+ * prefixed onto `message` so the reason survives in `error.message` (logs,
+ * `toThrow` matchers) even when a detail string is given.
  */
 export class TransferError extends Error {
+  readonly code: ErrorCodeType;
   constructor(
     readonly reason: Fail['reason'],
     message?: string,
+    code?: ErrorCodeType,
   ) {
     super(message ? `${reason}: ${message}` : reason);
     this.name = 'TransferError';
+    this.code = code ?? codeForReason[reason] ?? ErrorCode.Internal;
   }
 }
 

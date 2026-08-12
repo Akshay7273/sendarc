@@ -23,3 +23,4 @@ export * from './transfer-sender.js';
 export * from './transfer-receiver.js';
 export * from './safe-path.js';
 export * from './transfer-set.js';
+export * from './errors.js';
