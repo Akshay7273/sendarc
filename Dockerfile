@@ -16,8 +16,10 @@ RUN pnpm --filter @sendbeam/protocol build && pnpm --filter @sendbeam/web build
 FROM golang:1.25-alpine AS server
 WORKDIR /src
 COPY apps/server/go.mod apps/server/go.sum ./apps/server/
+COPY packages/wire/go.mod packages/wire/go.sum ./packages/wire/
 RUN cd apps/server && go mod download
 COPY apps/server ./apps/server
+COPY packages/wire ./packages/wire
 RUN cd apps/server && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /sendbeamd ./cmd/sendbeamd
 
 # --- Stage 3: runtime --------------------------------------------------------------
