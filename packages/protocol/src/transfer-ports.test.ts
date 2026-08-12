@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { MemorySink, bytesSource } from './transfer-ports.js';
+import { MemorySink, TransferError, bytesSource } from './transfer-ports.js';
+import { ErrorCode } from "./errors.js";
 
 describe('MemorySink', () => {
   it('reassembles out-of-order offsets into one buffer', () => {
@@ -40,5 +41,24 @@ describe('bytesSource', () => {
     const chunks: Uint8Array[] = [];
     for await (const c of src.stream()) chunks.push(c);
     expect(chunks).toEqual([]);
+  });
+});
+
+
+describe('TransferError taxonomy', () => {
+  it('maps wire fail reasons onto classes', () => {
+    expect(new TransferError('digest_mismatch').code).toBe(ErrorCode.Protocol);
+    expect(new TransferError('integrity').code).toBe(ErrorCode.Protocol);
+    expect(new TransferError('sink_error').code).toBe(ErrorCode.DestIO);
+    expect(new TransferError('quota').code).toBe(ErrorCode.Storage);
+    expect(new TransferError('canceled').code).toBe(ErrorCode.Canceled);
+    expect(new TransferError('retry_exhausted').code).toBe(ErrorCode.RetryExhausted);
+  });
+
+  it('accepts an explicit code override', () => {
+    const err = new TransferError('canceled', 'msg', ErrorCode.Relay);
+    expect(err.code).toBe(ErrorCode.Relay);
+    expect(err.reason).toBe('canceled');
+    expect(err.message).toBe('canceled: msg');
   });
 });

@@ -8,7 +8,6 @@ package transfer
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -162,7 +161,7 @@ func (d *driver) run(ctx context.Context) (*Outcome, error) {
 			return nil, herr
 		}
 		if err == nil {
-			err = errors.New("transfer: signaling closed before the channel opened")
+			err = wire.Errorf(wire.CodeConnection, "transfer: signaling closed before the channel opened")
 		}
 		return nil, err
 	case <-ctx.Done():
@@ -232,7 +231,7 @@ func (d *driver) run(ctx context.Context) (*Outcome, error) {
 		case sigErr := <-readCh:
 			readEnded = true
 			if sigErr == nil {
-				sigErr = errors.New("signaling closed")
+				sigErr = wire.Errorf(wire.CodeConnection, "signaling closed")
 			}
 			if adaptive != nil && !adaptive.IsRelay() {
 				adaptive.SignalingLost(sigErr)
@@ -245,7 +244,7 @@ func (d *driver) run(ctx context.Context) (*Outcome, error) {
 			if ctx.Err() != nil {
 				terr = ctx.Err()
 			} else {
-				terr = fmt.Errorf("transfer: relay connection lost: %w", sigErr)
+				terr = wire.Errorf(wire.CodeRelay, "transfer: relay connection lost: %v", sigErr)
 			}
 			goto transferSettled
 		}
@@ -285,7 +284,7 @@ type rtcResult struct {
 
 func (d *driver) selectTransport(ctx context.Context, peer *rtc.Peer, readErr <-chan error) (dataConn, string, error) {
 	if d.relay == nil {
-		return nil, "", errors.New("transfer: relay was not initialized")
+		return nil, "", wire.Errorf(wire.CodeRelay, "transfer: relay was not initialized")
 	}
 	direct := make(chan rtcResult, 1)
 	if peer != nil && !d.spec.ForceRelay {
@@ -311,12 +310,12 @@ func (d *driver) selectTransport(ctx context.Context, peer *rtc.Peer, readErr <-
 				return result.conn, "direct", nil
 			}
 			if err := d.relay.Open(); err != nil {
-				return nil, "", fmt.Errorf("transfer: direct failed (%v), relay open: %w", result.err, err)
+				return nil, "", wire.Errorf(wire.CodeRelay, "transfer: direct failed (%v), relay open: %v", result.err, err)
 			}
 			direct = nil
 		case <-timeoutCh:
 			if err := d.relay.Open(); err != nil {
-				return nil, "", fmt.Errorf("transfer: relay fallback: %w", err)
+				return nil, "", wire.Errorf(wire.CodeRelay, "transfer: relay fallback: %v", err)
 			}
 			timeoutCh = nil
 		case <-d.relay.Ready():
@@ -326,9 +325,9 @@ func (d *driver) selectTransport(ctx context.Context, peer *rtc.Peer, readErr <-
 			return d.relay, "relay", nil
 		case err := <-readErr:
 			if err == nil {
-				err = errors.New("signaling closed")
+				err = wire.Errorf(wire.CodeConnection, "signaling closed")
 			}
-			return nil, "", fmt.Errorf("transfer: signaling: %w", err)
+			return nil, "", wire.Errorf(wire.CodeConnection, "transfer: signaling: %v", err)
 		case <-ctx.Done():
 			return nil, "", ctx.Err()
 		}
@@ -415,7 +414,7 @@ func (d *driver) send(ctx context.Context, conn dataConn, res *rendezvous.Result
 		}
 	}
 	if needsFolders && !containsString(res.RemoteCaps.Features, "folders") {
-		return nil, errors.New("transfer: receiver does not support files or folders as a set")
+		return nil, wire.Errorf(wire.CodeCompat, "transfer: receiver does not support files or folders as a set")
 	}
 	sender := wire.NewSender(wire.SenderOptions{
 		Files:            sources,
