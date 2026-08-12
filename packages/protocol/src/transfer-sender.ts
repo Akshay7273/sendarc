@@ -57,6 +57,11 @@ export interface TransferSenderOptions {
   ackTimeoutMs?: number;
   /** Retransmissions allowed per block after its initial send. */
   maxRetries?: number;
+  /**
+   * How long to wait for the receiver's Done after Complete before failing with
+   * retry exhaustion. A dead peer otherwise stalls `run` forever.
+   */
+  doneTimeoutMs?: number;
   /** Reports bytes acknowledged after verify-and-sink. */
   onProgress?(acknowledgedBytes: number): void;
   /** Reports verified progress for the active file plus aggregate acknowledged bytes. */
@@ -73,6 +78,7 @@ interface InflightBlock {
 
 const DEFAULT_ACK_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_DONE_TIMEOUT_MS = 30_000;
 
 export class TransferSender {
   private readonly o: TransferSenderOptions;
@@ -90,6 +96,8 @@ export class TransferSender {
   private completeSent = false;
   private activeFileIdx = -1;
   private activeFileAcknowledged = 0;
+  /** The validated manifest, kept so a path change before any acknowledgment can retransmit it. */
+  private manifest: Manifest | undefined;
 
   /** Set when a transfer id is advertised: the manifest carries it and a resume handshake runs. */
   private readonly transferId: string | undefined;
@@ -171,6 +179,14 @@ export class TransferSender {
       state.retries = 0;
       this.queueRetry(blockIdx);
     }
+    if (this.manifest !== undefined && this.acknowledged === 0) {
+      // The manifest may have been lost in the cutover; it is outside the block
+      // retransmit window. The receiver ignores identical duplicates and stray
+      // pre-manifest data, so resending it lets the transfer continue.
+      void this.sendControl(FrameType.Manifest, this.manifest).catch((e: unknown) =>
+        this.fail(e instanceof Error ? e : new Error(String(e))),
+      );
+    }
   }
 
   /** Pause locally and ask the peer to reflect the paused state. */
@@ -228,6 +244,7 @@ export class TransferSender {
     const transferDigest = await completionDigest(manifest.files);
     this.o.onManifest?.(manifest);
     await this.sendControl(FrameType.Manifest, manifest);
+    this.manifest = manifest;
 
     // A transfer id opts into resumption: the receiver answers the manifest with a resume_state
     // carrying each file's high-water mark (all zero on a first attempt). Wait for it before
@@ -269,8 +286,25 @@ export class TransferSender {
       type: FrameType.Complete,
       fileDigest: transferDigest,
     });
-    await this.done;
+    await this.waitForDone();
     return transferDigest;
+  }
+
+  private async waitForDone(): Promise<void> {
+    const timeoutMs = this.o.doneTimeoutMs ?? DEFAULT_DONE_TIMEOUT_MS;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        this.done,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(new TransferError('retry_exhausted', 'receiver did not send done in time'));
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
   private async processInbound(frame: Uint8Array): Promise<void> {

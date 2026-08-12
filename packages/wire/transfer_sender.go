@@ -23,6 +23,10 @@ const (
 	DefaultAckTimeout = 15 * time.Second
 	// DefaultMaxBlockRetries bounds retransmissions after the initial block send.
 	DefaultMaxBlockRetries = 3
+	// DefaultDoneTimeout is how long the sender waits for the receiver's Done after
+	// sending Complete before failing with retry exhaustion (a dead peer otherwise
+	// stalls Run forever).
+	DefaultDoneTimeout = 30 * time.Second
 )
 
 // SenderOptions configures a Sender. Zero-valued sizing and retry fields select defaults.
@@ -47,6 +51,9 @@ type SenderOptions struct {
 	Window        int
 	AckTimeout    time.Duration
 	MaxRetries    int
+	// DoneTimeout bounds the wait for the receiver's Done after Complete; zero selects
+	// DefaultDoneTimeout.
+	DoneTimeout time.Duration
 	// OnProgress reports bytes acknowledged after verify-and-sink.
 	OnProgress     func(acknowledgedBytes int64)
 	OnFileProgress func(fileIdx int, fileBytes, acknowledgedBytes int64)
@@ -73,6 +80,12 @@ type Sender struct {
 	sendCounter uint64
 
 	transferID string
+
+	// manifest is the validated manifest sent on the first path, kept so a
+	// TransportChanged before any acknowledgment can retransmit it (a cutover
+	// can lose it, and it is outside the block retransmit window).
+	manifest     *Manifest
+	manifestSent bool
 
 	mu                     sync.Mutex
 	cond                   *sync.Cond
@@ -114,6 +127,9 @@ func NewSender(opts SenderOptions) *Sender {
 	}
 	if opts.MaxRetries <= 0 {
 		opts.MaxRetries = DefaultMaxBlockRetries
+	}
+	if opts.DoneTimeout == 0 {
+		opts.DoneTimeout = DefaultDoneTimeout
 	}
 	if opts.CreateDigest == nil {
 		opts.CreateDigest = NewSHA256Digest
@@ -173,6 +189,7 @@ func (s *Sender) Run(ctx context.Context) (string, error) {
 			digest.Update(chunk)
 			return nil
 		}); err != nil {
+			err = Errorf(CodeSourceIO, "transfer: source read failed: %v", err)
 			s.fail(err)
 			return "", err
 		}
@@ -204,6 +221,10 @@ func (s *Sender) Run(ctx context.Context) (string, error) {
 		s.fail(err)
 		return "", err
 	}
+	s.mu.Lock()
+	s.manifest = &manifest
+	s.manifestSent = true
+	s.mu.Unlock()
 
 	// A transfer id opts into resumption: wait for the receiver's resume_state (all zero on a
 	// first attempt) before streaming so blocks it already holds are never sent. Fresh transfers
@@ -230,7 +251,18 @@ func (s *Sender) Run(ctx context.Context) (string, error) {
 		s.activeFileAcknowledged = committed
 		s.acknowledged += committed
 		s.mu.Unlock()
-		streamErr := ReChunk(StreamFunc(source.Stream), s.blockSize, s.blockSize, func(p FramePiece) error {
+		streamErr := ReChunk(StreamFunc(func(fn func(chunk []byte) error) error {
+			err := source.Stream(fn)
+			if err != nil && !errors.Is(err, errSenderSettled) {
+				// A peer failure or a local abort is not a source I/O problem; only
+				// genuine source read errors get classified as SOURCE_IO.
+				var te *TransferError
+				if !errors.As(err, &te) {
+					err = Errorf(CodeSourceIO, "transfer: source read failed: %v", err)
+				}
+			}
+			return err
+		}), s.blockSize, s.blockSize, func(p FramePiece) error {
 			// Held blocks are read past (the source is streamed for the digest regardless) but
 			// never sent.
 			if p.BlockIdx < haveBlocks {
@@ -356,8 +388,8 @@ func (s *Sender) Handle(frame []byte) {
 // Fresh counters are used, while replays arriving late from the old path remain harmless.
 func (s *Sender) TransportChanged() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.settled {
+		s.mu.Unlock()
 		return
 	}
 	for idx, state := range s.inflight {
@@ -371,7 +403,18 @@ func (s *Sender) TransportChanged() {
 			s.retryQueue = append(s.retryQueue, idx)
 		}
 	}
+	var resend *Manifest
+	if s.manifestSent && s.acknowledged == 0 {
+		resend = s.manifest
+	}
 	s.cond.Broadcast()
+	s.mu.Unlock()
+	if resend != nil {
+		// The manifest may have been lost in the cutover; the receiver ignores
+		// identical duplicates and stray pre-manifest data, so resending it is
+		// safe and lets the transfer continue on the new path.
+		_ = s.sendControl(resend)
+	}
 }
 
 // Pause stops new data frames locally and notifies the peer.
@@ -693,6 +736,13 @@ func (s *Sender) sendBlock(blockIdx int, block []byte) error {
 func (s *Sender) waitDone() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// A peer that dies after Complete never sends Done; without this deadline Run
+	// would stall forever, so time out and fail with retry exhaustion instead.
+	timer := time.AfterFunc(s.o.DoneTimeout, func() {
+		s.fail(NewTransferError(FailRetryExhausted,
+			"transfer: receiver did not send Done within the deadline"))
+	})
+	defer timer.Stop()
 	for !s.settled {
 		s.cond.Wait()
 	}
