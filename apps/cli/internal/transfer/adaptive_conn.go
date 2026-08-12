@@ -1,12 +1,12 @@
 package transfer
 
 import (
-	"errors"
 	"sync"
 	"time"
 
 	relaytransport "github.com/sendbeam/cli/internal/relay"
 	"github.com/sendbeam/cli/internal/rtc"
+	"github.com/sendbeam/wire"
 )
 
 // relaySwitchTimeout bounds how long Send waits for the relay handshake to complete
@@ -63,7 +63,7 @@ func (c *adaptiveConn) Send(frame []byte) error {
 	path, closed := c.path, c.closed
 	c.mu.Unlock()
 	if closed {
-		return errors.New("transfer: connection closed")
+		return wire.Errorf(wire.CodeConnection, "transfer: connection closed")
 	}
 	if path == "relay" {
 		return c.relay.Send(frame)
@@ -75,7 +75,7 @@ func (c *adaptiveConn) Send(frame []byte) error {
 	select {
 	case <-c.switchDone:
 	case <-time.After(relaySwitchTimeout):
-		return errors.New("transfer: relay switch timed out")
+		return wire.Errorf(wire.CodeRelay, "transfer: relay switch timed out")
 	}
 	c.mu.Lock()
 	err := c.switchErr
@@ -85,7 +85,7 @@ func (c *adaptiveConn) Send(frame []byte) error {
 		return err
 	}
 	if path != "relay" {
-		return errors.New("transfer: relay switch did not complete")
+		return wire.Errorf(wire.CodeRelay, "transfer: relay switch did not complete")
 	}
 	return c.relay.Send(frame)
 }
@@ -114,7 +114,7 @@ func (c *adaptiveConn) Close() error {
 	c.mu.Lock()
 	c.closed = true
 	c.mu.Unlock()
-	c.finishSwitch(errors.New("transfer: connection closed"))
+	c.finishSwitch(wire.Errorf(wire.CodeConnection, "transfer: connection closed"))
 	_ = c.relay.Close()
 	return c.direct.Close()
 }

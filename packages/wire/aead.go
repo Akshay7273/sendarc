@@ -4,7 +4,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/binary"
-	"errors"
 	"fmt"
 )
 
@@ -87,7 +86,7 @@ func Open(dir DirectionalKey, counter uint64, frame []byte) (*OpenedFrame, error
 
 // ErrFrameReplay identifies an already-consumed counter. Transfer engines ignore it while
 // keeping all forward counters authenticated, which makes transport replacement replay-safe.
-var ErrFrameReplay = errors.New("frame counter replay")
+var ErrFrameReplay = Errorf(CodeProtocol, "frame counter replay")
 
 // OpenSequenced opens a transfer frame using its authenticated wire counter. Forward gaps are
 // accepted after a transport loses a suffix; counters below minimum return ErrFrameReplay.
