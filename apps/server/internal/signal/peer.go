@@ -224,8 +224,10 @@ func (p *peer) dispatch(data []byte, msgLimiter *tokenBucket) bool {
 }
 
 // writeLoop is the sole writer of ws. It flushes queued frames until done is closed,
-// then writes any farewell frame and closes the socket.
+// then writes any farewell frame and closes the socket. Every exit path releases
+// teardown: a write failure must still close p.closed or teardown blocks forever.
 func (p *peer) writeLoop(ctx context.Context) {
+	defer close(p.closed)
 	for {
 		select {
 		case frame := <-p.send:
@@ -239,7 +241,6 @@ func (p *peer) writeLoop(ctx context.Context) {
 				p.rawWrite(ctx, websocket.MessageText, p.farewell)
 			}
 			_ = p.ws.Close(websocket.StatusNormalClosure, "")
-			close(p.closed)
 			return
 		}
 	}

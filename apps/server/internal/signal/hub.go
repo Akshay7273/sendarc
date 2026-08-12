@@ -56,9 +56,11 @@ func (h *Hub) openRelay(p *peer) (other *peer, ready bool, code string) {
 }
 
 // grantRelayCredit caps a receiver's grant to one configured window and returns the actual grant
-// forwarded to its sending partner.
+// forwarded to its sending partner. An oversized request is clamped to the window rather than
+// killing the connection: the CLI requests a fixed window that any operator-tuned smaller
+// configuration must degrade gracefully against.
 func (h *Hub) grantRelayCredit(receiver *peer, requested int64) (*peer, int64, string) {
-	if requested <= 0 || requested > h.cfg.RelayWindowBytes {
+	if requested <= 0 {
 		return nil, 0, errRelayCredit
 	}
 	h.mu.Lock()
@@ -71,7 +73,7 @@ func (h *Hub) grantRelayCredit(receiver *peer, requested int64) (*peer, int64, s
 	if sender == nil || !receiver.relayOpen || !sender.relayOpen {
 		return nil, 0, errRelayNotReady
 	}
-	grant := min(requested, h.cfg.RelayWindowBytes-sender.relayCredit)
+	grant := min(requested, h.cfg.RelayWindowBytes, h.cfg.RelayWindowBytes-sender.relayCredit)
 	if grant <= 0 {
 		return sender, 0, ""
 	}
@@ -81,7 +83,10 @@ func (h *Hub) grantRelayCredit(receiver *peer, requested int64) (*peer, int64, s
 }
 
 // forwardRelay reserves sender credit and room byte budget before handing one opaque frame to the
-// partner's bounded writer queue. No encrypted frame contents are parsed or logged.
+// partner's bounded writer queue. No encrypted frame contents are parsed or logged. The queue is
+// reserved before any credit or byte budget is charged: a frame the partner's queue rejected was
+// never delivered, so it must not count against the session, and the wedged party is the
+// receiver — it is closed instead of failing the innocent sender.
 func (h *Hub) forwardRelay(sender *peer, data []byte) string {
 	size := int64(len(data))
 	if size <= 0 || size > h.cfg.MaxRelayFrameBytes {
@@ -110,15 +115,25 @@ func (h *Hub) forwardRelay(sender *peer, data []byte) string {
 		h.mu.Unlock()
 		return errRelayLimit
 	}
+	h.mu.Unlock()
+
+	if !other.tryEnqueue(websocket.MessageBinary, append([]byte(nil), data...)) {
+		// The receiver's queue is full (it is not reading) or it is already closing.
+		// Close it rather than failing the sender for a wedge it did not cause.
+		other.fail(errRelayLimit, "receiver relay queue full")
+		return errRelayLimit
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	r, ok = h.rooms[sender.room]
+	if !ok || roomPartner(r, sender) != other {
+		return "" // the room tore down between enqueue and charge; nothing left to charge
+	}
 	sender.relayCredit -= size
 	r.relayBytes += size
 	h.relayBytes += size
 	r.lastSeen = time.Now()
-	h.mu.Unlock()
-
-	if !other.tryEnqueue(websocket.MessageBinary, append([]byte(nil), data...)) {
-		return errRelayLimit
-	}
 	return ""
 }
 
@@ -328,6 +343,16 @@ func (h *Hub) reapOnce(now time.Time) {
 		}
 	}
 	h.mu.Unlock()
+
+	// Prune per-IP connection limiters that have fully refilled and gone unused: without
+	// this, every distinct client IP ever seen pins a map entry forever.
+	h.connMu.Lock()
+	for ip, b := range h.connLimiters {
+		if b.refilledAndIdle(now, h.cfg.IdleTimeout) {
+			delete(h.connLimiters, ip)
+		}
+	}
+	h.connMu.Unlock()
 
 	for _, r := range stale {
 		h.logger.Info("signal: reaping idle room", "room", r.number)
