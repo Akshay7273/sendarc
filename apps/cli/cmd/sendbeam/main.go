@@ -331,9 +331,9 @@ func handshakeError(err error) string {
 		case rendezvous.CodeAborted:
 			return "cancelled"
 		}
-		return re.Msg
+		return "[" + string(wire.CodeOf(err)) + "] " + re.Msg
 	}
-	return err.Error()
+	return "[" + string(wire.CodeOf(err)) + "] " + err.Error()
 }
 
 func errorsAs(err error, target **rendezvous.Error) bool {
