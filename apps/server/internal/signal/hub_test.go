@@ -330,3 +330,28 @@ func TestPeerRelayQueueBackpressuresAtMessageCapacity(t *testing.T) {
 		t.Fatal("enqueue did not resume after the writer made room")
 	}
 }
+
+func TestReapPrunesIdleConnLimiters(t *testing.T) {
+	h := testHub(t)
+	sweepAt := time.Now().Add(2 * h.cfg.IdleTimeout)
+
+	for _, ip := range []string{"203.0.113.1", "203.0.113.2"} {
+		if !h.allowConnection(ip) {
+			t.Fatalf("first connection from %s refused", ip)
+		}
+	}
+	h.reapOnce(sweepAt)
+	if n := len(h.connLimiters); n != 0 {
+		t.Fatalf("idle limiters not pruned: %d remain", n)
+	}
+
+	// A bucket used just before the sweep survives: full but not idle. Sweep with a
+	// near-future clock so the bucket's elapsed idle time is well under IdleTimeout.
+	if !h.allowConnection("203.0.113.3") {
+		t.Fatal("connection refused before sweep")
+	}
+	h.reapOnce(time.Now().Add(10 * time.Millisecond))
+	if _, ok := h.connLimiters["203.0.113.3"]; !ok {
+		t.Fatal("recently active limiter was pruned")
+	}
+}

@@ -87,6 +87,9 @@ type Sender struct {
 	completeSent           bool
 	settled                bool
 	err                    error
+	// handleMu serializes Handle so two byte paths (direct and relay pumps during a
+	// cutover) can never run it concurrently and race recvCounter or the state machine.
+	handleMu sync.Mutex
 	// resumePlan maps file index to the receiver's high-water mark; each file restarts there.
 	resumePlan map[int]int
 	// resumeReceived is set once a valid resume_state has been applied (resume mode only).
@@ -274,8 +277,13 @@ func (s *Sender) Run(ctx context.Context) (string, error) {
 	return transferDigest, nil
 }
 
-// Handle consumes one encrypted receiver control frame. Calls must remain ordered.
+// Handle consumes one encrypted receiver control frame. It is safe to call from
+// any number of goroutines; inbound frames are serialized so counters and state
+// stay consistent even when a path cutover briefly feeds both transports.
 func (s *Sender) Handle(frame []byte) {
+	s.handleMu.Lock()
+	defer s.handleMu.Unlock()
+
 	s.mu.Lock()
 	if s.settled {
 		s.mu.Unlock()
@@ -325,12 +333,16 @@ func (s *Sender) Handle(frame []byte) {
 		s.applyRemoteControl(m.Op)
 	case *Done:
 		s.mu.Lock()
-		premature := !s.completeSent || len(s.inflight) != 0
+		premature := !s.completeSent
 		s.mu.Unlock()
 		if premature {
-			s.fail(NewTransferError(FailIntegrity, "done before every block was acknowledged"))
+			s.fail(NewTransferError(FailIntegrity, "done before complete was sent"))
 			return
 		}
+		// Done is authoritative: the receiver only sends it after verifying the
+		// whole-file digest (see onComplete). A non-empty inflight window here means
+		// acks were lost during a path cutover, not that the receiver lacks blocks —
+		// failing the transfer would be a false failure, so settle instead.
 		s.settle()
 	case *Fail:
 		s.fail(NewTransferError(m.Reason, "receiver failed: "+string(m.Reason)))

@@ -118,6 +118,12 @@ const (
 	// DefaultInflightBlocks bounds how many unacknowledged blocks the sender retains,
 	// capping receiver pressure and retry memory regardless of sink speed.
 	DefaultInflightBlocks = 8
+	// MaxManifestBlockBytes is the hard ceiling on any single block allocation the
+	// receiver will make from a manifest. It exists purely to bound untrusted input:
+	// honest senders use DefaultBlockBytes, but a malicious peer that completed the
+	// handshake could otherwise claim a multi-gigabyte block and OOM the receiver
+	// before a payload byte arrives.
+	MaxManifestBlockBytes = 16 * 1024 * 1024
 )
 
 const (

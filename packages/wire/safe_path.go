@@ -81,6 +81,9 @@ func ValidateManifest(manifest Manifest) (Manifest, error) {
 		if file.Size < 0 || file.LastModified < 0 || file.BlockSize <= 0 || file.Blocks < 0 {
 			return Manifest{}, errors.New("manifest has invalid file geometry")
 		}
+		if file.BlockSize > MaxManifestBlockBytes {
+			return Manifest{}, fmt.Errorf("manifest block size %d exceeds the %d-byte ceiling", file.BlockSize, MaxManifestBlockBytes)
+		}
 		wantBlocks := 0
 		if file.Size > 0 {
 			wantBlocks = int((file.Size-1)/int64(file.BlockSize) + 1)

@@ -344,9 +344,12 @@ export class TransferSender {
         this.applyRemoteControl(msg.op);
         return;
       case FrameType.Done:
-        if (!this.completeSent || this.inflight.size !== 0) {
-          throw new TransferError('integrity', 'done before every block was acknowledged');
+        if (!this.completeSent) {
+          throw new TransferError('integrity', 'done before complete was sent');
         }
+        // Done is authoritative: the receiver only sends it after verifying the
+        // whole-file digest. A non-empty inflight window here means acks were lost
+        // during a path cutover, so settle instead of failing a healthy transfer.
         this.settle();
         return;
       case FrameType.Fail:

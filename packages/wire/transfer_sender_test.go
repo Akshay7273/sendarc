@@ -412,3 +412,38 @@ func TestSenderContextCancellationNotifiesPeer(t *testing.T) {
 		t.Fatalf("last cancellation frame = %#v, err=%v", msg, decodeErr)
 	}
 }
+
+// TestSenderFailsOnDoneBeforeComplete pins the fail-closed half of the Done path: a
+// receiver may only send Done in response to Complete (after verifying the whole-file
+// digest), so Done before Complete is a protocol violation and must fail the transfer.
+func TestSenderFailsOnDoneBeforeComplete(t *testing.T) {
+	keys, err := DeriveTransferKeys(senderMaster())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out outbox
+	s := NewSender(SenderOptions{
+		File:      BytesSource([]byte{1, 2, 3, 4}, FileMeta{Name: "f", Size: 4}, 0),
+		Send:      out.push,
+		SendDir:   keys.O2J,
+		RecvDir:   keys.J2O,
+		BlockSize: 8,
+		FrameSize: 4,
+	})
+	res := make(chan error, 1)
+	go func() { _, runErr := s.Run(context.Background()); res <- runErr }()
+	waitStable(t, &out, 3) // manifest + data + hash
+
+	done, err := EncodeControl(NewDone())
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := Seal(keys.J2O, 0, FrameHeaderInput{Version: FrameVersion, Type: NewDone().FrameType()}, done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Handle(frame)
+	if runErr := <-res; runErr == nil {
+		t.Fatal("Run succeeded on Done before Complete was sent")
+	}
+}
