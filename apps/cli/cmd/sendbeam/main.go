@@ -53,21 +53,25 @@ func main() {
 }
 
 func usage(w *os.File) {
-	_, _ = fmt.Fprint(w, `sendbeam — secure peer-to-peer file transfer
-
-Usage:
-  sendbeam send <file-or-folder>... [flags]
-  sendbeam receive <code|link> [flags]
-
-Flags:
-  --server URL             signaling server (default `+defaultServer+`)
-  --insecure-skip-verify   skip TLS verification; self-signed dev certs only
-  --ice-server URL         STUN server for direct-path candidates (repeatable;
-                           default stun:stun.l.google.com:19302)
-  --relay-only             force the encrypted WebSocket relay instead of WebRTC
-  --words N                number of words in the invite code (send only; 0 = default)
-  --out DIR                directory to write the received file into (receive only; default .)
-`)
+	s := newStyle(w)
+	_, _ = fmt.Fprintln(w, s.bold("SendBeam — secure peer-to-peer file transfer"))
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "Usage:")
+	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam send")+" <file-or-folder>... [flags]")
+	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam receive")+" <code|link> [flags]")
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, s.dim("Common flags:"))
+	_, _ = fmt.Fprintln(w, "  --server URL             signaling server (default "+defaultServer+")")
+	_, _ = fmt.Fprintln(w, "  --insecure-skip-verify   skip TLS verification; self-signed dev certs only")
+	_, _ = fmt.Fprintln(w, "  --ice-server URL         STUN server for direct-path candidates")
+	_, _ = fmt.Fprintln(w, "                           (repeatable; default stun:stun.l.google.com:19302)")
+	_, _ = fmt.Fprintln(w, "  --relay-only             force the encrypted WebSocket relay instead of WebRTC")
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, s.dim("Send flags:"))
+	_, _ = fmt.Fprintln(w, "  --words N                number of words in the invite code (0 = default)")
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, s.dim("Receive flags:"))
+	_, _ = fmt.Fprintln(w, "  --out DIR                directory to write the received file into (default .)")
 }
 
 func runSend(args []string) int {
@@ -103,7 +107,8 @@ func runSend(args []string) int {
 
 	client, err := dial(ctx, *server, *insecure)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "\nFailed: %s\n", handshakeError(err))
+		s := newStyle(os.Stderr)
+		fmt.Fprintf(os.Stderr, "\n%s\n", s.cross("Failed: "+handshakeError(err)))
 		return 1
 	}
 	defer client.Close()
@@ -127,20 +132,22 @@ func runSend(args []string) int {
 		OnStateChange:  progress.setState,
 	})
 	progress.finish()
+	s := newStyle(os.Stderr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "\nFailed: %s\n", handshakeError(err))
+		fmt.Fprintf(os.Stderr, "\n%s\n", s.cross("Failed: "+handshakeError(err)))
 		return 1
 	}
+	fmt.Println()
 	if len(out.Files) == 1 {
-		fmt.Printf("\n✓ Sent %s (%s).\n", out.Name, humanBytes(out.Size))
+		fmt.Println(s.green("✓") + " Sent " + s.bold(out.Name) + " (" + humanBytes(out.Size) + ").")
 	} else {
-		fmt.Printf("\n✓ Sent %d files (%s).\n", len(out.Files), humanBytes(out.Size))
+		fmt.Println(s.green("✓") + " Sent " + s.bold(fmt.Sprintf("%d files", len(out.Files))) + " (" + humanBytes(out.Size) + ").")
 	}
-	fmt.Printf("  Fingerprint:  %s\n", fingerprint(out.Handshake.Master))
+	fmt.Printf("  %s  %s\n", s.grey("Fingerprint:"), fingerprint(out.Handshake.Master))
 	if len(out.Files) == 1 {
-		fmt.Printf("  SHA-256:      %s\n", out.Digest)
+		fmt.Printf("  %s  %s\n", s.grey("SHA-256:"), out.Digest)
 	} else {
-		fmt.Printf("  File-set SHA-256: %s\n", out.Digest)
+		fmt.Printf("  %s  %s\n", s.grey("File-set SHA-256:"), out.Digest)
 	}
 	return 0
 }
@@ -172,12 +179,14 @@ func runReceive(args []string) int {
 
 	client, err := dial(ctx, *server, *insecure)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "\nFailed: %s\n", handshakeError(err))
+		s := newStyle(os.Stderr)
+		fmt.Fprintf(os.Stderr, "\n%s\n", s.cross("Failed: "+handshakeError(err)))
 		return 1
 	}
 	defer client.Close()
 
-	fmt.Fprintf(os.Stderr, "Joining %s …\n", code)
+	s := newStyle(os.Stderr)
+	fmt.Fprintln(os.Stderr, s.dim("Joining "+code+" …"))
 	progress := newProgress(0)
 	out, err := transfer.Run(ctx, client, transfer.Spec{
 		Session: rendezvous.Options{
@@ -208,19 +217,20 @@ func runReceive(args []string) int {
 	})
 	progress.finish()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "\nFailed: %s\n", handshakeError(err))
+		fmt.Fprintf(os.Stderr, "\n%s\n", s.cross("Failed: "+handshakeError(err)))
 		return 1
 	}
+	fmt.Println()
 	if len(out.Files) == 1 {
-		fmt.Printf("\n✓ Received %s (%s) → %s\n", out.Name, humanBytes(out.Size), out.Path)
+		fmt.Println(s.check("Received " + s.bold(out.Name) + " (" + humanBytes(out.Size) + ") → " + out.Path + "."))
 	} else {
-		fmt.Printf("\n✓ Received %d files (%s) → %s\n", len(out.Files), humanBytes(out.Size), *outDir)
+		fmt.Println(s.check("Received " + s.bold(fmt.Sprintf("%d files", len(out.Files))) + " (" + humanBytes(out.Size) + ") → " + *outDir + "."))
 	}
-	fmt.Printf("  Fingerprint:  %s\n", fingerprint(out.Handshake.Master))
+	fmt.Printf("  %s  %s\n", s.grey("Fingerprint:"), fingerprint(out.Handshake.Master))
 	if len(out.Files) == 1 {
-		fmt.Printf("  SHA-256:      %s\n", out.Digest)
+		fmt.Printf("  %s  %s\n", s.grey("SHA-256:"), out.Digest)
 	} else {
-		fmt.Printf("  File-set SHA-256: %s\n", out.Digest)
+		fmt.Printf("  %s  %s\n", s.grey("File-set SHA-256:"), out.Digest)
 	}
 	return 0
 }
@@ -237,7 +247,8 @@ func iceServers(flagValue string) []webrtc.ICEServer {
 // dial opens the signaling socket, reporting the server it is contacting. The transfer
 // driver adopts the returned client for the whole exchange and closes it when done.
 func dial(ctx context.Context, server string, insecure bool) (*wsclient.Client, error) {
-	fmt.Fprintf(os.Stderr, "Connecting to %s …\n", server)
+	s := newStyle(os.Stderr)
+	fmt.Fprintln(os.Stderr, s.dim("Connecting to "+server+" …"))
 	return wsclient.Dial(ctx, server, wsclient.DialOptions{InsecureSkipVerify: insecure})
 }
 
@@ -261,13 +272,15 @@ func parseArgs(fs *flag.FlagSet, args []string) []string {
 // codePrinter shows the invite code and the matching web-app link once the room is
 // allocated, so the sender can hand either to the recipient.
 func codePrinter(server string) func(string) {
+	s := newStyle(os.Stderr)
 	return func(code string) {
-		fmt.Println()
-		fmt.Printf("  Invite code:  %s\n", code)
+		fmt.Fprintln(os.Stderr)
 		if link := inviteLink(server, code); link != "" {
-			fmt.Printf("  Invite link:  %s\n", link)
+			fmt.Fprintln(os.Stderr, frame("SendBeam invite", s.cyan(code), s.dim("link: "+link)))
+		} else {
+			fmt.Fprintln(os.Stderr, frame("SendBeam invite", s.cyan(code)))
 		}
-		fmt.Println()
+		fmt.Fprintln(os.Stderr)
 	}
 }
 
@@ -275,14 +288,15 @@ func codePrinter(server string) func(string) {
 // peer (offerer only) and the start of the key handshake — and stays quiet for the rest so
 // the output reads as progress, not a state-machine trace.
 func phasePrinter(role rendezvous.Role) func(rendezvous.Phase) {
+	s := newStyle(os.Stderr)
 	return func(p rendezvous.Phase) {
 		switch p {
 		case rendezvous.PhaseWaiting:
 			if role == rendezvous.RoleOfferer {
-				fmt.Fprintln(os.Stderr, "Waiting for the receiver to join …")
+				fmt.Fprintln(os.Stderr, s.dim("Waiting for the receiver to join …"))
 			}
 		case rendezvous.PhaseHandshaking:
-			fmt.Fprintln(os.Stderr, "Establishing a secure channel …")
+			fmt.Fprintln(os.Stderr, s.cyan("Establishing a secure channel …"))
 		}
 	}
 }
@@ -290,14 +304,16 @@ func phasePrinter(role rendezvous.Role) func(rendezvous.Phase) {
 // connectPrinter returns a one-shot callback that prints line once the direct channel is
 // open, just before the bytes begin to move.
 func connectPrinter(line string) func() {
-	return func() { fmt.Fprintln(os.Stderr, line) }
+	s := newStyle(os.Stderr)
+	return func() { fmt.Fprintln(os.Stderr, s.bold(line)) }
 }
 
 func transportPrinter(path string) {
+	s := newStyle(os.Stderr)
 	if path == "relay" {
-		fmt.Fprintln(os.Stderr, "Transport: encrypted WebSocket relay")
+		fmt.Fprintln(os.Stderr, s.dim("Transport: encrypted WebSocket relay"))
 	} else {
-		fmt.Fprintln(os.Stderr, "Transport: direct WebRTC")
+		fmt.Fprintln(os.Stderr, s.dim("Transport: direct WebRTC"))
 	}
 }
 
