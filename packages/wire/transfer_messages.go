@@ -301,6 +301,9 @@ func decodeManifest(payload []byte) (ControlMsg, error) {
 	if len(raw.Files) == 0 {
 		return nil, errors.New("control frame: manifest.files empty")
 	}
+	if len(raw.Files) > MaxTransferFiles {
+		return nil, fmt.Errorf("control frame: manifest has %d files, maximum is %d", len(raw.Files), MaxTransferFiles)
+	}
 	if raw.TotalSize == nil {
 		return nil, errors.New("control frame: manifest.totalSize missing")
 	}
@@ -445,6 +448,9 @@ func decodeResumeState(payload []byte) (ControlMsg, error) {
 	}
 	if len(raw.Files) == 0 {
 		return nil, errors.New("control frame: resume_state.files empty")
+	}
+	if len(raw.Files) > MaxTransferFiles {
+		return nil, fmt.Errorf("control frame: resume_state has %d files, maximum is %d", len(raw.Files), MaxTransferFiles)
 	}
 	files := make([]ResumeFileState, len(raw.Files))
 	for i, rf := range raw.Files {

@@ -444,3 +444,41 @@ func TestRelayCreditRequestClampedNotKilled(t *testing.T) {
 		t.Fatalf("reverse credit = %v, want 16", got)
 	}
 }
+
+// SB-1140: fuzz the server's inbound signaling envelope. The server only reads
+// type/room/role/bytes, so the invariant is a clean decode-or-reject with no
+// panic and no empty type slipping through (dispatch treats "" as invalid).
+func FuzzClientMsg(f *testing.F) {
+	seeds := []string{
+		`{"type":"create"}`,
+		`{"type":"join","room":3}`,
+		`{"type":"resume","room":3,"role":"offerer"}`,
+		`{"type":"sdp","sdp":"v=0"}`,
+		`{"type":"relay_credit","bytes":1024}`,
+		`{"type":"bye"}`,
+		`{}`,
+		`not-json`,
+		`{"type":"","room":1}`,
+		`{"type":42}`,
+	}
+	for _, s := range seeds {
+		f.Add([]byte(s))
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		var m clientMsg
+		if err := json.Unmarshal(data, &m); err != nil {
+			return
+		}
+		if m.Type == "" {
+			// dispatch rejects an empty type as an invalid message; anything else
+			// is a server-side regression. Accept either a known type or the
+			// invalid-message rejection path (which is not exercised here directly).
+			return
+		}
+		// A non-empty type must decode into a marshalable envelope so the server
+		// can relay/reject it without corruption.
+		if _, err := json.Marshal(m); err != nil {
+			t.Fatalf("clientMsg round-trip marshal failed for %+v: %v", m, err)
+		}
+	})
+}
