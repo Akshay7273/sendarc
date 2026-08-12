@@ -17,6 +17,11 @@ import { SignalAuthenticator } from '../transfer/authed-signaling.js';
 import { createPeer, type Peer } from '../transfer/peer.js';
 import { ChannelWriter } from '../transfer/channel-writer.js';
 import { RelayTransport } from '../transfer/relay.js';
+import {
+  AdaptivePolicy,
+  Connection as AdaptiveConnection,
+  Gathering as AdaptiveGathering,
+} from '../transfer/adaptive.js';
 import { ProgressTracker, type TransferSnapshot } from '../transfer/progress.js';
 import { readOpfsOutput, removeOpfsOutput } from '../transfer/sink.js';
 import type {
@@ -122,6 +127,14 @@ function run(
   let switchPromise: Promise<void> | undefined;
   let cancelTimer: ReturnType<typeof setTimeout> | undefined;
 
+  // Adaptive direct/relay racing: the same ICE-progress policy as the CLI decides when to warm
+  // the encrypted relay, replacing the former blind fixed-duration fallback.
+  const adaptivePolicy = new AdaptivePolicy();
+  let warmRelaySignal: (() => void) | undefined;
+  const warmRelayWhenDecided = new Promise<void>((resolve) => {
+    warmRelaySignal = resolve;
+  });
+
   let resolveDone!: (o: TransferOutcome) => void;
   let rejectDone!: (err: Error) => void;
   const donePromise = new Promise<TransferOutcome>((resolve, reject) => {
@@ -167,6 +180,19 @@ function run(
         auth,
         send: (msg) => signaling.send(msg),
         ...(spec.iceServers ? { iceServers: spec.iceServers } : {}),
+        onIceState: (s) => {
+          if (!generation.isCurrent(gen)) return;
+          if (
+            adaptivePolicy.observe({
+              gathering: s.gathering as AdaptiveGathering,
+              connection: s.connection as AdaptiveConnection,
+              hasServerReflexive: s.hasServerReflexive,
+              hasAnyCandidate: s.hasAnyCandidate,
+            }) === 'warm-relay'
+          ) {
+            warmRelaySignal?.();
+          }
+        },
       });
       peer = p;
       const relayPath = new RelayTransport(signaling);
@@ -196,7 +222,7 @@ function run(
       // which can beat the channel negotiation; a late listener would miss it and hang forever.
       const ready = workerReady(w);
 
-      const selected = await selectTransport(p, relayPath);
+      const selected = await selectTransport(p, relayPath, warmRelayWhenDecided);
       transport = selected.kind;
       if (selected.kind === 'direct') {
         writer = new ChannelWriter(selected.channel);
@@ -399,8 +425,17 @@ function run(
 
 type SelectedTransport = { kind: 'direct'; channel: RTCDataChannel } | { kind: 'relay' };
 
-async function selectTransport(peer: Peer, relay: RelayTransport): Promise<SelectedTransport> {
-  let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => relay.open(), 8000);
+/**
+ * Race direct establishment against a relay that is warmed only when the adaptive policy
+ * decides the direct path is not viable (replacing the old blind timed fallback). The relay is
+ * opened when the policy signals it or when direct fails outright; whichever path is ready
+ * first wins. The losing peer is released by the caller when a relay wins.
+ */
+async function selectTransport(
+  peer: Peer,
+  relay: RelayTransport,
+  warmRelayWhenDecided: Promise<void>,
+): Promise<SelectedTransport> {
   const direct = peer.channel.then(
     (channel): SelectedTransport => ({ kind: 'direct', channel }),
     async (): Promise<SelectedTransport> => {
@@ -409,11 +444,12 @@ async function selectTransport(peer: Peer, relay: RelayTransport): Promise<Selec
       return { kind: 'relay' };
     },
   );
-  const relayed = relay.ready.then((): SelectedTransport => ({ kind: 'relay' }));
-  const selected = await Promise.race([direct, relayed]);
-  clearTimeout(timer);
-  timer = undefined;
-  return selected;
+  const relayed = warmRelayWhenDecided.then(async (): Promise<SelectedTransport> => {
+    relay.open();
+    await relay.ready;
+    return { kind: 'relay' };
+  });
+  return Promise.race([direct, relayed]);
 }
 
 /** Resolve once the worker posts its one-time `ready` handshake. */

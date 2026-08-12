@@ -10,7 +10,6 @@ import (
 	"errors"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/pion/webrtc/v4"
 	relaytransport "github.com/sendbeam/cli/internal/relay"
@@ -51,10 +50,8 @@ type Spec struct {
 	// ICEServers overrides rtc.DefaultICEServers. An explicit empty slice uses host candidates
 	// only (loopback tests); nil takes the default STUN server.
 	ICEServers []webrtc.ICEServer
-	// ForceRelay skips direct negotiation. ConnectTimeout selects relay when direct negotiation
-	// does not finish in time; zero uses the production default.
-	ForceRelay     bool
-	ConnectTimeout time.Duration
+	// ForceRelay skips direct negotiation and goes straight to the encrypted relay.
+	ForceRelay bool
 	// OnTransport reports "direct" or "relay" when the selected byte path changes.
 	OnTransport func(string)
 	// OnConnect fires once the DataChannel opens, before the first byte moves.
@@ -97,7 +94,7 @@ type FileOutcome struct {
 // handshake carries the sdp/ice signaling afterwards, so the read loop switches from feeding the
 // session to feeding the peer once the key is established.
 func Run(ctx context.Context, sig Signal, spec Spec) (*Outcome, error) {
-	d := &driver{sig: sig, spec: spec, peerCh: make(chan *rtc.Peer, 1)}
+	d := &driver{sig: sig, spec: spec, peerCh: make(chan *rtc.Peer, 1), warmSignal: make(chan struct{}, 1)}
 	return d.run(ctx)
 }
 
@@ -114,6 +111,14 @@ type driver struct {
 	relay  *relaytransport.Conn
 	res    *rendezvous.Result
 	peerCh chan *rtc.Peer
+
+	// pol is the adaptive direct/relay racing policy driven by the direct peer's ICE progress.
+	// It is created alongside the peer in route() when direct negotiation is attempted, and
+	// nil when relay-only or relay fallback. warmSignal is signalled once the policy decides
+	// the relay should be warmed (buffered so a decision that fires before selectTransport
+	// starts is not lost).
+	pol        *AdaptivePolicy
+	warmSignal chan struct{}
 }
 
 // Send implements rendezvous.Sink for the handshake session and doubles as the peer's send
@@ -309,29 +314,41 @@ func (d *driver) selectTransport(ctx context.Context, peer *rtc.Peer, readErr <-
 	} else if err := d.relay.Open(); err != nil {
 		return nil, "", err
 	}
-	timeout := d.spec.ConnectTimeout
-	if timeout <= 0 {
-		timeout = 8 * time.Second
+
+	// Replaced the old blind ~8s fallback timer with a policy-driven decision: the relay is
+	// warmed only when ICE progress shows the direct path is not viable (no server-reflexive
+	// hints, ICE failure, or a bounded no-hint escalation), then raced against direct.
+	warmCh := d.warmSignal
+	relayWarm := false
+	warmRelay := func() error {
+		if relayWarm {
+			return nil
+		}
+		if err := d.relay.Open(); err != nil {
+			return wire.Errorf(wire.CodeRelay, "transfer: relay warm: %v", err)
+		}
+		relayWarm = true
+		warmCh = nil
+		return nil
 	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	timeoutCh := timer.C
 
 	for {
 		select {
 		case result := <-direct:
 			if result.err == nil {
+				// Direct won the race. The relay, if warmed, is intentionally retained as the
+				// ready cutover fallback (V12-PR05 owns migration); only the losing direct peer
+				// (and relay winner) release their candidates below.
 				return result.conn, "direct", nil
 			}
-			if err := d.relay.Open(); err != nil {
-				return nil, "", wire.Errorf(wire.CodeRelay, "transfer: direct failed (%v), relay open: %v", result.err, err)
+			if err := warmRelay(); err != nil {
+				return nil, "", err
 			}
 			direct = nil
-		case <-timeoutCh:
-			if err := d.relay.Open(); err != nil {
-				return nil, "", wire.Errorf(wire.CodeRelay, "transfer: relay fallback: %v", err)
+		case <-warmCh:
+			if err := warmRelay(); err != nil {
+				return nil, "", err
 			}
-			timeoutCh = nil
 		case <-d.relay.Ready():
 			if peer != nil {
 				_ = peer.Close()
@@ -378,11 +395,26 @@ func (d *driver) route(m rendezvous.Message) {
 	var peer *rtc.Peer
 	if !d.spec.ForceRelay {
 		var perr error
+		d.pol = NewAdaptivePolicy(0)
 		peer, perr = rtc.NewPeer(rtc.PeerOptions{
 			Role:       res.Role,
 			Auth:       rtc.FromSession(res.Role, res.Room, res.Spake2),
 			Send:       d.Send,
 			ICEServers: d.spec.ICEServers,
+			OnICEState: func(s rtc.ICEState) {
+				ev := AdaptiveEvent{
+					Gathering:          adaptiveGathering(s.Gathering.String()),
+					Connection:         adaptiveConnection(s.Connection.String()),
+					HasServerReflexive: s.HasServerReflexive,
+					HasAnyCandidate:    s.HasAnyCandidate,
+				}
+				if d.pol.Observe(ev) == DecisionWarmRelay {
+					select {
+					case d.warmSignal <- struct{}{}:
+					default:
+					}
+				}
+			},
 		})
 		if perr != nil {
 			d.sig.Close()
