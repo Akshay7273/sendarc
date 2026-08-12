@@ -6,6 +6,7 @@ import (
 
 	relaytransport "github.com/sendbeam/cli/internal/relay"
 	"github.com/sendbeam/cli/internal/rtc"
+	"github.com/sendbeam/cli/internal/supervisor"
 	"github.com/sendbeam/wire"
 )
 
@@ -15,8 +16,8 @@ import (
 const relaySwitchTimeout = 15 * time.Second
 
 // adaptiveConn starts on an open direct channel and atomically converges onto the session relay.
-// Frames accepted by the old channel may be lost during cutover; the transfer engines recover
-// their unacknowledged block window after the switch callback.
+// It uses the supervisor for path state management while preserving the existing blocking-Send
+// behavior during cutover.
 type adaptiveConn struct {
 	direct *rtc.DataConn
 	relay  *relaytransport.Conn
@@ -30,16 +31,19 @@ type adaptiveConn struct {
 	onSwitch    func()
 	hookCalled  bool
 	onTransport func(string)
+
+	sv *supervisor.Supervisor
 }
 
 func newAdaptiveConn(
 	direct *rtc.DataConn,
 	relay *relaytransport.Conn,
 	onTransport func(string),
+	sv *supervisor.Supervisor,
 ) *adaptiveConn {
 	c := &adaptiveConn{
 		direct: direct, relay: relay, path: "direct", switchDone: make(chan struct{}),
-		onTransport: onTransport,
+		onTransport: onTransport, sv: sv,
 	}
 	go func() {
 		select {
@@ -153,6 +157,11 @@ func (c *adaptiveConn) requestRelay() {
 	}
 	if err := c.relay.Open(); err != nil {
 		c.finishSwitch(err)
+		return
+	}
+	if c.sv != nil {
+		_ = c.sv.Warming(supervisor.PathRelay)
+		_ = c.sv.Ready(supervisor.PathRelay)
 	}
 }
 
@@ -163,15 +172,15 @@ func (c *adaptiveConn) activateRelay() {
 		return
 	}
 	c.path = "relay"
-	hook := c.onSwitch
-	if hook != nil {
-		c.hookCalled = true
-	}
 	onTransport := c.onTransport
 	c.mu.Unlock()
 
-	if hook != nil {
-		hook()
+	if c.sv != nil {
+		_ = c.sv.Warming(supervisor.PathRelay)
+		_ = c.sv.Ready(supervisor.PathRelay)
+		_, _ = c.sv.Activate(supervisor.PathRelay)
+	} else if c.onSwitch != nil {
+		c.onSwitch()
 	}
 	if onTransport != nil {
 		onTransport("relay")
