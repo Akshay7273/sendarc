@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sendbeam/wire"
 )
 
 func testRouter(t *testing.T, cfg Config) http.Handler {
@@ -102,12 +104,12 @@ func TestConfigEndpoint(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	var body map[string]string
+	var body map[string]json.RawMessage
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("json: %v", err)
 	}
-	if body["publicUrl"] != "https://send.example.com" {
-		t.Errorf("publicUrl = %q, want https://send.example.com", body["publicUrl"])
+	if got := string(body["publicUrl"]); got != `"https://send.example.com"` {
+		t.Errorf("publicUrl = %s, want https://send.example.com", got)
 	}
 }
 
@@ -115,10 +117,56 @@ func TestConfigEndpointEmpty(t *testing.T) {
 	h := testRouter(t, Config{})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/config.json", nil))
-	var body map[string]string
+	var body map[string]json.RawMessage
 	_ = json.Unmarshal(rec.Body.Bytes(), &body)
-	if body["publicUrl"] != "" {
-		t.Errorf("publicUrl = %q, want empty when not configured", body["publicUrl"])
+	if got := string(body["publicUrl"]); got != `""` {
+		t.Errorf("publicUrl = %s, want empty when not configured", got)
+	}
+}
+
+func TestConfigEndpointICEServers(t *testing.T) {
+	h := testRouter(t, Config{
+		ICEServerURLs: []string{"stun:stun1.example.com:3478", "stun:stun2.example.com:3478"},
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/config.json", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		ICEServers []wire.ICEEntry `json:"iceServers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if len(body.ICEServers) != 1 {
+		t.Fatalf("iceServers len = %d, want 1 folded entry", len(body.ICEServers))
+	}
+	if got := strings.Join(body.ICEServers[0].URLs, ","); got != "stun:stun1.example.com:3478,stun:stun2.example.com:3478" {
+		t.Errorf("urls = %q", got)
+	}
+}
+
+func TestConfigEndpointNoICEServersOmitsEmpty(t *testing.T) {
+	h := testRouter(t, Config{})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/config.json", nil))
+	var body struct {
+		ICEServers []wire.ICEEntry `json:"iceServers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if len(body.ICEServers) != 0 {
+		t.Fatalf("iceServers len = %d, want 0 when unset", len(body.ICEServers))
+	}
+}
+
+func TestConfigEndpointInvalidICEServersFailsStartup(t *testing.T) {
+	if h, err := router(context.Background(), Config{
+		ICEServerURLs: []string{"://not-a-url"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil {
+		t.Errorf("expected router error for malformed ICE URL, got handler %v", h)
 	}
 }
 
