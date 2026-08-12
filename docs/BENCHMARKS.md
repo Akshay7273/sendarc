@@ -36,14 +36,14 @@ Machine: Intel Core i5-6200U @ 2.30 GHz (4 cores), Linux, `go test` without `-ra
 ## Memory model (independent of transport)
 
 - **Frames are 16 KiB** on both paths (`DEFAULT_FRAME_BYTES`); the relay caps a single
-  frame at 128 KiB (`SENDARC_RELAY_MAX_FRAME_BYTES`).
+  frame at 128 KiB (`SENDBEAM_RELAY_MAX_FRAME_BYTES`).
 - **Sender side**: at most `DEFAULT_INFLIGHT_BLOCKS = 8` blocks (1 MiB each) in flight
   ahead of receiver confirmation, and the DataChannel buffered-amount watermark paces at
   ~8 MiB (`BUFFERED_AMOUNT_HIGH`).
 - **Receiver side**: RAM is bounded by the same 8-block window regardless of sink speed —
   a slow sink causes backpressure, never growth.
 - **Relay**: per-connection window 1 MiB, queue 2 MiB, throughput token bucket 32 MiB/s
-  (`SENDARC_RELAY_*`); a busy instance stays in the low tens of MiB.
+  (`SENDBEAM_RELAY_*`); a busy instance stays in the low tens of MiB.
 
 So a 100 MiB file does not imply 100 MiB of buffers anywhere in the chain: the memory
 ceiling is a small constant, not the file size.

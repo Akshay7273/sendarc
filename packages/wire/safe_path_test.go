@@ -41,6 +41,7 @@ func TestValidateManifest(t *testing.T) {
 		*NewManifest([]FileEntry{entry(0, "../a", 9)}, 9),
 		*NewManifest([]FileEntry{func() FileEntry { f := entry(0, "a", 9); f.Blocks = 99; return f }()}, 9),
 		*NewManifest([]FileEntry{entry(0, "a", 9)}, 8),
+		*NewManifest([]FileEntry{func() FileEntry { f := entry(0, "big.bin", 1<<30); f.BlockSize = 1 << 30; f.Blocks = 1; return f }()}, 1<<30),
 	}
 	for i, manifest := range bad {
 		if _, err := ValidateManifest(manifest); err == nil {

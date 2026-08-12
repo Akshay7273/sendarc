@@ -4,7 +4,7 @@ apps/web/dist/
 apps/web/.svelte-kit/
 apps/web/test-results/
 apps/web/playwright-report/
-apps/server/sendarcd
+apps/server/sendbeamd
 packages/protocol/dist/
 
 # Dependencies

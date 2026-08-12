@@ -48,7 +48,9 @@ func New(sig Signal) *Conn {
 	return c
 }
 
-// Open opts into relay once. The server asks the partner to do the same.
+// Open opts into relay once. The server asks the partner to do the same. The relay is
+// only marked opened after the opt-in frame was actually sent: a transient signaling
+// failure leaves it retryable instead of permanently stuck "opened but never ready".
 func (c *Conn) Open() error {
 	c.mu.Lock()
 	if c.closed {
@@ -59,9 +61,17 @@ func (c *Conn) Open() error {
 		c.mu.Unlock()
 		return nil
 	}
-	c.opened = true
 	c.mu.Unlock()
-	return c.sig.Send(rendezvous.NewRelayOpen())
+	if err := c.sig.Send(rendezvous.NewRelayOpen()); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return errClosed
+	}
+	c.opened = true
+	return nil
 }
 
 // WaitReady waits until both peers have opted in and initial receive credit is granted.

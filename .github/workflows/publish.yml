@@ -102,6 +102,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -111,10 +113,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" artifacts/* --clobber
+          if gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" artifacts/* --clobber -R "$GITHUB_REPOSITORY"
           else
             gh release create "$GITHUB_REF_NAME" artifacts/* \
               --title "SendBeam $GITHUB_REF_NAME" \
-              --notes "See the README for install and quickstart: https://github.com/$GITHUB_REPOSITORY"
+              --notes "See the README for install and quickstart: https://github.com/$GITHUB_REPOSITORY" \
+              -R "$GITHUB_REPOSITORY"
           fi

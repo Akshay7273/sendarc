@@ -3,10 +3,16 @@ package transfer
 import (
 	"errors"
 	"sync"
+	"time"
 
 	relaytransport "github.com/sendbeam/cli/internal/relay"
 	"github.com/sendbeam/cli/internal/rtc"
 )
+
+// relaySwitchTimeout bounds how long Send waits for the relay handshake to complete
+// after the direct path fails. Without it, a partner that never answers relay_open
+// would wedge the engine forever (no deadline exists anywhere else in that path).
+const relaySwitchTimeout = 15 * time.Second
 
 // adaptiveConn starts on an open direct channel and atomically converges onto the session relay.
 // Frames accepted by the old channel may be lost during cutover; the transfer engines recover
@@ -66,7 +72,11 @@ func (c *adaptiveConn) Send(frame []byte) error {
 		return nil
 	}
 	c.requestRelay()
-	<-c.switchDone
+	select {
+	case <-c.switchDone:
+	case <-time.After(relaySwitchTimeout):
+		return errors.New("transfer: relay switch timed out")
+	}
 	c.mu.Lock()
 	err := c.switchErr
 	path = c.path

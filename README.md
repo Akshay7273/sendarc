@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/Akshay7273/sendbeam/actions/workflows/ci.yml/badge.svg)](https://github.com/Akshay7273/sendbeam/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Akshay7273/sendbeam/blob/main/LICENSE)
-[![Image](https://img.shields.io/badge/image-ghcr.io%2Fakshay7273%2Fsendarc-blue.svg)](https://github.com/Akshay7273/sendbeam/pkgs/container/sendarc)
+[![Image](https://img.shields.io/badge/image-ghcr.io%2Fakshay7273%2Fsendbeam-blue.svg)](https://github.com/Akshay7273/sendbeam/pkgs/container/sendbeam)
 
 [Quick start](#quick-start) · [CLI](#cli) · [Self-hosting](#self-hosting) · [Security](#security) · [Documentation](#documentation) · [Development](#development)
 
@@ -56,20 +56,20 @@ Send and receive from terminals, servers, and scripts.
 Install with the project's task runner, or build from source:
 
 ```bash
-just install-cli                      # installs sendarc into ~/.local/bin
-git clone https://github.com/Akshay7273/sendbeam.git && cd sendarc
-go build -o ~/.local/bin/sendarc ./apps/cli/cmd/sendbeam
+just install-cli                      # installs sendbeam into ~/.local/bin
+git clone https://github.com/Akshay7273/sendbeam.git && cd sendbeam
+go build -o ~/.local/bin/sendbeam ./apps/cli/cmd/sendbeam
 ```
 
 Then send and receive with short, plain commands:
 
 ```bash
-sendarc send photo.jpg
-sendarc receive 4-brave-otter --out ./downloads
+sendbeam send photo.jpg
+sendbeam receive 4-brave-otter --out ./downloads
 ```
 
 Both clients produce the same invite code and link, so browser and CLI peers can mix freely.
-Run `sendarc help` for all options.
+Run `sendbeam help` for all options.
 
 ## Self-hosting
 
@@ -105,7 +105,7 @@ Full analysis, accepted limitations, and the trust boundary are in the
 ## Documentation
 
 - [Self-hosting](docs/HOSTING.md) — deployment, TLS, STUN/TURN, relay limits, metrics
-- [Protocol specification](docs/protocol.md) — `sendarc/1` wire protocol
+- [Protocol specification](docs/protocol.md) — `sendbeam/1` wire protocol
 - [Threat model](docs/threat-model.md) — trust boundary, attacks, mitigations
 - [Compatibility matrix](docs/compat-matrix.md) — NAT topologies, degraded networks, browsers
 - [Benchmarks](docs/BENCHMARKS.md) — throughput, memory, methodology

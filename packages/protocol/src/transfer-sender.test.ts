@@ -145,6 +145,42 @@ describe('TransferSender', () => {
     await expect(runP).rejects.toThrow(/integrity/);
   });
 
+  it('fails on done before complete (fail-closed Done handling)', async () => {
+    const keys = await deriveTransferKeys(master);
+    const data = new Uint8Array([1, 2, 3, 4]);
+    const outbound: Uint8Array[] = [];
+    const sender = new TransferSender({
+      file: bytesSource(data, { name: 'f', size: data.length, mime: '', lastModified: 0 }),
+      send: (frame) => void outbound.push(frame),
+      sendDir: keys.o2j,
+      recvDir: keys.j2o,
+      sendCounterStart: 0,
+      recvCounterStart: 0,
+      createDigest: nodeDigest,
+      blockSize: 8,
+      frameSize: 4,
+    });
+
+    const runP = sender.run();
+    await waitFor(() => outbound.length === 3); // manifest, block_data, block_hash
+
+    const done = await seal(
+      keys.j2o,
+      0,
+      {
+        version: FRAME_VERSION,
+        type: FrameType.Done,
+        flags: 0,
+        fileIdx: 0,
+        blockIdx: 0,
+        frameOff: 0,
+      },
+      encodeControl({ type: FrameType.Done }),
+    );
+    sender.handle(done);
+    await expect(runP).rejects.toThrow(/integrity/);
+  });
+
   it('reseals a nacked block with fresh counters and advances progress only on ack', async () => {
     const keys = await deriveTransferKeys(master);
     const data = new Uint8Array([1, 2, 3, 4]);

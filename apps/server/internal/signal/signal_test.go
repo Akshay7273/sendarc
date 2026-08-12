@@ -380,11 +380,11 @@ func TestUnknownTypeRejected(t *testing.T) {
 
 func TestOriginAllowlist(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.AllowedOrigins = []string{"https://sendarc.example"}
+	cfg.AllowedOrigins = []string{"https://sendbeam.example"}
 	url := testServer(t, cfg)
 
 	// An allowed browser origin connects.
-	if _, err := dial(t, url, "https://sendarc.example"); err != nil {
+	if _, err := dial(t, url, "https://sendbeam.example"); err != nil {
 		t.Fatalf("allowed origin was rejected: %v", err)
 	}
 	// A disallowed origin is refused at the upgrade.
@@ -420,5 +420,27 @@ func TestMessageSizeCap(t *testing.T) {
 		if _, _, err = c.conn.Read(ctx); err == nil {
 			t.Fatal("expected the socket to close after the oversize error")
 		}
+	}
+}
+
+func TestRelayCreditRequestClampedNotKilled(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RelayWindowBytes = 32
+	url := testServer(t, cfg)
+	offerer, joiner, _ := pair(t, url)
+	openRelay(t, offerer, joiner)
+
+	// Requesting far more than the window must be clamped to the window, not treated
+	// as a protocol error that kills the requesting connection.
+	joiner.send(map[string]any{"type": typeRelayCredit, "bytes": 1 << 20})
+	if got := offerer.recv(); got["type"] != typeCredit || got["bytes"] != float64(32) {
+		t.Fatalf("clamped credit = %v, want 32", got)
+	}
+
+	// The requesting connection survived the oversized request: its partner can
+	// still negotiate a grant in the reverse direction.
+	offerer.send(map[string]any{"type": typeRelayCredit, "bytes": 16})
+	if got := joiner.recv(); got["type"] != typeCredit || got["bytes"] != float64(16) {
+		t.Fatalf("reverse credit = %v, want 16", got)
 	}
 }

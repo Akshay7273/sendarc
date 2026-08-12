@@ -378,7 +378,7 @@ func (r *Receiver) onBlockData(fileIdx uint16, blockIdx uint32, frameOff uint32,
 		if r.blockBuf != nil {
 			return NewTransferError(FailIntegrity, "new block before block_hash")
 		}
-		blockLen := entry.BlockSize
+		blockLen := min(entry.BlockSize, MaxManifestBlockBytes)
 		if rem := entry.Size - int64(idx)*int64(entry.BlockSize); int64(blockLen) > rem {
 			blockLen = int(rem)
 		}
