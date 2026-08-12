@@ -1,0 +1,82 @@
+[
+  {
+    "name": "manifest: absurd block size",
+    "payload": "{\"type\":2,\"files\":[{\"idx\":0,\"name\":\"big\",\"size\":100,\"mime\":\"\",\"lastModified\":1,\"blockSize\":2147483647,\"blocks\":1,\"fileDigest\":\"aa\"}],\"totalSize\":100}"
+  },
+  {
+    "name": "manifest: negative size",
+    "payload": "{\"type\":2,\"files\":[{\"idx\":0,\"name\":\"a.bin\",\"size\":-1,\"mime\":\"\",\"lastModified\":1,\"blockSize\":8,\"blocks\":1,\"fileDigest\":\"aa\"}],\"totalSize\":-1}"
+  },
+  {
+    "name": "manifest: zero block size (divide-by-zero)",
+    "payload": "{\"type\":2,\"files\":[{\"idx\":0,\"name\":\"a.bin\",\"size\":100,\"mime\":\"\",\"lastModified\":1,\"blockSize\":0,\"blocks\":1,\"fileDigest\":\"aa\"}],\"totalSize\":100}"
+  },
+  {
+    "name": "manifest: overflow block count",
+    "payload": "{\"type\":2,\"files\":[{\"idx\":0,\"name\":\"a.bin\",\"size\":9223372036854775807,\"mime\":\"\",\"lastModified\":1,\"blockSize\":1,\"blocks\":9223372036854775807,\"fileDigest\":\"aa\"}],\"totalSize\":9223372036854775807}"
+  },
+  {
+    "name": "manifest: traversal path",
+    "payload": "{\"type\":2,\"files\":[{\"idx\":0,\"name\":\"../../etc/passwd\",\"size\":9,\"mime\":\"\",\"lastModified\":1,\"blockSize\":8,\"blocks\":2,\"fileDigest\":\"aa\"}],\"totalSize\":9}"
+  },
+  {
+    "name": "manifest: windows reserved name",
+    "payload": "{\"type\":2,\"files\":[{\"idx\":0,\"name\":\"CON\",\"size\":9,\"mime\":\"\",\"lastModified\":1,\"blockSize\":8,\"blocks\":2,\"fileDigest\":\"aa\"}],\"totalSize\":9}"
+  },
+  {
+    "name": "manifest: duplicate case-insensitive path",
+    "payload": "{\"type\":2,\"files\":[{\"idx\":0,\"name\":\"a.txt\",\"size\":9,\"mime\":\"\",\"lastModified\":1,\"blockSize\":8,\"blocks\":2,\"fileDigest\":\"aa\"},{\"idx\":1,\"name\":\"A.txt\",\"size\":9,\"mime\":\"\",\"lastModified\":1,\"blockSize\":8,\"blocks\":2,\"fileDigest\":\"aa\"}],\"totalSize\":18}"
+  },
+  {
+    "name": "manifest: non-contiguous indexes",
+    "payload": "{\"type\":2,\"files\":[{\"idx\":5,\"name\":\"a.txt\",\"size\":9,\"mime\":\"\",\"lastModified\":1,\"blockSize\":8,\"blocks\":2,\"fileDigest\":\"aa\"}],\"totalSize\":9}"
+  },
+  {
+    "name": "manifest: total size sum mismatch",
+    "payload": "{\"type\":2,\"files\":[{\"idx\":0,\"name\":\"a.txt\",\"size\":9,\"mime\":\"\",\"lastModified\":1,\"blockSize\":8,\"blocks\":2,\"fileDigest\":\"aa\"}],\"totalSize\":999}"
+  },
+  {
+    "name": "manifest: empty files",
+    "payload": "{\"type\":2,\"files\":[],\"totalSize\":0}"
+  },
+  {
+    "name": "nack: unknown reason",
+    "payload": "{\"type\":7,\"fileIdx\":0,\"blockIdx\":1,\"reason\":\"bogus\"}"
+  },
+  {
+    "name": "control: unknown op",
+    "payload": "{\"type\":8,\"op\":\"explode\"}"
+  },
+  {
+    "name": "fail: unknown reason",
+    "payload": "{\"type\":11,\"reason\":\"self_destruct\"}"
+  },
+  {
+    "name": "manifest: missing required field",
+    "payload": "{\"type\":2,\"files\":[{\"idx\":0}],\"totalSize\":0}"
+  },
+  {
+    "name": "block_hash: missing sha256",
+    "payload": "{\"type\":4,\"fileIdx\":0,\"blockIdx\":0}"
+  },
+  {
+    "name": "resume_state: empty files",
+    "payload": "{\"type\":12,\"transferId\":\"t\",\"files\":[]}"
+  },
+  {
+    "name": "unexpected type",
+    "payload": "{\"type\":200}"
+  },
+  {
+    "name": "missing type",
+    "payload": "{}"
+  },
+  {
+    "name": "not json",
+    "payload": "{not json"
+  },
+  {
+    "name": "truncated frame header",
+    "payload": "AAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+]
