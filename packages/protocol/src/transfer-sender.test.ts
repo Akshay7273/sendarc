@@ -46,7 +46,7 @@ describe('TransferSender', () => {
     const runP = sender.run();
 
     // Let the sender push manifest + block 0's frames + block 0 hash, then stall on window=1.
-    await new Promise((r) => setTimeout(r, 10));
+    await waitFor(() => outbound.length >= 4);
     let peek = 0;
     const types = await Promise.all(
       outbound.map(async (f) => (await open(keys.o2j, peek++, f)).header.type),

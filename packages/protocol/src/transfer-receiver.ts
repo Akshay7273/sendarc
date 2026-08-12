@@ -250,6 +250,10 @@ export class TransferReceiver {
         : new TransferError('sink_error', e instanceof Error ? e.message : String(e));
     }
     this.manifest = manifest;
+    // The sender may already be retrying blocks on the old path while the
+    // cutover's manifest copy arrives; discard that stale tail (fragments
+    // before the next block boundary, plus its hash) instead of assembling it.
+    this.awaitingRestart = true;
     if (manifest.transferId !== undefined) {
       // The sender opted into resumption. Apply persisted offsets only when they belong to this
       // exact transfer, then report each file's high-water mark so the sender skips held blocks.

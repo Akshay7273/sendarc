@@ -259,6 +259,10 @@ func (r *Receiver) applyManifest(payload []byte) error {
 	}
 	r.manifest = &validated
 	r.digests = make([]string, len(validated.Files))
+	// The sender may already be retrying blocks on the old path while the
+	// cutover's manifest copy arrives; discard that stale tail (fragments
+	// before the next block boundary, plus its hash) instead of assembling it.
+	r.awaitingRestart = true
 	if validated.TransferID != "" {
 		// The sender opted into resumption. Apply persisted offsets only when they belong to this
 		// exact transfer, then report each file's high-water mark so the sender skips held blocks.

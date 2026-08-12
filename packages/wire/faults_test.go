@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"math/rand"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -61,6 +62,7 @@ type faultLink struct {
 	script   faultScript
 	rng      *rand.Rand
 
+	mu         sync.Mutex // guards counts and delayed
 	counts     [2]map[uint8]int
 	delayed    [2][]byte
 	closed     atomic.Bool
@@ -82,60 +84,74 @@ func (l *faultLink) send(dir int, frame []byte) error {
 	// Sealed frames are counter(8) || header(16) || ciphertext || tag, so the
 	// type byte lives at offset 9.
 	typ := frame[9]
+
+	l.mu.Lock()
 	occ := l.counts[dir][typ]
 	l.counts[dir][typ] = occ + 1
-
-	var act = fPass
+	act := fPass
 	if l.rng != nil {
 		act = l.randomAction(dir, typ)
 	} else if acts := l.script[dir][typ]; occ < len(acts) {
 		act = acts[occ]
 	}
+	// Decide and stage everything under the lock; channel sends happen outside
+	// it, since a send can block behind a full buffer while the drainer waits
+	// for the same lock on its next send (a deadlock).
+	var flush [2][][]byte
+	var plan [][]byte
 	switch act {
 	case fDrop:
-		return nil
 	case fClose:
-		l.close()
-		return nil
+		for d := 0; d < 2; d++ {
+			if l.delayed[d] != nil {
+				flush[d] = append([][]byte(nil), l.delayed[d])
+				l.delayed[d] = nil
+			}
+		}
 	case fDuplicate:
-		l.deliver(dir, frame)
-		l.deliver(dir, frame)
-		return nil
+		plan = append(plan, frame, frame)
 	case fReorder:
 		// Hold it until the next write so it lands after that frame.
 		if l.delayed[dir] == nil {
 			l.delayed[dir] = append([]byte(nil), frame...)
-			return nil
+		} else {
+			plan = append(plan, frame, l.delayed[dir])
+			l.delayed[dir] = nil
 		}
-		l.deliver(dir, frame)
-		return nil
 	case fLate:
 		g := append([]byte(nil), frame...)
-		time.AfterFunc(300*time.Millisecond, func() { l.deliver(dir, g) })
-		return nil
+		time.AfterFunc(300*time.Millisecond, func() { l.deliverOne(dir, g) })
 	case fTruncate:
-		l.deliver(dir, frame[:len(frame)/2])
-		return nil
+		plan = append(plan, frame[:len(frame)/2])
 	case fCorrupt:
 		g := append([]byte(nil), frame...)
 		g[len(g)-1] ^= 0x40
-		l.deliver(dir, g)
-		return nil
+		plan = append(plan, g)
 	default:
-		l.deliver(dir, frame)
+		plan = append(plan, frame)
+	}
+	l.mu.Unlock()
+
+	for d := 0; d < 2; d++ {
+		for _, f := range flush[d] {
+			l.deliverOne(d, f)
+		}
+	}
+	if act == fClose {
+		l.closed.Store(true)
 		return nil
 	}
+	for _, f := range plan {
+		l.deliverOne(dir, f)
+	}
+	return nil
 }
 
-func (l *faultLink) deliver(dir int, frame []byte) {
+func (l *faultLink) deliverOne(dir int, frame []byte) {
 	if l.closed.Load() {
 		return
 	}
 	l.sendToChannel(dir, frame)
-	if l.delayed[dir] != nil {
-		l.sendToChannel(dir, l.delayed[dir])
-		l.delayed[dir] = nil
-	}
 }
 
 func (l *faultLink) sendToChannel(dir int, frame []byte) {
@@ -149,16 +165,12 @@ func (l *faultLink) sendToChannel(dir int, frame []byte) {
 	ch <- append([]byte(nil), frame...)
 }
 
-// close kills both paths (a dead peer). Held frames are delivered first; the
-// flag is set afterwards so the drainers finish those frames then stop.
-func (l *faultLink) close() {
-	for dir := 0; dir < 2; dir++ {
-		if l.delayed[dir] != nil {
-			l.sendToChannel(dir, l.delayed[dir])
-			l.delayed[dir] = nil
-		}
-	}
-	l.closed.Store(true)
+// manifestSeen reports whether the sender has transmitted at least one
+// manifest on the s2r path.
+func (l *faultLink) manifestSeen() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.counts[dirS2R][FrameManifest] > 0
 }
 
 func (l *faultLink) isClosed() bool { return l.closed.Load() }
@@ -297,7 +309,7 @@ func runFaultLoopback(t *testing.T, data []byte, blockSize, frameSize, window in
 	}()
 	if opts.cutover != nil {
 		go func() {
-			for link.counts[dirS2R][FrameManifest] == 0 && !link.isClosed() {
+			for !link.manifestSeen() && !link.isClosed() {
 				time.Sleep(2 * time.Millisecond)
 			}
 			opts.cutover(link, sender)
@@ -583,25 +595,27 @@ func TestFaultDuplicateResumeStateIsIdempotent(t *testing.T) {
 
 // --- SB-1121: transport closure at every meaningful phase ---
 
-// TestFaultDroppedDataFailsClosed: the transport is reliable and ordered; a
-// dropped data frame is a protocol violation and must abort with integrity,
-// never commit the sink.
-func TestFaultDroppedDataFailsClosed(t *testing.T) {
+// TestFaultDroppedDataFrameRecoversViaRetry: a single dropped data frame is
+// masked by the sender's block retry — the receiver discards the partial cycle
+// tail after the manifest, reassembles the retransmitted block, and the final
+// digest must still match byte-for-byte.
+func TestFaultDroppedDataFrameRecoversViaRetry(t *testing.T) {
 	data := testData(50_000, 19)
 	script := faultScript{}.
 		at(dirS2R, FrameBlockData, fDrop)
 	res := runFaultLoopback(t, data, 1024, 256, 4, script, nil, faultRunOptions{})
-	res.wantCleanAbort(t)
+	res.wantSuccess(t, data)
 }
 
-// TestFaultReorderedFrameFailsClosed: reordering breaks the sequential counter
-// stream; the transfer must abort with integrity, never commit.
-func TestFaultReorderedFrameFailsClosed(t *testing.T) {
+// TestFaultReorderedDataFrameRecoversViaRetry: a held data frame that lands
+// after its siblings is stale-tail-discarded until the next block boundary, and
+// the retransmitted block completes the transfer with byte-exact data.
+func TestFaultReorderedDataFrameRecoversViaRetry(t *testing.T) {
 	data := testData(50_000, 13)
 	script := faultScript{}.
 		at(dirS2R, FrameBlockData, fReorder)
 	res := runFaultLoopback(t, data, 1024, 256, 4, script, nil, faultRunOptions{})
-	res.wantCleanAbort(t)
+	res.wantSuccess(t, data)
 }
 
 // TestFaultTruncatedDataFrameAbortsWithIntegrity: a half-delivered data frame
