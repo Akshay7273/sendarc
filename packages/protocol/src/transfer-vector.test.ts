@@ -28,7 +28,7 @@ function loadVector(): Vector {
   return JSON.parse(readFileSync(fileURLToPath(url), 'utf8')) as Vector;
 }
 
-// SB-1146: cross-feed equivalence. The Go engine recorded a byte-exact wire log in
+// Cross-feed equivalence. The Go engine recorded a byte-exact wire log in
 // transfer.json; replaying the s2r frames into the TypeScript receiver must produce
 // byte-identical r2s replies, reconstruct the exact file bytes, and verify the same
 // canonical SHA-256 that the Go side asserts.

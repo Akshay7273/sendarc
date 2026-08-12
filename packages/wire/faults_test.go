@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// Deterministic fault-injection harness (plan §4.2, SB-1120..1128). A faultLink
+// Deterministic fault-injection harness . A faultLink
 // sits between each side's Send and the peer's Handle and mutates frames
 // according to a per-direction, per-frame-type script keyed on occurrence, or —
 // with a seeded RNG — at random. The wire engine treats its transport as
@@ -174,6 +174,14 @@ func (l *faultLink) manifestSeen() bool {
 }
 
 func (l *faultLink) isClosed() bool { return l.closed.Load() }
+
+// completeSeen reports whether the sender has transmitted at least one
+// FrameComplete on the s2r path (dropped or not).
+func (l *faultLink) completeSeen() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.counts[dirS2R][FrameComplete] > 0
+}
 
 // randomAction draws a fault from a fixed probability table so seeds stay
 // comparable across runs.
@@ -382,7 +390,7 @@ func testData(n int, mul byte) []byte {
 	return data
 }
 
-// --- SB-1120: the shim itself ---
+// --- the shim itself ---
 
 // TestFaultShimPassesEverything: an empty script must behave exactly like the
 // plain loopback.
@@ -433,7 +441,7 @@ func TestFaultLateDoneStillSucceeds(t *testing.T) {
 	res.wantSuccess(t, data)
 }
 
-// TestFaultStaleNackIsHarmless (SB-1124): a NACK for an already-acknowledged
+// TestFaultStaleNackIsHarmless: a NACK for an already-acknowledged
 // block is injected directly into the sender's inbound stream at the exact next
 // counter; the sender requeues and resends, the receiver ignores the replay,
 // and the transfer completes.
@@ -516,7 +524,7 @@ func TestFaultStaleNackIsHarmless(t *testing.T) {
 	}
 }
 
-// TestFaultDuplicateResumeStateIsIdempotent (SB-1124): a duplicated
+// TestFaultDuplicateResumeStateIsIdempotent: a duplicated
 // resume_state (receiver → sender) is applied once; the resumed transfer
 // completes.
 func TestFaultDuplicateResumeStateIsIdempotent(t *testing.T) {
@@ -593,7 +601,7 @@ func TestFaultDuplicateResumeStateIsIdempotent(t *testing.T) {
 	}
 }
 
-// --- SB-1121: transport closure at every meaningful phase ---
+// --- transport closure at every meaningful phase ---
 
 // TestFaultDroppedDataFrameRecoversViaRetry: a single dropped data frame is
 // masked by the sender's block retry — the receiver discards the partial cycle
@@ -680,7 +688,7 @@ func TestFaultCloseAfterCompleteTimesOutOnDone(t *testing.T) {
 	}
 }
 
-// TestFaultLateControlAfterSettlementIsIgnored (SB-1124): controls arriving
+// TestFaultLateControlAfterSettlementIsIgnored: controls arriving
 // after the sender settled are dropped.
 func TestFaultLateControlAfterSettlementIsIgnored(t *testing.T) {
 	data := testData(40_000, 3)

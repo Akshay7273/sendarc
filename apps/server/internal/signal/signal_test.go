@@ -445,7 +445,7 @@ func TestRelayCreditRequestClampedNotKilled(t *testing.T) {
 	}
 }
 
-// SB-1140: fuzz the server's inbound signaling envelope. The server only reads
+// Fuzz the server's inbound signaling envelope. The server only reads
 // type/room/role/bytes, so the invariant is a clean decode-or-reject with no
 // panic and no empty type slipping through (dispatch treats "" as invalid).
 func FuzzClientMsg(f *testing.F) {

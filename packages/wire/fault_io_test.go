@@ -8,7 +8,7 @@ import (
 )
 
 // faultSink wraps a MemorySink and fails a chosen write (1-based) or Close with
-// a chosen error, mirroring disk failures on the receive side (SB-1125).
+// a chosen error, mirroring disk failures on the receive side.
 type faultSink struct {
 	*MemorySink
 	failWriteAt int
@@ -33,7 +33,7 @@ func (f *faultSink) Close() error {
 }
 
 // faultDestination fails on Open (destination collision) or Close (commit/flush
-// failure) exactly where the wire layer must surface FailSinkError (SB-1125).
+// failure) exactly where the wire layer must surface FailSinkError.
 type faultDestination struct {
 	openErr  error
 	closeErr error
@@ -62,7 +62,7 @@ func (d *faultDestination) Abort(reason string) error {
 
 // faultSource serves a different byte stream per pass so tests can inject file
 // disappearance, mid-read failure, and file mutation between the digest pass
-// and the transfer pass (SB-1126). Stream is called exactly twice by Sender.Run.
+// and the transfer pass. Stream is called exactly twice by Sender.Run.
 type faultSource struct {
 	meta   FileMeta
 	passes [2][]byte

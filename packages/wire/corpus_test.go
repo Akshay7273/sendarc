@@ -7,19 +7,21 @@ import (
 	"testing"
 )
 
-// ProtocolCorpus is a committed regression corpus (SB-1147). Each entry is a real
+// ProtocolCorpus is a committed regression corpus. Each entry is a real
 // protocol shape that was hardened in or after v1.0 — oversized geometry, zero
 // block sizes, traversal paths, reserved names, unknown enums, missing fields —
-// plus the framing-level truncations they once triggered. Every payload must pass
-// through the decoders without panicking or allocating unboundedly.
+// plus framing-level truncations. Every payload is run through the decoders and
+// must be rejected (or accepted) without panicking.
 type ProtocolCorpus struct {
 	Name    string `json:"name"`
 	Payload string `json:"payload"`
 }
 
-// TestProtocolProtocolCorpus feeds every recorded adversarial payload through the
-// control-frame decoder. The invariant is "no panic, clean reject or bounded
-// accept" — a future regression that makes any of these crash fails loudly here.
+// TestProtocolCorpus feeds every recorded adversarial payload through the pure
+// control-frame and frame-header decoders. The invariant under test is exactly
+// "never panic on malformed input": each entry must decode or reject with a
+// clean error (nothing is asserted about the specific error reason). A future
+// regression that makes any of these crash fails loudly here.
 func TestProtocolCorpus(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("testdata", "protocol-corpus.json"))
 	if err != nil {
@@ -35,11 +37,11 @@ func TestProtocolCorpus(t *testing.T) {
 	for _, e := range entries {
 		e := e
 		t.Run(e.Name, func(_ *testing.T) {
-			// decodeFrameHeader and DecodeControl are the two pure decode entry
-			// points that this corpus exercises without panicking; anything they
-			// don't accept must be a clean error, never a crash.
-			_, _ = decodeFrameHeader([]byte(e.Payload))
+			// DecodeControl is the entry point exercised by the JSON payloads;
+			// decodeFrameHeader is included so truncation-type corpus entries are
+			// run through a binary framing decoder too. Neither may panic.
 			_, _ = DecodeControl([]byte(e.Payload))
+			_, _ = decodeFrameHeader([]byte(e.Payload))
 		})
 	}
 }

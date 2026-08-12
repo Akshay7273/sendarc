@@ -43,7 +43,7 @@ func killBothSignaling(hub *relay) {
 	hub.join.killSignaling()
 }
 
-// TestDriverSurvivesSignalingLossOnDirect pins SB-1122: signaling failure is
+// TestDriverSurvivesSignalingLossOnDirect pins signaling failure is
 // independent of the data path — a healthy direct channel finishes the transfer
 // with no relay fallback and no error when the signaling socket dies mid-file.
 func TestDriverSurvivesSignalingLossOnDirect(t *testing.T) {
@@ -112,7 +112,7 @@ func TestDriverSurvivesSignalingLossOnDirect(t *testing.T) {
 	}
 }
 
-// TestDriverSignalingLossOnRelayIsFatal pins the relay side of SB-1122: a relay
+// TestDriverSignalingLossOnRelayIsFatal pins the relay side: a relay
 // transfer needs signaling (credit accounting), so losing it mid-file fails both
 // sides with RELAY instead of silently stalling.
 func TestDriverSignalingLossOnRelayIsFatal(t *testing.T) {
@@ -173,7 +173,7 @@ func TestDriverSignalingLossOnRelayIsFatal(t *testing.T) {
 	}
 }
 
-// TestDriverCutoverBeforeDataStarts pins SB-1123 phase 1: the direct channel
+// TestDriverCutoverBeforeDataStarts pins cutover phase 1: the direct channel
 // dies before the first byte moves and the transfer still completes over the
 // relay with identical bytes.
 func TestDriverCutoverBeforeDataStarts(t *testing.T) {
@@ -242,7 +242,7 @@ func TestDriverCutoverBeforeDataStarts(t *testing.T) {
 	}
 }
 
-// TestDriverCutoverAfterAllDataAcked pins SB-1123 phase 2: every byte has been
+// TestDriverCutoverAfterAllDataAcked pins cutover phase 2: every byte has been
 // acknowledged before the direct path dies, so the cutover must not fail the
 // transfer over lost terminal control frames.
 func TestDriverCutoverAfterAllDataAcked(t *testing.T) {
