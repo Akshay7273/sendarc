@@ -61,6 +61,8 @@ export interface TransferController {
 
 export interface SendOptions {
   files: File[];
+  /** Operator-published ICE servers; omitting keeps the bundled default STUN. */
+  iceServers?: RTCIceServer[];
 }
 
 /** Start sending an ordered file/folder selection over the adopted rendezvous socket. */
@@ -72,6 +74,7 @@ export function runSend(
   return run(rendezvous, signaling, {
     role: 'send',
     total: opts.files.reduce((total, file) => total + file.size, 0),
+    ...(opts.iceServers ? { iceServers: opts.iceServers } : {}),
     start: () => ({ kind: 'start-send', files: opts.files, ...crypto(rendezvous) }),
   });
 }
@@ -81,9 +84,11 @@ export function runReceive(
   rendezvous: RendezvousResult,
   signaling: SignalChannel,
   destination: ReceiveDestinationSpec = { kind: 'auto' },
+  opts: { iceServers?: RTCIceServer[] } = {},
 ): TransferController {
   return run(rendezvous, signaling, {
     role: 'receive',
+    ...(opts.iceServers ? { iceServers: opts.iceServers } : {}),
     start: () => ({ kind: 'start-recv', destination, ...crypto(rendezvous) }),
   });
 }
@@ -92,6 +97,8 @@ interface RunSpec {
   role: 'send' | 'receive';
   /** Known upfront only when sending. */
   total?: number;
+  /** Operator-published ICE servers for direct-path candidate gathering. */
+  iceServers?: RTCIceServer[];
   start: () => HostToWorker;
 }
 
@@ -155,7 +162,12 @@ function run(
         rendezvous.room,
         rendezvous.spake2,
       );
-      const p = createPeer({ role: rendezvous.role, auth, send: (msg) => signaling.send(msg) });
+      const p = createPeer({
+        role: rendezvous.role,
+        auth,
+        send: (msg) => signaling.send(msg),
+        ...(spec.iceServers ? { iceServers: spec.iceServers } : {}),
+      });
       peer = p;
       const relayPath = new RelayTransport(signaling);
       relay = relayPath;

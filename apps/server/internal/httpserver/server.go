@@ -21,6 +21,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/sendbeam/server/internal/signal"
+	"github.com/sendbeam/wire"
 )
 
 // Config controls how sendbeamd serves the web app and terminates TLS.
@@ -32,19 +33,25 @@ type Config struct {
 	DevProxy  string // URL of the Vite dev server to proxy to (dev); overrides WebDir
 	PublicURL string // public base URL for invite links (e.g. https://send.example.com/); empty = auto-detect from page
 
+	// ICEServerURLs are STUN (and future TURN) URLs published to clients via /config.json so
+	// the web app gathers direct-path candidates against the operator's chosen servers instead
+	// of the bundled defaults. Parsed with SENDBEAM_ICE_SERVERS (comma-separated).
+	ICEServerURLs []string
+
 	Signal signal.Config // signaling limits + WSS origin allowlist
 }
 
 // ConfigFromEnv reads configuration from SENDBEAM_* environment variables with defaults.
 func ConfigFromEnv() Config {
 	return Config{
-		Addr:      env("SENDBEAM_ADDR", ":8443"),
-		TLSCert:   os.Getenv("SENDBEAM_TLS_CERT"),
-		TLSKey:    os.Getenv("SENDBEAM_TLS_KEY"),
-		WebDir:    os.Getenv("SENDBEAM_WEB_DIR"),
-		DevProxy:  os.Getenv("SENDBEAM_WEB_DEV_PROXY"),
-		PublicURL: os.Getenv("SENDBEAM_PUBLIC_URL"),
-		Signal:    signal.ConfigFromEnv(),
+		Addr:          env("SENDBEAM_ADDR", ":8443"),
+		TLSCert:       os.Getenv("SENDBEAM_TLS_CERT"),
+		TLSKey:        os.Getenv("SENDBEAM_TLS_KEY"),
+		WebDir:        os.Getenv("SENDBEAM_WEB_DIR"),
+		DevProxy:      os.Getenv("SENDBEAM_WEB_DEV_PROXY"),
+		PublicURL:     os.Getenv("SENDBEAM_PUBLIC_URL"),
+		ICEServerURLs: splitList(os.Getenv("SENDBEAM_ICE_SERVERS")),
+		Signal:        signal.ConfigFromEnv(),
 	}
 }
 
@@ -103,11 +110,25 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.http.Shutdown(ctx)
 }
 
+// configResponse is the shape of /config.json published to the web app.
+type configResponse struct {
+	PublicURL  string          `json:"publicUrl"`
+	LanIP      string          `json:"lanIp"`
+	ICEServers []wire.ICEEntry `json:"iceServers"`
+}
+
 func router(ctx context.Context, cfg Config, logger *slog.Logger) (http.Handler, error) {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
 	r.Use(securityHeaders)
+
+	// Parse and validate ICE config once at startup so a malformed server list fails fast
+	// instead of surfacing an empty/misleading config to clients.
+	iceEntries, err := wire.ParseICEServers(cfg.ICEServerURLs)
+	if err != nil {
+		return nil, fmt.Errorf("config: invalid SENDBEAM_ICE_SERVERS: %w", err)
+	}
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -117,10 +138,13 @@ func router(ctx context.Context, cfg Config, logger *slog.Logger) (http.Handler,
 
 	r.Get("/config.json", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		// no-cache: clients must never reuse stale ICE config; credential-bearing entries are
+		// short-lived and must be re-fetched (see wire.ICEConfigTTL).
 		w.Header().Set("Cache-Control", "no-cache")
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"publicUrl": cfg.PublicURL,
-			"lanIp":     firstLanIP(),
+		_ = json.NewEncoder(w).Encode(configResponse{
+			PublicURL:  cfg.PublicURL,
+			LanIP:      firstLanIP(),
+			ICEServers: iceEntries,
 		})
 	})
 
@@ -178,6 +202,22 @@ func env(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// splitList splits a comma-separated env list, trimming whitespace and dropping empty items.
+func splitList(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // firstLanIP returns the first non-loopback IPv4 address, or "" if none is found.
