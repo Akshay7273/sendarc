@@ -22,7 +22,7 @@ import {
 } from './transfer-ports.js';
 import { decodeControl, encodeControl } from './transfer-messages.js';
 import type { TransferRunState } from './transfer-sender.js';
-import { validateManifest } from './safe-path.js';
+import { validateManifest, MAX_MANIFEST_BLOCK_BYTES } from './safe-path.js';
 import { completionDigest } from './transfer-set.js';
 
 export interface ReceiveResult {
@@ -340,7 +340,11 @@ export class TransferReceiver {
     if (this.awaitingRestart && frameOff !== 0) return;
     if (frameOff === 0) {
       if (this.blockBuf) throw new TransferError('integrity', 'new block before block_hash');
-      const blockLen = Math.min(entry.blockSize, entry.size - blockIdx * entry.blockSize);
+      const blockLen = Math.min(
+        entry.blockSize,
+        MAX_MANIFEST_BLOCK_BYTES,
+        entry.size - blockIdx * entry.blockSize,
+      );
       this.assemblingFileIdx = fileIdx;
       this.assemblingBlock = blockIdx;
       this.blockBuf = new Uint8Array(blockLen);
