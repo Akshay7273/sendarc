@@ -16,6 +16,7 @@ import (
 	relaytransport "github.com/sendbeam/cli/internal/relay"
 	"github.com/sendbeam/cli/internal/rendezvous"
 	"github.com/sendbeam/cli/internal/rtc"
+	"github.com/sendbeam/cli/internal/supervisor"
 	"github.com/sendbeam/wire"
 )
 
@@ -182,8 +183,15 @@ func (d *driver) run(ctx context.Context) (*Outcome, error) {
 		d.spec.OnTransport(path)
 	}
 	var adaptive *adaptiveConn
+	var sv *supervisor.Supervisor
 	if path == "direct" {
-		adaptive = newAdaptiveConn(conn.(*rtc.DataConn), d.relay, d.spec.OnTransport)
+		sv = supervisor.New()
+		adaptive = newAdaptiveConn(conn.(*rtc.DataConn), d.relay, d.spec.OnTransport, sv)
+		_ = sv.Register(supervisor.PathDirect, conn.(*rtc.DataConn))
+		_ = sv.Warming(supervisor.PathDirect)
+		_ = sv.Ready(supervisor.PathDirect)
+		_, _ = sv.Activate(supervisor.PathDirect)
+		_ = sv.Register(supervisor.PathRelay, d.relay)
 		conn = adaptive
 		if d.spec.breakDirect != nil {
 			go func() {
@@ -194,6 +202,12 @@ func (d *driver) run(ctx context.Context) (*Outcome, error) {
 				}
 			}()
 		}
+	} else {
+		sv = supervisor.New()
+		_ = sv.Register(supervisor.PathRelay, d.relay)
+		_ = sv.Warming(supervisor.PathRelay)
+		_ = sv.Ready(supervisor.PathRelay)
+		_, _ = sv.Activate(supervisor.PathRelay)
 	}
 	if d.spec.OnConnect != nil {
 		d.spec.OnConnect()
@@ -206,7 +220,7 @@ func (d *driver) run(ctx context.Context) (*Outcome, error) {
 	}
 	transferDone := make(chan transferResult, 1)
 	go func() {
-		result, transferErr := d.transfer(transferCtx, conn, res)
+		result, transferErr := d.transfer(transferCtx, conn, sv, res)
 		transferDone <- transferResult{out: result, err: transferErr}
 	}()
 	var out *Outcome
@@ -391,15 +405,15 @@ func (d *driver) routeBinary(frame []byte) {
 // receives one. Counters continue from the handshake so the AES-GCM nonce is never reused, and
 // block/frame sizes are the min of the two peers' announced caps. Canceling ctx aborts the
 // in-flight transfer.
-func (d *driver) transfer(ctx context.Context, conn dataConn, res *rendezvous.Result) (*Outcome, error) {
+func (d *driver) transfer(ctx context.Context, conn dataConn, sv *supervisor.Supervisor, res *rendezvous.Result) (*Outcome, error) {
 	sendDir, recvDir := directionalKeys(res)
 	if res.Role == wire.RoleOfferer {
-		return d.send(ctx, conn, res, sendDir, recvDir)
+		return d.send(ctx, conn, sv, res, sendDir, recvDir)
 	}
-	return d.receive(ctx, conn, res, sendDir, recvDir)
+	return d.receive(ctx, conn, sv, res, sendDir, recvDir)
 }
 
-func (d *driver) send(ctx context.Context, conn dataConn, res *rendezvous.Result, sendDir, recvDir wire.DirectionalKey) (*Outcome, error) {
+func (d *driver) send(ctx context.Context, conn dataConn, sv *supervisor.Supervisor, res *rendezvous.Result, sendDir, recvDir wire.DirectionalKey) (*Outcome, error) {
 	if (d.spec.Source == nil) == (len(d.spec.Sources) == 0) {
 		return nil, errors.New("transfer: exactly one of Source or Sources is required to send")
 	}
@@ -429,10 +443,12 @@ func (d *driver) send(ctx context.Context, conn dataConn, res *rendezvous.Result
 		OnFileProgress:   d.spec.OnFileProgress,
 		OnStateChange:    d.spec.OnStateChange,
 	})
-	if switched, ok := conn.(*adaptiveConn); ok {
-		switched.SetOnSwitch(sender.TransportChanged)
+	if sv != nil {
+		sv.SetOnSwitch(sender.TransportChanged)
+		sv.OnData(sender.Handle)
+	} else {
+		conn.OnData(sender.Handle)
 	}
-	conn.OnData(sender.Handle)
 	if d.spec.OnControls != nil {
 		d.spec.OnControls(sender)
 	}
@@ -459,7 +475,7 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
-func (d *driver) receive(ctx context.Context, conn dataConn, res *rendezvous.Result, sendDir, recvDir wire.DirectionalKey) (*Outcome, error) {
+func (d *driver) receive(ctx context.Context, conn dataConn, sv *supervisor.Supervisor, res *rendezvous.Result, sendDir, recvDir wire.DirectionalKey) (*Outcome, error) {
 	destination, err := NewOSDestination(d.spec.DestDir)
 	if err != nil {
 		return nil, wire.NewTransferError(wire.FailSinkError, err.Error())
@@ -487,10 +503,12 @@ func (d *driver) receive(ctx context.Context, conn dataConn, res *rendezvous.Res
 			return nil
 		},
 	})
-	if switched, ok := conn.(*adaptiveConn); ok {
-		switched.SetOnSwitch(receiver.TransportChanged)
+	if sv != nil {
+		sv.SetOnSwitch(receiver.TransportChanged)
+		sv.OnData(receiver.Handle)
+	} else {
+		conn.OnData(receiver.Handle)
 	}
-	conn.OnData(receiver.Handle)
 	if d.spec.OnControls != nil {
 		d.spec.OnControls(receiver)
 	}
