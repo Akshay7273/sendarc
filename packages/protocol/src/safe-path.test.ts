@@ -64,6 +64,7 @@ describe('validateManifest', () => {
     manifest([entry(0, '../a')], 9),
     manifest([{ ...entry(0, 'a'), blocks: 99 }], 9),
     manifest([entry(0, 'a')], 8),
+    manifest([{ ...entry(0, 'big.bin', 1 << 30), blockSize: 1 << 30, blocks: 1 }], 1 << 30),
   ])('rejects an unsafe manifest', (value) => {
     expect(() => validateManifest(value)).toThrow();
   });

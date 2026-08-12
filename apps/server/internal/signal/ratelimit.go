@@ -51,3 +51,17 @@ func (b *tokenBucket) allowNAt(tokens float64, now time.Time) bool {
 	b.tokens -= tokens
 	return true
 }
+
+// refilledAndIdle reports whether the bucket has fully refilled and seen no use for at
+// least idle. It refills before checking and refreshes last, so it is safe to call from a
+// periodic sweeper that keeps non-idle buckets alive.
+func (b *tokenBucket) refilledAndIdle(now time.Time, idle time.Duration) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	elapsed := now.Sub(b.last)
+	if elapsed > 0 {
+		b.tokens = min(b.burst, b.tokens+elapsed.Seconds()*b.rate)
+		b.last = now
+	}
+	return b.tokens >= b.burst && elapsed >= idle
+}

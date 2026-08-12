@@ -4,6 +4,7 @@ export const MAX_TRANSFER_FILES = 4096;
 export const MAX_TRANSFER_PATH_BYTES = 1024;
 export const MAX_TRANSFER_PATH_DEPTH = 32;
 export const MAX_TRANSFER_SEGMENT_BYTES = 255;
+export const MAX_MANIFEST_BLOCK_BYTES = 16 * 1024 * 1024;
 
 const utf8 = new TextEncoder();
 const windowsReserved = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
@@ -60,6 +61,11 @@ export function validateManifest(manifest: Manifest): Manifest {
     }
     if (file.size < 0 || file.lastModified < 0 || file.blockSize <= 0) {
       throw new Error('manifest has invalid file geometry');
+    }
+    if (file.blockSize > MAX_MANIFEST_BLOCK_BYTES) {
+      throw new Error(
+        `manifest block size ${file.blockSize} exceeds the ${MAX_MANIFEST_BLOCK_BYTES}-byte ceiling`,
+      );
     }
     if (file.blocks !== Math.ceil(file.size / file.blockSize)) {
       throw new Error('manifest has invalid block geometry');

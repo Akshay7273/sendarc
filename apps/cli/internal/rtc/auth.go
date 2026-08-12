@@ -1,6 +1,6 @@
 // Package rtc drives the CLI peer's WebRTC leg of a direct transfer (design §4): it
 // authenticates the SDP/ICE signaling with the SPAKE2-derived confirmation keys, negotiates a
-// pion PeerConnection, and exposes the ordered, reliable "sendarc" DataChannel the transfer
+// pion PeerConnection, and exposes the ordered, reliable "sendbeam" DataChannel the transfer
 // engine rides on.
 //
 // This file is the signaling authenticator — the Go twin of

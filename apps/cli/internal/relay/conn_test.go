@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -95,5 +96,37 @@ func TestConnCloseUnblocksCreditWaiter(t *testing.T) {
 	defer cancel()
 	if err := c.WaitReady(ctx); err == nil {
 		t.Fatal("closed unready relay unexpectedly became ready")
+	}
+}
+
+// flakySignal fails the first Send, simulating a transient signaling hiccup.
+type flakySignal struct {
+	fakeSignal
+	failFirst bool
+}
+
+func (s *flakySignal) Send(msg rendezvous.Message) error {
+	if s.failFirst {
+		s.failFirst = false
+		return errors.New("signaling down")
+	}
+	return s.fakeSignal.Send(msg)
+}
+
+func TestOpenRetriesAfterFailedSend(t *testing.T) {
+	sig := &flakySignal{failFirst: true}
+	c := New(sig)
+
+	if err := c.Open(); err == nil {
+		t.Fatal("Open succeeded despite failed send")
+	}
+	if err := c.Open(); err != nil {
+		t.Fatalf("Open after transient failure: %v", err)
+	}
+
+	sig.mu.Lock()
+	defer sig.mu.Unlock()
+	if len(sig.msgs) != 1 || sig.msgs[0].Type != rendezvous.TypeRelayOpen {
+		t.Fatalf("relay_open was never actually sent after the retry: %+v", sig.msgs)
 	}
 }
