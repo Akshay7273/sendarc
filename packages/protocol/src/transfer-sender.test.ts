@@ -291,17 +291,20 @@ describe('TransferSender', () => {
     const run = sender.run();
     await waitFor(() => outbound.length === 3);
     sender.transportChanged();
-    await waitFor(() => outbound.length === 5);
+    // Nothing is acknowledged yet, so the manifest is retransmitted alongside the
+    // unacknowledged block: 3 frames after the cutover.
+    await waitFor(() => outbound.length === 6);
     sender.cancel('test complete');
     await expect(run).rejects.toThrow(/test complete/);
 
     let counter = 0;
     const opened = [];
-    for (const frame of outbound.slice(0, 5)) opened.push(await open(keys.o2j, counter++, frame));
+    for (const frame of outbound.slice(0, 6)) opened.push(await open(keys.o2j, counter++, frame));
     expect(opened.map((frame) => frame.header.type)).toEqual([
       FrameType.Manifest,
       FrameType.BlockData,
       FrameType.BlockHash,
+      FrameType.Manifest,
       FrameType.BlockData,
       FrameType.BlockHash,
     ]);
@@ -369,5 +372,45 @@ describe('TransferSender', () => {
     sender.handle(done);
     await runP;
     expect(states).toEqual(['paused', 'running']);
+  });
+
+  it('times out on done after complete with retry_exhausted when the receiver never sends done', async () => {
+    const keys = await deriveTransferKeys(master);
+    const data = new Uint8Array([1, 2, 3, 4]);
+    const outbound: Uint8Array[] = [];
+    const sender = new TransferSender({
+      file: bytesSource(data, { name: 'f', size: data.length, mime: '', lastModified: 0 }),
+      send: (frame) => void outbound.push(frame),
+      sendDir: keys.o2j,
+      recvDir: keys.j2o,
+      sendCounterStart: 0,
+      recvCounterStart: 0,
+      createDigest: nodeDigest,
+      blockSize: 8,
+      frameSize: 4,
+      doneTimeoutMs: 60,
+    });
+
+    const runP = sender.run();
+    await waitFor(() => outbound.length === 3); // manifest, block_data, block_hash
+
+    const ack = await seal(
+      keys.j2o,
+      0,
+      {
+        version: FRAME_VERSION,
+        type: FrameType.Ack,
+        flags: 0,
+        fileIdx: 0,
+        blockIdx: 0,
+        frameOff: 0,
+      },
+      encodeControl({ type: FrameType.Ack, fileIdx: 0, blockIdx: 0 }),
+    );
+    sender.handle(ack);
+
+    // The receiver acknowledges everything but never sends done: the sender must
+    // fail with retry_exhausted instead of hanging.
+    await expect(runP).rejects.toThrow(/retry_exhausted/);
   });
 });

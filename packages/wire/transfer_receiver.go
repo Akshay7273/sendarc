@@ -225,9 +225,6 @@ func (r *Receiver) process(frame []byte) error {
 }
 
 func (r *Receiver) applyManifest(payload []byte) error {
-	if r.manifest != nil {
-		return NewTransferError(FailIntegrity, "duplicate manifest")
-	}
 	msg, err := DecodeControl(payload)
 	if err != nil {
 		return NewTransferError(FailIntegrity, err.Error())
@@ -239,6 +236,15 @@ func (r *Receiver) applyManifest(payload []byte) error {
 	validated, err := ValidateManifest(*m)
 	if err != nil {
 		return NewTransferError(FailIntegrity, err.Error())
+	}
+	if r.manifest != nil {
+		// A path cutover can retransmit the manifest while the original is still
+		// being processed. An identical copy is harmless; a different one is a
+		// protocol violation.
+		if manifestsEqual(&validated, r.manifest) {
+			return nil
+		}
+		return NewTransferError(FailIntegrity, "duplicate manifest")
 	}
 	if r.destination == nil {
 		return NewTransferError(FailSinkError, "transfer destination is required")
@@ -360,7 +366,10 @@ func (r *Receiver) finishCurrentFile() error {
 
 func (r *Receiver) onBlockData(fileIdx uint16, blockIdx uint32, frameOff uint32, payload []byte) error {
 	if r.manifest == nil {
-		return NewTransferError(FailIntegrity, "block_data before manifest")
+		// A cutover may lose the manifest while block data is already streaming;
+		// the sender retransmits it, so stray data before the manifest is ignored
+		// rather than treated as a protocol violation.
+		return nil
 	}
 	fileNumber := int(fileIdx)
 	if fileNumber < 0 || fileNumber >= len(r.manifest.Files) || fileNumber > r.fileIdx {
@@ -404,7 +413,10 @@ func (r *Receiver) onBlockHash(payload []byte) error {
 	if r.blockBuf == nil && r.awaitingRestart {
 		return nil // hash for the abandoned partial block
 	}
-	if r.manifest == nil || r.blockBuf == nil {
+	if r.manifest == nil {
+		return nil // pre-manifest; the manifest may be in flight after a cutover
+	}
+	if r.blockBuf == nil {
 		return NewTransferError(FailIntegrity, "block_hash without a block")
 	}
 	msg, err := DecodeControl(payload)
@@ -646,4 +658,19 @@ func asTransferError(err error, fallback FailReason) *TransferError {
 		return transferErr
 	}
 	return NewTransferError(fallback, err.Error())
+}
+
+// manifestsEqual reports whether two validated manifests describe the same
+// transfer: same id, same total size, and identical file entries.
+func manifestsEqual(a, b *Manifest) bool {
+	if a == nil || b == nil || a.TransferID != b.TransferID || a.TotalSize != b.TotalSize ||
+		len(a.Files) != len(b.Files) {
+		return false
+	}
+	for i := range a.Files {
+		if a.Files[i] != b.Files[i] {
+			return false
+		}
+	}
+	return true
 }

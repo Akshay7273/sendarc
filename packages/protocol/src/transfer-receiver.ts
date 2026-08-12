@@ -226,7 +226,6 @@ export class TransferReceiver {
   }
 
   private async applyManifest(payload: Uint8Array): Promise<void> {
-    if (this.manifest) throw new TransferError('integrity', 'duplicate manifest');
     const msg = decodeControl(payload);
     if (msg.type !== FrameType.Manifest) throw new TransferError('integrity', 'expected manifest');
     let manifest;
@@ -234,6 +233,13 @@ export class TransferReceiver {
       manifest = validateManifest(msg);
     } catch (e) {
       throw new TransferError('integrity', e instanceof Error ? e.message : String(e));
+    }
+    if (this.manifest) {
+      // A path cutover can retransmit the manifest while the original is still
+      // being processed. An identical copy is harmless; a different one is a
+      // protocol violation (mirrors the Go wire receiver).
+      if (manifestsEqual(manifest, this.manifest)) return;
+      throw new TransferError('integrity', 'duplicate manifest');
     }
     try {
       await this.destination.prepare(manifest);
@@ -332,7 +338,12 @@ export class TransferReceiver {
     payload: Uint8Array,
   ): void {
     const manifest = this.manifest;
-    if (!manifest) throw new TransferError('integrity', 'block_data before manifest');
+    if (!manifest) {
+      // A cutover may lose the manifest while block data is already streaming;
+      // the sender retransmits it, so stray data before the manifest is ignored
+      // rather than treated as a protocol violation (mirrors the Go wire receiver).
+      return;
+    }
     const entry = manifest.files[fileIdx];
     if (!entry || fileIdx > this.fileIdx || blockIdx < 0 || blockIdx >= entry.blocks) {
       throw new TransferError('integrity', `block_data outside manifest: ${blockIdx}`);
@@ -364,7 +375,8 @@ export class TransferReceiver {
   private async onBlockHash(payload: Uint8Array): Promise<void> {
     const block = this.blockBuf;
     if (!block && this.awaitingRestart) return;
-    if (!this.manifest || !block) {
+    if (!this.manifest) return; // pre-manifest; the manifest may be in flight after a cutover
+    if (!block) {
       throw new TransferError('integrity', 'block_hash without a block');
     }
     const msg = decodeControl(payload);
@@ -568,4 +580,30 @@ function asIntegrityError(e: unknown): TransferError {
   return e instanceof TransferError
     ? e
     : new TransferError('integrity', e instanceof Error ? e.message : String(e));
+}
+
+// manifestsEqual reports whether two validated manifests describe the same
+// transfer: same id, same total size, and identical file entries.
+function manifestsEqual(a: Manifest, b: Manifest): boolean {
+  if (
+    a.transferId !== b.transferId ||
+    a.totalSize !== b.totalSize ||
+    a.files.length !== b.files.length
+  ) {
+    return false;
+  }
+  return a.files.every((file, i) => {
+    const other = b.files[i];
+    if (!other) return false;
+    return (
+      file.idx === other.idx &&
+      file.name === other.name &&
+      file.size === other.size &&
+      file.mime === other.mime &&
+      file.lastModified === other.lastModified &&
+      file.blockSize === other.blockSize &&
+      file.blocks === other.blocks &&
+      file.fileDigest === other.fileDigest
+    );
+  });
 }

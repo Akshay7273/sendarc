@@ -1,0 +1,68 @@
+[
+  {
+    "seed": 66,
+    "size": 16000,
+    "blockSize": 1024,
+    "frameSize": 256,
+    "window": 4,
+    "ackTimeoutMs": 250,
+    "maxRetries": 5,
+    "destructive": false,
+    "want": "success"
+  },
+  {
+    "seed": 103,
+    "size": 16000,
+    "blockSize": 1024,
+    "frameSize": 256,
+    "window": 4,
+    "ackTimeoutMs": 250,
+    "maxRetries": 5,
+    "destructive": false,
+    "want": "success"
+  },
+  {
+    "seed": 11,
+    "size": 16000,
+    "blockSize": 1024,
+    "frameSize": 256,
+    "window": 4,
+    "ackTimeoutMs": 250,
+    "maxRetries": 5,
+    "destructive": false,
+    "want": "fail_closed"
+  },
+  {
+    "seed": 22,
+    "size": 16000,
+    "blockSize": 1024,
+    "frameSize": 256,
+    "window": 4,
+    "ackTimeoutMs": 250,
+    "maxRetries": 5,
+    "destructive": false,
+    "want": "fail_closed"
+  },
+  {
+    "seed": 11,
+    "size": 16000,
+    "blockSize": 1024,
+    "frameSize": 256,
+    "window": 4,
+    "ackTimeoutMs": 250,
+    "maxRetries": 5,
+    "destructive": true,
+    "want": "fail_closed"
+  },
+  {
+    "seed": 88,
+    "size": 16000,
+    "blockSize": 1024,
+    "frameSize": 256,
+    "window": 4,
+    "ackTimeoutMs": 250,
+    "maxRetries": 5,
+    "destructive": true,
+    "want": "fail_closed"
+  }
+]
