@@ -14,17 +14,17 @@ type ErrorCode string
 
 // Stable machine-readable error class codes (ADR 0002).
 const (
-	CodeAuth          ErrorCode = "AUTH"
-	CodeProtocol      ErrorCode = "PROTOCOL"
-	CodeConnection    ErrorCode = "CONNECTION"
-	CodeRelay         ErrorCode = "RELAY"
+	CodeAuth           ErrorCode = "AUTH"
+	CodeProtocol       ErrorCode = "PROTOCOL"
+	CodeConnection     ErrorCode = "CONNECTION"
+	CodeRelay          ErrorCode = "RELAY"
 	CodeRetryExhausted ErrorCode = "RETRY_EXHAUSTED"
-	CodeCanceled      ErrorCode = "CANCELED"
-	CodeStorage       ErrorCode = "STORAGE"
-	CodeSourceIO      ErrorCode = "SOURCE_IO"
-	CodeDestIO        ErrorCode = "DEST_IO"
-	CodeCompat        ErrorCode = "COMPAT"
-	CodeInternal      ErrorCode = "INTERNAL"
+	CodeCanceled       ErrorCode = "CANCELED"
+	CodeStorage        ErrorCode = "STORAGE"
+	CodeSourceIO       ErrorCode = "SOURCE_IO"
+	CodeDestIO         ErrorCode = "DEST_IO"
+	CodeCompat         ErrorCode = "COMPAT"
+	CodeInternal       ErrorCode = "INTERNAL"
 )
 
 // Error is an error carrying a stable machine-readable class.

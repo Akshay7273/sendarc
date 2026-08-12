@@ -108,6 +108,79 @@ describe('TransferReceiver', () => {
     expect(backTypes).toEqual([FrameType.Ack, FrameType.Ack, FrameType.Ack, FrameType.Done]);
   });
 
+  it('ignores pre-manifest data and identical duplicate manifests (cutover recovery)', async () => {
+    const keys = await deriveTransferKeys(master);
+    const data = new Uint8Array(8).map((_, i) => i);
+    const fileDigest = createHash('sha256').update(data).digest('hex');
+    const b = await build(keys);
+    const manifest = {
+      type: FrameType.Manifest,
+      files: [
+        {
+          idx: 0,
+          name: 'f',
+          size: 8,
+          mime: '',
+          lastModified: 0,
+          blockSize: 8,
+          blocks: 1,
+          fileDigest,
+        },
+      ],
+      totalSize: 8,
+    };
+
+    // A path cutover can deliver block data before the manifest arrives; it must
+    // be ignored, not treated as a protocol violation.
+    await b.push(
+      {
+        version: FRAME_VERSION,
+        type: FrameType.BlockData,
+        flags: 1,
+        fileIdx: 0,
+        blockIdx: 0,
+        frameOff: 0,
+      },
+      data,
+    );
+    await b.ctrl(FrameType.Manifest, manifest);
+    // The sender may then retransmit the identical manifest on the new path.
+    await b.ctrl(FrameType.Manifest, manifest);
+    await b.push(
+      {
+        version: FRAME_VERSION,
+        type: FrameType.BlockData,
+        flags: 1,
+        fileIdx: 0,
+        blockIdx: 0,
+        frameOff: 0,
+      },
+      data,
+    );
+    await b.ctrl(FrameType.BlockHash, {
+      type: FrameType.BlockHash,
+      fileIdx: 0,
+      blockIdx: 0,
+      sha256: bytesToHex(await sha256(data)),
+    });
+    await b.ctrl(FrameType.Complete, { type: FrameType.Complete, fileDigest });
+
+    const sink = new MemorySink();
+    const receiver = new TransferReceiver({
+      send: () => {},
+      sendDir: keys.j2o,
+      recvDir: keys.o2j,
+      sendCounterStart: 0,
+      recvCounterStart: 0,
+      createDigest: nodeDigest,
+      sink,
+    });
+    for (const f of b.frames) receiver.handle(f);
+    const result = await receiver.done;
+    expect(result.digest).toBe(fileDigest);
+    expect([...sink.bytes()]).toEqual([...data]);
+  });
+
   it('aborts with integrity on a corrupted frame (GCM failure)', async () => {
     const keys = await deriveTransferKeys(master);
     const data = new Uint8Array(8).map((_, i) => i);

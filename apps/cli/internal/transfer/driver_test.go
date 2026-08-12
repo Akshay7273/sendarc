@@ -3,6 +3,7 @@ package transfer
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -88,10 +89,15 @@ type relayEnd struct {
 	relayOpen bool
 	once      sync.Once
 	done      chan struct{}
+	killOnce  sync.Once
+	killSig   chan struct{} // closed by killSignaling to simulate a dead signaling socket
 }
 
 func newRelayEnd(hub *relay, role string) *relayEnd {
-	return &relayEnd{hub: hub, role: role, in: make(chan rendezvous.Message, 256), bin: make(chan []byte, 256), done: make(chan struct{})}
+	return &relayEnd{
+		hub: hub, role: role, in: make(chan rendezvous.Message, 256),
+		bin: make(chan []byte, 256), done: make(chan struct{}), killSig: make(chan struct{}),
+	}
 }
 
 func (e *relayEnd) Send(m rendezvous.Message) error {
@@ -110,6 +116,8 @@ func (e *relayEnd) SendBinary(frame []byte) error {
 func (e *relayEnd) Run(ctx context.Context, onMessage func(rendezvous.Message), onBinary func([]byte)) error {
 	for {
 		select {
+		case <-e.killSig:
+			return errSignalingClosed
 		case m := <-e.in:
 			onMessage(m)
 		case frame := <-e.bin:
@@ -120,6 +128,15 @@ func (e *relayEnd) Run(ctx context.Context, onMessage func(rendezvous.Message), 
 			return ctx.Err()
 		}
 	}
+}
+
+// errSignalingClosed is what the driver sees when the signaling socket dies.
+var errSignalingClosed = errors.New("signaling socket closed")
+
+// killSignaling simulates the signaling socket dying while the byte path (direct
+// channel or relay) keeps or loses transport independently.
+func (e *relayEnd) killSignaling() {
+	e.killOnce.Do(func() { close(e.killSig) })
 }
 
 func (e *relayEnd) enqueueBinary(frame []byte) {
