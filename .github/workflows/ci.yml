@@ -37,8 +37,8 @@ jobs:
       - name: Check formatting
         run: pnpm run format:check
 
-      - name: Format
-        run: pnpm run format
+      - name: Lint
+        run: pnpm run lint
 
       - name: Typecheck
         run: pnpm run typecheck
@@ -65,7 +65,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.25'
           cache-dependency-path: apps/server/go.sum
 
       - name: Install dependencies
@@ -108,7 +108,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.25'
           cache-dependency-path: ${{ matrix.module }}/go.sum
 
       - name: Vet

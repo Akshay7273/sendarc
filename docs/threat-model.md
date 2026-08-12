@@ -63,7 +63,7 @@ SHA-256 escalates to abort (no blind retry). Resume state is integrity-checked: 
 
 Anyone who obtains the full invite code can join until the first peer pairs or the room is
 reaped. Mitigations: strictly 1:1 pairing (a second `join` on a live room is refused with
-`room_full`), rooms reaped after the signaling idle timeout (default 2 minutes), and — in
+`room_full`), rooms reaped after the signaling idle timeout (default 10 minutes), and — in
 the browser — a fragment-only code kept out of `Referer` and server logs via
 `Referrer-Policy: no-referrer` and fragment semantics. Because the code is a low-entropy
 human string, its security rests on the online, single-attempt nature of SPAKE2 (the server
