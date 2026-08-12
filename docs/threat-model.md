@@ -73,9 +73,9 @@ on the code's length.
 ### Denial of service
 
 Per-session relay queue, bandwidth, frame-size, and lifetime-bytes caps
-(`SENDARC_RELAY_*`, see `HOSTING.md`); message-size and per-connection message-rate caps;
+(`SENDBEAM_RELAY_*`, see `HOSTING.md`); message-size and per-connection message-rate caps;
 per-IP connection-rate limits; and a room reaper on the idle timeout. A WSS origin
-allowlist on the signaling upgrade (`SENDARC_ALLOWED_ORIGINS`) blocks cross-site socket
+allowlist on the signaling upgrade (`SENDBEAM_ALLOWED_ORIGINS`) blocks cross-site socket
 abuse. All limits are operator-tunable and the defaults keep memory in the low tens of MiB.
 
 ### Malicious sender (receiver-side safety)

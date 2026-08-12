@@ -21,7 +21,7 @@ exposes a `HEALTHCHECK` against it.
 
 Metrics: `GET /metrics` serves Prometheus text with active rooms
 (`sendbeam_rooms`), relayed ciphertext bytes (`sendbeam_relay_bytes_total`),
-and refusal/error codes (`sendarc_errors_total{code=...}`). Point a scraper
+and refusal/error codes (`sendbeam_errors_total{code=...}`). Point a scraper
 or a dashboard at it; nothing content-bearing is ever exposed.
 
 ## What the image contains
@@ -29,7 +29,7 @@ or a dashboard at it; nothing content-bearing is ever exposed.
 - The built web bundle (`apps/web`), served with SPA fallback by `sendbeamd`
 - The blind signaling endpoint (`/ws`) and the encrypted relay
 - CA certificates for outbound TLS
-- Runs as an unprivileged user (`sendarc`, uid 10001); no shell access
+- Runs as an unprivileged user (`sendbeam`, uid 10001); no shell access
 
 The web app defaults to the signaling endpoint at `/ws` on its own origin,
 so web + signaling + relay all share the published port.

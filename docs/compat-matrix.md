@@ -5,7 +5,7 @@ both the direct WebRTC path and the WebSocket relay path. The network data comes
 NAT lab (`apps/cli/cmd/natlab`), which builds five Linux network namespaces — two peer
 hosts, two userspace NAT boxes, and a public segment with the signaling/relay server and a
 STUN server — connected by 9 KB-MTU veths through a bridge. Each row below was run as a
-real CLI transfer (`sendarc send` / `sendarc receive`, 4 MiB payload, SHA-256 verified).
+real CLI transfer (`sendbeam send` / `sendbeam receive`, 4 MiB payload, SHA-256 verified).
 
 ## NAT topologies (no degradation)
 

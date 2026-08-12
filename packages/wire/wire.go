@@ -1,4 +1,4 @@
-// Package wire is the Go mirror of the @sendarc/protocol crypto core: the SPAKE2
+// Package wire is the Go mirror of the @sendbeam/protocol crypto core: the SPAKE2
 // handshake, the key schedule, and the AES-256-GCM frame codec that secure a SendBeam
 // transfer. The web client runs the TypeScript implementation; the server and CLI run
 // this one. The two are kept byte-identical — only the elliptic-curve point arithmetic

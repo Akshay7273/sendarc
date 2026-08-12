@@ -380,11 +380,11 @@ func TestUnknownTypeRejected(t *testing.T) {
 
 func TestOriginAllowlist(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.AllowedOrigins = []string{"https://sendarc.example"}
+	cfg.AllowedOrigins = []string{"https://sendbeam.example"}
 	url := testServer(t, cfg)
 
 	// An allowed browser origin connects.
-	if _, err := dial(t, url, "https://sendarc.example"); err != nil {
+	if _, err := dial(t, url, "https://sendbeam.example"); err != nil {
 		t.Fatalf("allowed origin was rejected: %v", err)
 	}
 	// A disallowed origin is refused at the upgrade.

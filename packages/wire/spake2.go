@@ -56,7 +56,7 @@ type Identities struct {
 	Joiner  []byte
 }
 
-// DefaultIdentities are the SendArc identity strings bound into every handshake.
+// DefaultIdentities are the SendBeam identity strings bound into every handshake.
 func DefaultIdentities() Identities {
 	return Identities{Offerer: []byte(IdentityOfferer), Joiner: []byte(IdentityJoiner)}
 }
@@ -87,7 +87,7 @@ func RandomScalar() (*big.Int, error) {
 }
 
 // PasswordToScalar maps a normalized invite code to the SPAKE2 password scalar w. This
-// is SendArc-specific (RFC 9382 leaves the mapping to the application): w is HKDF over
+// is SendBeam-specific (RFC 9382 leaves the mapping to the application): w is HKDF over
 // the UTF-8 code, then reduced mod n. 48 bytes before reduction leaves negligible bias.
 func PasswordToScalar(normalizedCode string) (*big.Int, error) {
 	bits, err := hkdfSHA256([]byte(normalizedCode), nil, []byte(infoSpake2W), spake2WHKDFBytes)
@@ -115,7 +115,7 @@ func ComputeShare(role Role, w, secret *big.Int) ([]byte, error) {
 type Spake2Output struct {
 	K          []byte // shared group element K (uncompressed SEC1); never used directly as a key
 	Transcript []byte // RFC transcript TT — input to the hash and both confirmation MACs
-	Ke         []byte // shared secret Ke = Hash(TT)[0:16] — input to the SendArc key schedule
+	Ke         []byte // shared secret Ke = Hash(TT)[0:16] — input to the SendBeam key schedule
 	Ka         []byte // confirmation-key material Ka = Hash(TT)[16:32]
 	KcA        []byte // MAC key for the offerer's confirmation (RFC "A")
 	KcB        []byte // MAC key for the joiner's confirmation (RFC "B")
@@ -123,14 +123,14 @@ type Spake2Output struct {
 	ConfirmB   []byte // joiner's confirmation MAC cB = HMAC(KcB, TT)
 }
 
-// Finish completes the exchange with SendArc's identity strings.
+// Finish completes the exchange with SendBeam's identity strings.
 func Finish(role Role, w, secret *big.Int, peerShare []byte) (*Spake2Output, error) {
 	return finish(role, w, secret, peerShare, DefaultIdentities())
 }
 
 // finish completes the exchange from this role's secret and the peer's share element. It
 // recovers the shared point K, assembles the RFC transcript, and derives Ke/Ka and both
-// confirmation MACs. The identities let the RFC known-answer vectors override SendArc's.
+// confirmation MACs. The identities let the RFC known-answer vectors override SendBeam's.
 func finish(role Role, w, secret *big.Int, peerShare []byte, ids Identities) (*Spake2Output, error) {
 	peer, err := nistec.NewP256Point().SetBytes(peerShare)
 	if err != nil {

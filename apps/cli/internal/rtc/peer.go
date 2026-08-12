@@ -56,7 +56,7 @@ type Peer struct {
 }
 
 // NewPeer creates the PeerConnection and starts negotiation. For an offerer it immediately
-// creates the "sendarc" channel and sends a signed offer; a joiner waits for the offer via
+// creates the "sendbeam" channel and sends a signed offer; a joiner waits for the offer via
 // Accept. The call returns as soon as negotiation is under way — await the result with Channel.
 func NewPeer(opts PeerOptions) (*Peer, error) {
 	iceServers := opts.ICEServers
