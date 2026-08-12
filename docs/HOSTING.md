@@ -43,7 +43,7 @@ so web + signaling + relay all share the published port.
 | `SENDBEAM_WEB_DIR`                       | unset         | Directory of the built web bundle to serve; set to `/srv/web` in the image.                                                                      |
 | `SENDBEAM_WEB_DEV_PROXY`                 | unset         | Vite dev-server URL to proxy to (development only; overrides `SENDBEAM_WEB_DIR`).                                                                |
 | `SENDBEAM_ALLOWED_ORIGINS`               | empty         | Comma-separated WSS origin allowlist. Empty allows only same-origin browser sockets; native CLI clients (no `Origin` header) are always allowed. |
-| `SENDBEAM_ICE_SERVERS`                   | unset         | Comma-separated STUN (or TURN) URLs published to the web app via `/config.json`; unset keeps the bundled Google STUN default. |
+| `SENDBEAM_ICE_SERVERS`                   | unset         | Comma-separated STUN (or TURN) URLs published to the web app via `/config.json`; unset keeps the bundled Google STUN default.                    |
 | `SENDBEAM_SIGNAL_IDLE_TIMEOUT`           | `2m`          | Close a socket silent this long; also bounds how long an unpaired room lingers.                                                                  |
 | `SENDBEAM_SIGNAL_MAX_MESSAGE_BYTES`      | `65536`       | Cap on a single inbound signaling message.                                                                                                       |
 | `SENDBEAM_RELAY_MAX_FRAME_BYTES`         | `131072`      | Cap on a single relay frame.                                                                                                                     |
