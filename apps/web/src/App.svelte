@@ -279,333 +279,898 @@
   }
 </script>
 
+<div class="backdrop" aria-hidden="true">
+  <div class="glow glow-a"></div>
+  <div class="glow glow-b"></div>
+  <div class="grid"></div>
+</div>
+
 <main>
-  <header>
-    <h1>SendBeam</h1>
+  <header class="masthead">
+    <div class="brand">
+      <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
+        <defs>
+          <linearGradient id="beam" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#8b7cf6" />
+            <stop offset="1" stop-color="#4cc9f0" />
+          </linearGradient>
+        </defs>
+        <path
+          d="M12 1.8 4.6 13.2a1.4 1.4 0 0 0 1.18 2.18h4.3l-1.4 6.82 8.72-12.2a1.4 1.4 0 0 0-1.13-2.2h-4.9L13.3 1.9A1.3 1.3 0 0 0 12 1.8Z"
+          fill="url(#beam)"
+        />
+        <circle cx="12" cy="12" r="3" fill="rgba(255,255,255,0.9)" opacity="0.9" />
+      </svg>
+      <h1>SendBeam</h1>
+    </div>
     <p class="tagline">Secure, end-to-end-encrypted, peer-to-peer file transfer.</p>
   </header>
 
   {#if screen === 'home'}
-    <section class="choices">
-      <button class="primary" onclick={startSend}>Send a file</button>
-
-      <form
-        class="receive"
-        onsubmit={(e) => {
-          e.preventDefault();
-          void startReceive();
-        }}
-      >
-        <label for="code">Have an invite code?</label>
-        <div class="row">
-          <input
-            id="code"
-            type="text"
-            placeholder="e.g. 4-brave-otter"
-            autocomplete="off"
-            spellcheck="false"
-            bind:value={codeInput}
-          />
-          <button type="submit" disabled={codeInput.trim() === ''}>Receive</button>
+    <section class="home-grid">
+      <article class="card send-card">
+        <div class="card-head">
+          <span class="chip chip-send">Send</span>
+          <h2>Beam a file</h2>
+          <p>Share a link or invite code. Your files never touch our servers.</p>
         </div>
-        <label for="destination">Destination</label>
-        <select id="destination" bind:value={receiveTarget}>
-          <option value="auto">Download when verified</option>
-          <option value="direct-file">Save directly to one file</option>
-          <option value="direct-directory">Save directly to a folder</option>
-        </select>
-      </form>
+        <button class="primary big" onclick={startSend}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3 19 10H15V15H9V10H5L12 3ZM5 18H19V20H5V18Z" fill="currentColor" />
+          </svg>
+          Send a file
+        </button>
+        <p class="hint">Files are encrypted end-to-end and wiped after the transfer.</p>
+      </article>
+
+      <article class="card receive-card">
+        <div class="card-head">
+          <span class="chip chip-receive">Receive</span>
+          <h2>Catch a file</h2>
+          <p>Enter the invite code the sender shared with you.</p>
+        </div>
+        <form
+          class="receive"
+          onsubmit={(e) => {
+            e.preventDefault();
+            void startReceive();
+          }}
+        >
+          <label for="code">Invite code</label>
+          <div class="row">
+            <input
+              id="code"
+              type="text"
+              placeholder="e.g. 4-brave-otter"
+              autocomplete="off"
+              spellcheck="false"
+              bind:value={codeInput}
+            />
+            <button class="primary" type="submit" disabled={codeInput.trim() === ''}>
+              Receive
+            </button>
+          </div>
+          <label for="destination">Save to</label>
+          <select id="destination" bind:value={receiveTarget}>
+            <option value="auto">Download when verified</option>
+            <option value="direct-file">Save directly to one file</option>
+            <option value="direct-directory">Save directly to a folder</option>
+          </select>
+        </form>
+      </article>
     </section>
   {:else if screen === 'sending'}
-    <section class="progress">
+    <section class="stage card">
       {#if code}
-        <p class="lead">Share this code with the person receiving the file:</p>
+        <div class="stage-head">
+          <h2>Ready to beam</h2>
+          <p class="muted">Share the invite code — or scan the link — with the receiver.</p>
+        </div>
         <div class="code-card">
           <span class="code">{code}</span>
-          <button class="copy" onclick={() => copy(code)}>{copied ? 'Copied' : 'Copy'}</button>
+          <button
+            class="copy"
+            onclick={() => copy(code)}
+            aria-label={copied ? 'Code copied' : 'Copy invite code'}
+          >
+            {#if copied}
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2Z" fill="currentColor" />
+              </svg>
+              Copied
+            {:else}
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M16 1H4C2.9 1 2 1.9 2 3V17H4V3H16V1ZM19 5H8C6.9 5 6 5.9 6 7V21C6 22.1 6.9 23 8 23H19C20.1 23 21 22.1 21 21V7C21 5.9 20.1 5 19 5ZM19 21H8V7H19V21Z"
+                  fill="currentColor"
+                />
+              </svg>
+              Copy
+            {/if}
+          </button>
         </div>
         {#if link}
-          <div class="link-row">
-            <button class="link" onclick={() => copy(link)} title="Copy invite link">{link}</button>
-            <QrCode data={link} size={120} />
+          <div class="invite">
+            <div class="qr">
+              <QrCode data={link} size={128} />
+              <button class="link" onclick={() => copy(link)} title="Copy invite link">
+                {#if copied}
+                  Link copied
+                {:else}
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path
+                      d="M16 1H4C2.9 1 2 1.9 2 3V17H4V3H16V1ZM19 5H8C6.9 5 6 5.9 6 7V21C6 22.1 6.9 23 8 23H19C20.1 23 21 22.1 21 21V7C21 5.9 20.1 5 19 5ZM19 21H8V7H19V21Z"
+                      fill="currentColor"
+                    />
+                  </svg>
+                  Copy invite link
+                {/if}
+              </button>
+            </div>
           </div>
         {/if}
+      {:else}
+        <div class="stage-head">
+          <h2>Allocating a secure room</h2>
+          <p class="muted">One room per transfer — destroyed the moment it completes.</p>
+        </div>
       {/if}
-      <p class="status" aria-live="polite">{phaseLabel(phase)}</p>
+
+      <div class="phase" aria-live="polite">
+        <span class={phase === 'established' ? 'spinner ok' : 'spinner'} aria-hidden="true"></span>
+        {phaseLabel(phase)}
+      </div>
+
       <button class="ghost" onclick={backHome}>Cancel</button>
     </section>
   {:else if screen === 'receiving'}
-    <section class="progress">
-      <p class="status" aria-live="polite">{phaseLabel(phase)}</p>
+    <section class="stage card">
+      <div class="stage-head">
+        <h2>Connecting securely</h2>
+        <p class="muted">Verifying the code with the sender — no server sees it.</p>
+      </div>
+      <div class="phase" aria-live="polite">
+        <span class={phase === 'established' ? 'spinner ok' : 'spinner'} aria-hidden="true"></span>
+        {phaseLabel(phase)}
+      </div>
       <button class="ghost" onclick={backHome}>Cancel</button>
     </section>
   {:else if screen === 'done'}
-    <section class="result ok">
-      <h2>✓ Secure channel established</h2>
-      <p>Compare this fingerprint with the other side — it must match on both screens.</p>
-      <p class="fingerprint">{fingerprint}</p>
+    <section class="stage card result ok">
+      <div class="stage-head">
+        <h2>Secure channel established</h2>
+        <p class="muted">
+          Compare this fingerprint with the other side — it must match on both screens.
+        </p>
+      </div>
+
+      <div class="fingerprint-wrap">
+        <span class="fingerprint-label">Channel fingerprint</span>
+        <span class="fingerprint">{fingerprint}</span>
+        <span class="fingerprint-hint">End-to-end encryption verified</span>
+      </div>
+
       {#if peerCaps}
-        <p class="caps">Peer: {describeCaps(peerCaps)}</p>
+        <p class="caps muted">Peer: {describeCaps(peerCaps)}</p>
       {/if}
 
       {#if outcome}
         {#if downloadUrl}
-          <p class="status">
-            Received <strong
-              >{outcome.files.length === 1 ? outcome.name : `${outcome.files.length} files`}</strong
-            >
-            — verified.
-          </p>
-          <a class="primary download" href={downloadUrl} download={outcome.name}>
-            Save {outcome.name}
-          </a>
+          <div class="outcome">
+            <p class="muted">
+              Received
+              <strong
+                >{outcome.files.length === 1
+                  ? outcome.name
+                  : `${outcome.files.length} files`}</strong
+              >
+              — verified.
+            </p>
+            <a class="primary big download" href={downloadUrl} download={outcome.name}>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 20H19V18H5V20ZM19 9H15V3H9V9H5L12 16L19 9Z" fill="currentColor" />
+              </svg>
+              Save {outcome.name}
+            </a>
+          </div>
         {:else if outcome.savedDirectly}
-          <p class="status">
-            Received <strong
-              >{outcome.files.length === 1 ? outcome.name : `${outcome.files.length} files`}</strong
-            >
-            — verified and saved.
-          </p>
+          <div class="outcome">
+            <p class="muted">
+              Received
+              <strong
+                >{outcome.files.length === 1
+                  ? outcome.name
+                  : `${outcome.files.length} files`}</strong
+              >
+              — verified and saved.
+            </p>
+          </div>
         {:else}
-          <p class="status">Sent <strong>{outcome.name}</strong> — verified by the receiver.</p>
+          <div class="outcome">
+            <p class="muted">
+              Sent <strong>{outcome.name}</strong> — verified by the receiver.
+            </p>
+          </div>
         {/if}
       {:else if transfer}
-        <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100">
-          <div class="bar-fill" style={`width:${progressPercent(sentBytes, totalBytes)}%`}></div>
-        </div>
-        <p class="status" aria-live="polite">{progressLabel(sentBytes, totalBytes)}</p>
-        <p class="transfer-detail" aria-live="polite">
-          {transferState === 'paused'
-            ? 'Paused'
-            : `${rateLabel(rateBps)} · ${etaLabel(etaSeconds)}${transportPath === 'relay' ? ' · encrypted relay' : transportPath === 'direct' ? ' · direct' : ''}`}
-        </p>
-        <div class="transfer-controls">
-          {#if transferState === 'paused'}
-            <button class="ghost" onclick={() => transfer?.resume()}>Resume</button>
-          {:else}
-            <button class="ghost" onclick={() => transfer?.pause()}>Pause</button>
-          {/if}
-          <button class="cancel" onclick={() => transfer?.cancel()}>Cancel transfer</button>
+        <div class="transfer-block">
+          <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+            <div class="bar-fill" style={`width:${progressPercent(sentBytes, totalBytes)}%`}></div>
+          </div>
+          <p class="status" aria-live="polite">{progressLabel(sentBytes, totalBytes)}</p>
+          <div class="stats">
+            <div class="stat">
+              <span class="stat-label">Rate</span>
+              <span class="stat-value">{rateLabel(rateBps)}</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">Remaining</span>
+              <span class="stat-value">{etaLabel(etaSeconds)}</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">Path</span>
+              <span class="stat-value">
+                {transportPath === 'relay'
+                  ? 'Encrypted relay'
+                  : transportPath === 'direct'
+                    ? 'Direct P2P'
+                    : 'Connecting…'}
+              </span>
+            </div>
+          </div>
+          <div class="transfer-controls">
+            {#if transferState === 'paused'}
+              <button class="ghost" onclick={() => transfer?.resume()}>Resume</button>
+            {:else}
+              <button class="ghost" onclick={() => transfer?.pause()}>Pause</button>
+            {/if}
+            <button class="danger" onclick={() => transfer?.cancel()}>Cancel transfer</button>
+          </div>
         </div>
       {:else if role === 'offerer'}
-        <label class="filepick">
-          <span>Choose files to send</span>
-          <input type="file" multiple onchange={onPick} />
-        </label>
-        <label class="filepick">
-          <span>Choose a folder to send</span>
-          <input type="file" multiple webkitdirectory onchange={onPick} />
-        </label>
+        <div class="pick-zone">
+          <p class="muted">Choose what to beam</p>
+          <label class="filepick">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M6 2C4.9 2 4 2.9 4 4V20C4 21.1 4.9 22 6 22H18C19.1 22 20 21.1 20 20V8L14 2H6ZM13 9V3.5L18.5 9H13Z"
+                fill="currentColor"
+              />
+            </svg>
+            <span class="filepick-title">Send file{'\u{2026}'}</span>
+            <span class="filepick-sub">or drop multiple</span>
+            <input type="file" multiple onchange={onPick} />
+          </label>
+          <label class="filepick">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M10 4H4C2.9 4 2 4.9 2 6V18C2 19.1 2.9 20 4 20H20C21.1 20 22 19.1 22 18V8C22 6.9 21.1 6 20 6H12L10 4Z"
+                fill="currentColor"
+              />
+            </svg>
+            <span class="filepick-title">Send folder{'\u{2026}'}</span>
+            <span class="filepick-sub">all files inside</span>
+            <input type="file" multiple webkitdirectory onchange={onPick} />
+          </label>
+        </div>
       {:else}
-        <p class="status" aria-live="polite">Waiting for the sender to choose a file…</p>
+        <div class="phase" aria-live="polite">
+          <span class="spinner" aria-hidden="true"></span>
+          Waiting for the sender to choose a file…
+        </div>
       {/if}
 
       <button class="ghost" onclick={backHome}>Start over</button>
     </section>
   {:else if screen === 'failed'}
-    <section class="result bad">
-      <h2>Connection failed</h2>
-      <p>{errorText}</p>
+    <section class="stage card result bad">
+      <div class="stage-head">
+        <span class="error-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24">
+            <path
+              d="M12 2 1 21H23L12 2ZM13 18H11V16H13V18ZM13 14H11V9H13V14Z"
+              fill="currentColor"
+            />
+          </svg>
+        </span>
+        <h2>Connection failed</h2>
+        <p class="muted">{errorText}</p>
+      </div>
       <button class="primary" onclick={backHome}>Try again</button>
     </section>
   {/if}
 </main>
 
 <style>
-  main {
-    max-width: 32rem;
-    margin: 4rem auto;
-    padding: 0 1.5rem;
+  :global(:root) {
+    --muted: #93a0b8;
+  }
+  :global(body) {
+    margin: 0;
+    min-height: 100vh;
+    background: #070b16;
+    color: #e8ecf8;
     font-family:
       system-ui,
       -apple-system,
+      'Segoe UI',
+      Roboto,
       sans-serif;
-    line-height: 1.5;
-    color: #1a1a1a;
-  }
-  header {
-    margin-bottom: 2rem;
-  }
-  h1 {
-    margin: 0 0 0.25rem;
-  }
-  .tagline {
-    margin: 0;
-    color: #666;
+    -webkit-font-smoothing: antialiased;
   }
 
-  .choices {
+  /* ————— ambient backdrop ————— */
+  .backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    overflow: hidden;
+    background:
+      radial-gradient(1200px 600px at 80% -10%, rgba(76, 201, 240, 0.14), transparent 60%),
+      radial-gradient(1000px 700px at -10% 110%, rgba(139, 124, 246, 0.18), transparent 60%),
+      #070b16;
+  }
+  .glow {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(90px);
+    opacity: 0.5;
+    animation: drift 24s ease-in-out infinite alternate;
+  }
+  .glow-a {
+    width: 480px;
+    height: 480px;
+    left: -140px;
+    top: -120px;
+    background: rgba(139, 124, 246, 0.32);
+  }
+  .glow-b {
+    width: 420px;
+    height: 420px;
+    right: -120px;
+    bottom: -140px;
+    background: rgba(76, 201, 240, 0.24);
+    animation-delay: -12s;
+  }
+  .grid {
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(255, 255, 255, 0.028) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px);
+    background-size: 44px 44px;
+    mask-image: radial-gradient(ellipse 90% 70% at 50% 30%, black, transparent 75%);
+  }
+  @keyframes drift {
+    from {
+      transform: translate(0, 0) scale(1);
+    }
+    to {
+      transform: translate(60px, 40px) scale(1.12);
+    }
+  }
+
+  main {
+    max-width: 44rem;
+    margin: 0 auto;
+    padding: 3.5rem 1.5rem 4rem;
+    line-height: 1.5;
+  }
+
+  /* ————— masthead ————— */
+  .masthead {
+    margin-bottom: 2.5rem;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+  }
+  .mark {
+    width: 2rem;
+    height: 2rem;
+    filter: drop-shadow(0 0 12px rgba(139, 124, 246, 0.6));
+  }
+  h1 {
+    margin: 0;
+    font-size: 1.7rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+  .tagline {
+    margin: 0.35rem 0 0 2.7rem;
+    color: var(--muted);
+    font-size: 0.95rem;
+  }
+  .muted {
+    color: var(--muted);
+    margin: 0;
+  }
+
+  /* ————— cards ————— */
+  .card {
+    background: rgba(255, 255, 255, 0.045);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 1.25rem;
+    box-shadow:
+      0 24px 60px -24px rgba(0, 0, 0, 0.65),
+      inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    backdrop-filter: blur(14px);
+    padding: 1.75rem;
+  }
+  .card-head h2 {
+    margin: 0.6rem 0 0.3rem;
+    font-size: 1.15rem;
+    letter-spacing: -0.01em;
+  }
+  .card-head p {
+    margin: 0;
+  }
+  .chip {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 0.22rem 0.6rem;
+    border-radius: 999px;
+  }
+  .chip-send {
+    color: #c4b5fd;
+    background: rgba(139, 124, 246, 0.16);
+    border: 1px solid rgba(139, 124, 246, 0.35);
+  }
+  .chip-receive {
+    color: #7dd3fc;
+    background: rgba(76, 201, 240, 0.12);
+    border: 1px solid rgba(76, 201, 240, 0.35);
+  }
+
+  .home-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.25rem;
+  }
+  @media (max-width: 720px) {
+    .home-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+  .send-card,
+  .receive-card {
     display: flex;
     flex-direction: column;
-    gap: 2rem;
+    gap: 1.25rem;
   }
+
+  /* ————— controls ————— */
+  button,
+  input,
+  select {
+    font: inherit;
+  }
+  button {
+    cursor: pointer;
+    border: 1px solid transparent;
+    border-radius: 0.75rem;
+    padding: 0.6rem 1.1rem;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    transition:
+      transform 0.12s ease,
+      box-shadow 0.2s ease,
+      background 0.2s ease,
+      border-color 0.2s ease;
+  }
+  button:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+  button:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+  .primary {
+    background: linear-gradient(135deg, #8b7cf6, #4cc9f0);
+    color: #081019;
+    box-shadow:
+      0 8px 28px -8px rgba(124, 160, 246, 0.65),
+      inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  }
+  .primary:hover:not(:disabled) {
+    box-shadow:
+      0 10px 34px -8px rgba(124, 160, 246, 0.85),
+      inset 0 1px 0 rgba(255, 255, 255, 0.4);
+  }
+  .big {
+    padding: 0.85rem 1.4rem;
+    font-size: 1.05rem;
+    border-radius: 0.9rem;
+    width: 100%;
+  }
+  .big svg {
+    width: 1.15rem;
+    height: 1.15rem;
+  }
+  .ghost {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(255, 255, 255, 0.14);
+    color: #c8d2ea;
+  }
+  .ghost:hover {
+    background: rgba(255, 255, 255, 0.09);
+    border-color: rgba(255, 255, 255, 0.22);
+  }
+  .danger {
+    background: rgba(248, 113, 113, 0.1);
+    border-color: rgba(248, 113, 113, 0.35);
+    color: #fca5a5;
+  }
+  .danger:hover {
+    background: rgba(248, 113, 113, 0.18);
+  }
+  .copy {
+    background: rgba(139, 124, 246, 0.14);
+    border-color: rgba(139, 124, 246, 0.4);
+    color: #c4b5fd;
+    white-space: nowrap;
+  }
+  .copy svg {
+    width: 0.95rem;
+    height: 0.95rem;
+  }
+
   .receive {
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
   }
   .receive label {
+    font-size: 0.85rem;
     font-weight: 600;
+    color: #aab6d0;
   }
   .row {
     display: flex;
     gap: 0.5rem;
   }
-  input {
-    flex: 1;
-    padding: 0.6rem 0.75rem;
+  .row input {
+    min-width: 0;
+  }
+  input,
+  select {
+    padding: 0.65rem 0.85rem;
     font-size: 1rem;
-    border: 1px solid #ccc;
-    border-radius: 0.5rem;
+    border-radius: 0.75rem;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    color: #e8ecf8;
+    outline: none;
   }
-  input:focus {
-    outline: 2px solid #3b5bdb;
-    outline-offset: 1px;
-    border-color: transparent;
+  input::placeholder {
+    color: #5f6c88;
   }
-
-  button {
-    font: inherit;
-    cursor: pointer;
-    border: 1px solid transparent;
-    border-radius: 0.5rem;
-    padding: 0.6rem 1rem;
+  input:focus,
+  select:focus {
+    border-color: rgba(139, 124, 246, 0.75);
+    box-shadow: 0 0 0 3px rgba(139, 124, 246, 0.22);
   }
-  button:disabled {
-    opacity: 0.5;
-    cursor: default;
+  select option {
+    background: #101730;
+    color: #e8ecf8;
   }
-  .primary {
-    background: #3b5bdb;
-    color: #fff;
-    font-weight: 600;
-  }
-  .primary:hover:not(:disabled) {
-    background: #364fc7;
-  }
-  .ghost {
-    background: none;
-    border-color: #ccc;
-    color: #555;
-  }
-  .ghost:hover {
-    background: #f1f3f5;
+  .hint {
+    margin: 0;
+    font-size: 0.82rem;
+    color: #77849f;
   }
 
-  .progress,
-  .result {
+  /* ————— stage screens ————— */
+  .stage {
     display: flex;
     flex-direction: column;
-    gap: 1rem;
+    gap: 1.4rem;
     align-items: flex-start;
   }
-  .lead {
-    margin: 0;
+  .stage-head h2 {
+    margin: 0 0 0.3rem;
+    font-size: 1.3rem;
+    letter-spacing: -0.01em;
   }
+  .stage-head {
+    width: 100%;
+  }
+
   .code-card {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-    background: #f8f9fa;
-    border: 1px solid #e9ecef;
-    border-radius: 0.5rem;
-    padding: 0.75rem 1rem;
+    justify-content: space-between;
+    gap: 1rem;
+    width: 100%;
+    padding: 1.1rem 1.3rem;
+    border-radius: 1rem;
+    background: linear-gradient(135deg, rgba(139, 124, 246, 0.14), rgba(76, 201, 240, 0.1));
+    border: 1px solid rgba(139, 124, 246, 0.4);
+    box-shadow: inset 0 0 32px rgba(139, 124, 246, 0.12);
   }
   .code {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 1.4rem;
-    letter-spacing: 0.02em;
-  }
-  .copy {
-    background: #e7eaf6;
-    color: #3b5bdb;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 1.55rem;
     font-weight: 600;
+    letter-spacing: 0.03em;
+    color: #f2f5ff;
+    text-shadow: 0 0 24px rgba(139, 124, 246, 0.55);
+  }
+
+  .invite {
+    display: flex;
+    justify-content: center;
+    width: 100%;
+  }
+  .qr {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 1.1rem;
+    border-radius: 1rem;
+    background: #f8faff;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+  }
+  .qr :global(canvas) {
+    border-radius: 0.4rem;
   }
   .link {
     background: none;
     border: none;
     padding: 0;
-    color: #3b5bdb;
+    color: #7dd3fc;
     font-size: 0.85rem;
-    text-align: left;
-    word-break: break-all;
+    text-align: center;
+  }
+  .link svg {
+    width: 0.9rem;
+    height: 0.9rem;
+  }
+  .link:hover {
     text-decoration: underline;
   }
-  .status {
-    color: #555;
-    margin: 0;
-  }
-  .transfer-detail {
-    color: #666;
-    font-size: 0.9rem;
-    margin: -0.5rem 0 0;
-  }
-  .transfer-controls {
+
+  .phase {
     display: flex;
-    gap: 0.5rem;
+    align-items: center;
+    gap: 0.65rem;
+    color: #aab6d0;
+    font-weight: 500;
   }
-  .cancel {
-    background: #fff5f5;
-    border-color: #ffc9c9;
-    color: #c92a2a;
+  .spinner {
+    width: 1rem;
+    height: 1rem;
+    border-radius: 50%;
+    border: 2px solid rgba(139, 124, 246, 0.3);
+    border-top-color: #8b7cf6;
+    animation: spin 0.9s linear infinite;
+    flex: none;
   }
-
-  .result h2 {
-    margin: 0;
+  .spinner.ok {
+    border-color: rgba(52, 211, 153, 0.35);
+    border-top-color: #34d399;
+    animation: none;
+    background: radial-gradient(circle, #34d399 35%, transparent 40%);
   }
-  .fingerprint {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 1.6rem;
-    letter-spacing: 0.08em;
-    background: #f8f9fa;
-    border: 1px solid #e9ecef;
-    border-radius: 0.5rem;
-    padding: 0.5rem 1rem;
-    margin: 0;
-  }
-  .ok h2 {
-    color: #2b8a3e;
-  }
-  .bad h2 {
-    color: #c92a2a;
-  }
-  .caps {
-    color: #555;
-    font-size: 0.9rem;
-    margin: 0;
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 
-  .filepick {
+  /* ————— verification ————— */
+  .fingerprint-wrap {
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
+    align-items: center;
+    gap: 0.5rem;
     width: 100%;
+    padding: 1.4rem;
+    border-radius: 1rem;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.1);
   }
-  .filepick span {
+  .fingerprint-label {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: #77849f;
+  }
+  .fingerprint {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 1.9rem;
     font-weight: 600;
+    letter-spacing: 0.1em;
+    color: #4ade80;
+    text-shadow: 0 0 28px rgba(52, 211, 153, 0.45);
   }
-  .filepick input {
-    padding: 0.5rem 0;
-    border: none;
-    font: inherit;
+  .fingerprint-hint {
+    font-size: 0.8rem;
+    color: #77849f;
+  }
+  .caps {
+    font-size: 0.85rem;
   }
 
+  .outcome {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    width: 100%;
+  }
+  .outcome strong {
+    color: #e8ecf8;
+  }
+  .download {
+    text-decoration: none;
+  }
+
+  /* ————— transfer ————— */
+  .transfer-block {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    width: 100%;
+  }
   .bar {
     width: 100%;
-    height: 0.5rem;
-    background: #e9ecef;
+    height: 0.7rem;
+    background: rgba(255, 255, 255, 0.08);
     border-radius: 999px;
     overflow: hidden;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.5);
   }
   .bar-fill {
     height: 100%;
-    background: #3b5bdb;
+    background: linear-gradient(90deg, #8b7cf6, #4cc9f0);
     border-radius: inherit;
     transition: width 0.15s linear;
+    box-shadow: 0 0 18px rgba(124, 160, 246, 0.7);
+    position: relative;
+    overflow: hidden;
+  }
+  .bar-fill::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.4), transparent);
+    transform: translateX(-100%);
+    animation: shimmer 1.6s infinite;
+  }
+  @keyframes shimmer {
+    to {
+      transform: translateX(100%);
+    }
+  }
+  .status {
+    margin: 0;
+    color: #c8d2ea;
+    font-variant-numeric: tabular-nums;
+  }
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.75rem;
+    width: 100%;
+  }
+  @media (max-width: 560px) {
+    .stats {
+      grid-template-columns: 1fr;
+    }
+  }
+  .stat {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    padding: 0.8rem 1rem;
+    border-radius: 0.85rem;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  .stat-label {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #77849f;
+  }
+  .stat-value {
+    font-size: 0.95rem;
+    color: #dbe4f7;
+  }
+  .transfer-controls {
+    display: flex;
+    gap: 0.75rem;
   }
 
-  .download {
-    text-decoration: none;
-    display: inline-block;
+  /* ————— file picking ————— */
+  .pick-zone {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.85rem;
+    width: 100%;
+  }
+  @media (max-width: 560px) {
+    .pick-zone {
+      grid-template-columns: 1fr;
+    }
+  }
+  .pick-zone > .muted {
+    grid-column: 1 / -1;
+  }
+  .filepick {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 1.4rem 1rem;
+    border-radius: 1rem;
+    border: 1.5px dashed rgba(139, 124, 246, 0.45);
+    background: rgba(139, 124, 246, 0.07);
+    cursor: pointer;
+    transition:
+      background 0.2s ease,
+      border-color 0.2s ease,
+      transform 0.12s ease;
+  }
+  .filepick:hover {
+    background: rgba(139, 124, 246, 0.14);
+    border-color: rgba(139, 124, 246, 0.8);
+  }
+  .filepick:active {
+    transform: scale(0.99);
+  }
+  .filepick svg {
+    width: 1.6rem;
+    height: 1.6rem;
+    color: #c4b5fd;
+  }
+  .filepick-title {
+    font-weight: 600;
+    color: #e8ecf8;
+  }
+  .filepick-sub {
+    font-size: 0.8rem;
+    color: #77849f;
+  }
+  .filepick input {
+    display: none;
+  }
+
+  /* ————— failure ————— */
+  .error-icon {
+    width: 3rem;
+    height: 3rem;
+    border-radius: 1rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(248, 113, 113, 0.12);
+    border: 1px solid rgba(248, 113, 113, 0.4);
+    color: #fca5a5;
+  }
+  .error-icon svg {
+    width: 1.6rem;
+    height: 1.6rem;
+  }
+  .result.bad h2 {
+    color: #fca5a5;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .glow,
+    .spinner,
+    .bar-fill::after {
+      animation: none;
+    }
   }
 </style>
