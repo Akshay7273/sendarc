@@ -53,6 +53,20 @@ func (p *mockPath) deliver(frame []byte) {
 	}
 }
 
+func (p *mockPath) sentCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.sent)
+}
+
+// must fails the test if err is non-nil.
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // --- Tests ---
 
 // TestStateTransitions verifies the legal path state machine.
@@ -61,12 +75,8 @@ func TestStateTransitions(t *testing.T) {
 	d := newMockPath(PathDirect)
 	r := newMockPath(PathRelay)
 
-	if err := s.Register(PathDirect, d); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Register(PathRelay, r); err != nil {
-		t.Fatal(err)
-	}
+	must(t, s.Register(PathDirect, d))
+	must(t, s.Register(PathRelay, r))
 
 	checkState := func(id PathID, want PathState) {
 		got, ok := s.State(id)
@@ -81,20 +91,14 @@ func TestStateTransitions(t *testing.T) {
 	checkState(PathDirect, StateCandidate)
 	checkState(PathRelay, StateCandidate)
 
-	if err := s.Warming(PathDirect); err != nil {
-		t.Fatal(err)
-	}
+	must(t, s.Warming(PathDirect))
 	checkState(PathDirect, StateWarming)
 
-	if err := s.Ready(PathDirect); err != nil {
-		t.Fatal(err)
-	}
+	must(t, s.Ready(PathDirect))
 	checkState(PathDirect, StateReady)
 
 	epoch, err := s.Activate(PathDirect)
-	if err != nil {
-		t.Fatal(err)
-	}
+	must(t, err)
 	if epoch != 1 {
 		t.Fatalf("epoch = %d, want 1", epoch)
 	}
@@ -109,7 +113,7 @@ func TestStateTransitions(t *testing.T) {
 func TestIllegalTransitions(t *testing.T) {
 	s := New()
 	d := newMockPath(PathDirect)
-	s.Register(PathDirect, d)
+	must(t, s.Register(PathDirect, d))
 
 	// Cannot go from candidate to ready directly
 	if err := s.Ready(PathDirect); err == nil {
@@ -122,9 +126,7 @@ func TestIllegalTransitions(t *testing.T) {
 	}
 
 	// Warming from candidate is fine
-	if err := s.Warming(PathDirect); err != nil {
-		t.Fatal(err)
-	}
+	must(t, s.Warming(PathDirect))
 
 	// Cannot warm twice
 	if err := s.Warming(PathDirect); err == nil {
@@ -139,14 +141,14 @@ func TestActivateClosesLosers(t *testing.T) {
 	d2 := newMockPath(2)
 	d3 := newMockPath(3)
 
-	s.Register(1, d1)
-	s.Register(2, d2)
-	s.Register(3, d3)
+	must(t, s.Register(1, d1))
+	must(t, s.Register(2, d2))
+	must(t, s.Register(3, d3))
 
-	s.Warming(1)
-	s.Ready(1)
-	s.Warming(2)
-	s.Ready(2)
+	must(t, s.Warming(1))
+	must(t, s.Ready(1))
+	must(t, s.Warming(2))
+	must(t, s.Ready(2))
 
 	if _, err := s.Activate(1); err != nil {
 		t.Fatal(err)
@@ -167,19 +169,15 @@ func TestActivateClosesLosers(t *testing.T) {
 func TestNoDoubleActivation(t *testing.T) {
 	s := New()
 	d := newMockPath(PathDirect)
-	s.Register(PathDirect, d)
-	s.Warming(PathDirect)
-	s.Ready(PathDirect)
+	must(t, s.Register(PathDirect, d))
+	must(t, s.Warming(PathDirect))
+	must(t, s.Ready(PathDirect))
 
 	epoch1, err := s.Activate(PathDirect)
-	if err != nil {
-		t.Fatal(err)
-	}
+	must(t, err)
 
 	epoch2, err := s.Activate(PathDirect)
-	if err != nil {
-		t.Fatal(err)
-	}
+	must(t, err)
 
 	if epoch1 != epoch2 {
 		t.Fatal("second activate should return same epoch")
@@ -190,11 +188,9 @@ func TestNoDoubleActivation(t *testing.T) {
 func TestFailPath(t *testing.T) {
 	s := New()
 	d := newMockPath(PathDirect)
-	s.Register(PathDirect, d)
+	must(t, s.Register(PathDirect, d))
 
-	if err := s.Fail(PathDirect); err != nil {
-		t.Fatal(err)
-	}
+	must(t, s.Fail(PathDirect))
 	state, ok := s.State(PathDirect)
 	if !ok || state != StateFailed {
 		t.Fatalf("state = %v, want failed", state)
@@ -215,20 +211,21 @@ func TestDuplicateLateCallbacks(t *testing.T) {
 	s := New()
 	d1 := newMockPath(1)
 	d2 := newMockPath(2)
-	s.Register(1, d1)
-	s.Register(2, d2)
+	must(t, s.Register(1, d1))
+	must(t, s.Register(2, d2))
 
 	var received int32
 	s.OnData(func([]byte) {
 		atomic.AddInt32(&received, 1)
 	})
 
-	s.Warming(1)
-	s.Ready(1)
-	s.Warming(2)
-	s.Ready(2)
+	must(t, s.Warming(1))
+	must(t, s.Ready(1))
+	must(t, s.Warming(2))
+	must(t, s.Ready(2))
 
-	s.Activate(1)
+	_, err := s.Activate(1)
+	must(t, err)
 
 	// Deliver data on the closed path 2 — should be ignored
 	d2.deliver([]byte("late"))
@@ -248,14 +245,15 @@ func TestCleanup(t *testing.T) {
 	s := New()
 	d1 := newMockPath(1)
 	d2 := newMockPath(2)
-	s.Register(1, d1)
-	s.Register(2, d2)
+	must(t, s.Register(1, d1))
+	must(t, s.Register(2, d2))
 
-	s.Warming(1)
-	s.Ready(1)
-	s.Activate(1)
+	must(t, s.Warming(1))
+	must(t, s.Ready(1))
+	_, err := s.Activate(1)
+	must(t, err)
 
-	s.Close()
+	must(t, s.Close())
 
 	if !d1.closed.Load() {
 		t.Fatal("path 1 should be closed after supervisor close")
@@ -268,7 +266,7 @@ func TestCleanup(t *testing.T) {
 	}
 
 	// Second close should be a no-op
-	s.Close()
+	must(t, s.Close())
 
 	// Register after close should fail
 	d3 := newMockPath(3)
@@ -286,21 +284,19 @@ func TestCancelDuringEstablishment(t *testing.T) {
 	s := New()
 	d1 := newMockPath(1)
 	d2 := newMockPath(2)
-	s.Register(1, d1)
-	s.Register(2, d2)
+	must(t, s.Register(1, d1))
+	must(t, s.Register(2, d2))
 
-	s.Warming(1)
-	s.Warming(2)
+	must(t, s.Warming(1))
+	must(t, s.Warming(2))
 
 	// Cancel path 1 before it's ready
-	s.Fail(1)
+	must(t, s.Fail(1))
 
 	// Path 2 should still be able to complete
-	s.Ready(2)
+	must(t, s.Ready(2))
 	epoch, err := s.Activate(2)
-	if err != nil {
-		t.Fatal(err)
-	}
+	must(t, err)
 	if epoch != 1 {
 		t.Fatalf("epoch = %d, want 1", epoch)
 	}
@@ -316,16 +312,17 @@ func TestLosingPathTeardown(t *testing.T) {
 	s := New()
 	d1 := newMockPath(1)
 	d2 := newMockPath(2)
-	s.Register(1, d1)
-	s.Register(2, d2)
+	must(t, s.Register(1, d1))
+	must(t, s.Register(2, d2))
 
-	s.Warming(1)
-	s.Ready(1)
-	s.Warming(2)
-	s.Ready(2)
+	must(t, s.Warming(1))
+	must(t, s.Ready(1))
+	must(t, s.Warming(2))
+	must(t, s.Ready(2))
 
 	// Activate relay as winner
-	s.Activate(2)
+	_, err := s.Activate(2)
+	must(t, err)
 
 	// Path 1 should be closed and state is closed
 	if !d1.closed.Load() {
@@ -342,36 +339,31 @@ func TestLosingPathTeardown(t *testing.T) {
 func TestLazySendBeforeActivation(t *testing.T) {
 	s := New()
 	d := newMockPath(PathDirect)
-	s.Register(PathDirect, d)
+	must(t, s.Register(PathDirect, d))
 
-	if err := s.Send([]byte("early")); err != nil {
-		t.Fatal(err)
-	}
+	must(t, s.Send([]byte("early")))
 
-	d.mu.Lock()
-	if n := len(d.sent); n != 0 {
+	if n := d.sentCount(); n != 0 {
 		t.Fatalf("sent %d frames before activation, want 0", n)
 	}
-	d.mu.Unlock()
 
-	s.Warming(PathDirect)
-	s.Ready(PathDirect)
-	s.Activate(PathDirect)
+	must(t, s.Warming(PathDirect))
+	must(t, s.Ready(PathDirect))
+	_, err := s.Activate(PathDirect)
+	must(t, err)
 
-	d.mu.Lock()
-	if n := len(d.sent); n != 1 {
+	if n := d.sentCount(); n != 1 {
 		t.Fatalf("sent %d frames after activation, want 1", n)
 	}
-	d.mu.Unlock()
 }
 
 // TestSendAfterClose verifies Send returns ErrClosed after Close.
 func TestSendAfterClose(t *testing.T) {
 	s := New()
 	d := newMockPath(PathDirect)
-	s.Register(PathDirect, d)
+	must(t, s.Register(PathDirect, d))
 
-	s.Close()
+	must(t, s.Close())
 
 	if err := s.Send([]byte("late")); err != ErrClosed {
 		t.Fatalf("Send after close = %v, want ErrClosed", err)
@@ -384,9 +376,7 @@ func TestDuplicateRegistration(t *testing.T) {
 	d1 := newMockPath(PathDirect)
 	d2 := newMockPath(PathDirect)
 
-	if err := s.Register(PathDirect, d1); err != nil {
-		t.Fatal(err)
-	}
+	must(t, s.Register(PathDirect, d1))
 	if err := s.Register(PathDirect, d2); err == nil {
 		t.Fatal("expected error for duplicate registration")
 	}
@@ -401,17 +391,16 @@ func TestStaleStateDoesNotAffectActive(t *testing.T) {
 	s := New()
 	d1 := newMockPath(1)
 	d2 := newMockPath(2)
-	s.Register(1, d1)
-	s.Register(2, d2)
+	must(t, s.Register(1, d1))
+	must(t, s.Register(2, d2))
 
-	s.Warming(1)
-	s.Ready(1)
-	s.Activate(1)
+	must(t, s.Warming(1))
+	must(t, s.Ready(1))
+	_, actErr := s.Activate(1)
+	must(t, actErr)
 
 	// Stale operations on path 2
-	if err := s.Fail(2); err != nil {
-		t.Fatal(err)
-	}
+	must(t, s.Fail(2))
 
 	state, _ := s.State(1)
 	if state != StateActive {
@@ -425,7 +414,8 @@ func TestStaleStateDoesNotAffectActive(t *testing.T) {
 	})
 
 	// Activate again should be a no-op
-	s.Activate(1)
+	_, err := s.Activate(1)
+	must(t, err)
 
 	d1.deliver([]byte("still active"))
 	if n := atomic.LoadInt32(&received); n != 1 {
@@ -443,30 +433,27 @@ func TestSendSwitchesOnActivePathFailure(t *testing.T) {
 
 	// d1 fails on the second send
 	var callCount atomic.Int32
-	d1.sendFn = func(frame []byte) error {
+	d1.sendFn = func([]byte) error {
 		if callCount.Add(1) >= 2 {
 			return errors.New("path 1 failed")
 		}
 		return nil
 	}
 
-	s.Register(1, d1)
-	s.Warming(1)
-	s.Ready(1)
-	s.Activate(1)
+	must(t, s.Register(1, d1))
+	must(t, s.Warming(1))
+	must(t, s.Ready(1))
+	_, err := s.Activate(1)
+	must(t, err)
 
 	// Register d2 AFTER d1 is activated so it stays at StateCandidate
 	d2 := newMockPath(2)
-	if err := s.Register(2, d2); err != nil {
-		t.Fatal(err)
-	}
-	s.Warming(2)
-	s.Ready(2)
+	must(t, s.Register(2, d2))
+	must(t, s.Warming(2))
+	must(t, s.Ready(2))
 
 	// First send works
-	if err := s.Send([]byte("first")); err != nil {
-		t.Fatal(err)
-	}
+	must(t, s.Send([]byte("first")))
 
 	// Second send will fail on path 1; it should block until path 2
 	// is activated, then succeed on path 2.
@@ -478,7 +465,8 @@ func TestSendSwitchesOnActivePathFailure(t *testing.T) {
 	time.Sleep(50 * time.Millisecond) // let Send enter the wait
 
 	// Activate path 2, which should unblock the Send
-	s.Activate(2)
+	_, actErr := s.Activate(2)
+	must(t, actErr)
 
 	select {
 	case err := <-errCh:
@@ -489,11 +477,9 @@ func TestSendSwitchesOnActivePathFailure(t *testing.T) {
 		t.Fatal("Send blocked forever after switch")
 	}
 
-	d2.mu.Lock()
-	if n := len(d2.sent); n != 1 {
+	if n := d2.sentCount(); n != 1 {
 		t.Fatalf("path 2 sent %d frames, want 1", n)
 	}
-	d2.mu.Unlock()
 }
 
 // TestDegradedState verifies that a ready path can transition
@@ -501,11 +487,12 @@ func TestSendSwitchesOnActivePathFailure(t *testing.T) {
 func TestDegradedState(t *testing.T) {
 	s := New()
 	d := newMockPath(PathDirect)
-	s.Register(PathDirect, d)
+	must(t, s.Register(PathDirect, d))
 
-	s.Warming(PathDirect)
-	s.Ready(PathDirect)
-	s.Activate(PathDirect)
+	must(t, s.Warming(PathDirect))
+	must(t, s.Ready(PathDirect))
+	_, err := s.Activate(PathDirect)
+	must(t, err)
 
 	state, _ := s.State(PathDirect)
 	if state != StateActive {
