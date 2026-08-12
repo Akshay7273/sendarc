@@ -23,7 +23,8 @@ type progressFile struct {
 	size int64
 }
 
-// progress renders acknowledged bytes, a five-second rolling rate, and ETA on stderr.
+// progress renders acknowledged bytes, a five-second rolling rate, and ETA on stderr,
+// with a live percentage bar when the total is known.
 type progress struct {
 	mu        sync.Mutex
 	total     int64
@@ -36,6 +37,7 @@ type progress struct {
 	files     []progressFile
 	fileIdx   int
 	fileBytes int64
+	st        *style
 }
 
 func newProgress(total int64) *progress {
@@ -43,7 +45,7 @@ func newProgress(total int64) *progress {
 }
 
 func newProgressWithClock(total int64, now func() time.Time) *progress {
-	return &progress{total: total, lastPct: -1, fileIdx: -1, now: now}
+	return &progress{total: total, lastPct: -1, fileIdx: -1, now: now, st: newStyle(os.Stderr)}
 }
 
 func (p *progress) setTotal(total int64) {
@@ -75,7 +77,7 @@ func (p *progress) setState(state wire.TransferState) {
 	}
 	if state == wire.TransferPaused {
 		p.reported = true
-		fmt.Fprintln(os.Stderr, "\n  Paused — buffered network data may still drain.")
+		fmt.Fprintln(os.Stderr, "\n  "+p.st.yellow("Paused — buffered network data may still drain."))
 	}
 }
 
@@ -108,9 +110,9 @@ func (p *progress) reportLocked(n int64) {
 	}
 	if p.fileIdx >= 0 && p.fileIdx < len(p.files) {
 		file := p.files[p.fileIdx]
-		detail = fmt.Sprintf("%s: %s / %s · %s", file.name, humanBytes(p.fileBytes), humanBytes(file.size), detail)
+		detail = fmt.Sprintf("%s · %s / %s", p.st.dim(file.name), humanBytes(p.fileBytes), humanBytes(file.size)) + " · " + detail
 	}
-	fmt.Fprintf(os.Stderr, "\r  %s / %s (%d%%) · %s", humanBytes(n), humanBytes(p.total), pct, detail)
+	fmt.Fprintf(os.Stderr, "\r  %s %s  %s", bar(pct, 18), p.st.cyan(fmt.Sprintf("%d%%", pct)), detail)
 }
 
 func (p *progress) recordSample() {
@@ -151,6 +153,15 @@ func (p *progress) finish() {
 	}
 }
 
+// bar renders a filled progress bar of the given cell width using block glyphs.
+func bar(pct, width int) string {
+	filled := pct * width / 100
+	if pct > 0 && filled == 0 {
+		filled = 1
+	}
+	return "[" + strings.Repeat("\u25b0", filled) + strings.Repeat("\u25b1", width-filled) + "]"
+}
+
 func formatRate(bytesPerSecond float64) string {
 	switch {
 	case bytesPerSecond >= 1<<20:
@@ -173,12 +184,13 @@ func formatETA(eta time.Duration) string {
 // terminalControls enables line-oriented controls only for an interactive stdin. Piped CLI use
 // stays quiet and non-blocking.
 func terminalControls() func(clitransfer.Controls) {
+	s := newStyle(os.Stderr)
 	return func(controls clitransfer.Controls) {
 		info, err := os.Stdin.Stat()
 		if err != nil || info.Mode()&os.ModeCharDevice == 0 {
 			return
 		}
-		fmt.Fprintln(os.Stderr, "Controls: p + Enter pause · r + Enter resume · c + Enter cancel")
+		fmt.Fprintln(os.Stderr, s.dim("Controls: p + Enter pause · r + Enter resume · c + Enter cancel"))
 		go func() {
 			scanner := bufio.NewScanner(os.Stdin)
 			for scanner.Scan() {
