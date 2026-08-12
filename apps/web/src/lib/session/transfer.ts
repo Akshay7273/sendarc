@@ -25,6 +25,7 @@ import type {
   SessionCrypto,
   WorkerToHost,
 } from '../transfer/wire.js';
+import { GenerationGuard } from './generation.js';
 
 /** Terminal outcome of a transfer. `file` is present on the receive side (the downloadable result). */
 export interface TransferOutcome {
@@ -103,9 +104,9 @@ function run(
   const progress = new ProgressTracker(total);
   const wakeLock = new WakeLockManager();
   let settled = false;
-  // Monotonic generation: every async continuation captures it at creation and
-  // bails before mutating controller state once it is stale (ADR 0001 §5).
-  let generation = 0;
+  // Monotonic generation guard: every async continuation captures the generation at
+  // creation and bails before mutating controller state once it is stale (ADR 0001 §5).
+  const generation = new GenerationGuard();
   let peer: Peer | undefined;
   let worker: Worker | undefined;
   let writer: ChannelWriter | undefined;
@@ -122,7 +123,7 @@ function run(
   });
 
   const cleanup = (): void => {
-    generation++;
+    generation.bump();
     clearTimeout(cancelTimer);
     wakeLock.setActive(false);
     worker?.terminate();
@@ -143,6 +144,10 @@ function run(
     rejectDone(err);
   };
 
+  // Capture the generation at session start. cleanup() bumps it only on
+  // cancel/finish/fail, so a callback that fires after teardown sees a mismatch
+  // and bails before mutating state (a stale continuation).
+  const gen = generation.capture();
   void (async () => {
     try {
       const auth = SignalAuthenticator.fromSession(
@@ -155,22 +160,19 @@ function run(
       const relayPath = new RelayTransport(signaling);
       relay = relayPath;
       signaling.onClose((err) => {
-        const gen = generation;
-        if (gen !== generation) return;
+        if (!generation.isCurrent(gen)) return;
         relayPath.fail(err);
         if (transport !== 'direct' || switchPromise) {
           fail(err);
         }
       });
       signaling.onMessage((msg) => {
-        const gen = generation;
-        if (gen !== generation) return;
+        if (!generation.isCurrent(gen)) return;
         if (relayPath.handleMessage(msg)) return;
         if (msg.type === 'sdp' || msg.type === 'ice') p.accept(msg);
       });
       signaling.onBinary((frame) => {
-        const gen = generation;
-        if (gen !== generation) return;
+        if (!generation.isCurrent(gen)) return;
         relayPath.handleBinary(frame);
       });
 
@@ -195,14 +197,13 @@ function run(
       const receive = (frame: ArrayBuffer): void =>
         w.postMessage({ kind: 'inbound-frame', frame } satisfies HostToWorker, [frame]);
       const switchToRelay = (): Promise<void> => {
-        const gen = generation;
-        if (gen !== generation) return Promise.resolve();
+        if (!generation.isCurrent(gen)) return Promise.resolve();
         if (transport === 'relay') return Promise.resolve();
         if (switchPromise) return switchPromise;
         switchPromise = (async () => {
           relayPath.open();
           await relayPath.ready;
-          if (gen !== generation) return;
+          if (!generation.isCurrent(gen)) return;
           if (settled) return;
           transport = 'relay';
           w.postMessage({ kind: 'transport-changed' } satisfies HostToWorker);
@@ -216,8 +217,7 @@ function run(
         return switchPromise;
       };
       const sendOutbound = async (frame: ArrayBuffer): Promise<void> => {
-        const gen = generation;
-        if (gen !== generation) return;
+        if (!generation.isCurrent(gen)) return;
         if (transport === 'relay') {
           await relayPath.write(frame);
           return;
@@ -237,35 +237,30 @@ function run(
 
       if (selected.kind === 'direct') {
         p.onData((frame) => {
-          const gen = generation;
-          if (gen !== generation) return;
+          if (!generation.isCurrent(gen)) return;
           if (transport === 'direct' && !switchPromise) receive(frame);
         });
         p.onDisconnect(() => {
-          const gen = generation;
-          if (gen !== generation) return;
+          if (!generation.isCurrent(gen)) return;
           void switchToRelay().catch(() => {});
         });
         void relayPath.ready.then(switchToRelay).catch(() => {});
         relayPath.onData((frame) => {
-          const gen = generation;
-          if (gen !== generation) return;
+          if (!generation.isCurrent(gen)) return;
           void switchToRelay()
             .then(() => receive(frame))
             .catch(() => {});
         });
       } else {
         relayPath.onData((frame) => {
-          const gen = generation;
-          if (gen !== generation) return;
+          if (!generation.isCurrent(gen)) return;
           receive(frame);
         });
       }
 
       // Worker → host events.
       w.addEventListener('message', (ev: MessageEvent) => {
-        const gen = generation;
-        if (gen !== generation) return;
+        if (!generation.isCurrent(gen)) return;
         const msg = ev.data as WorkerToHost;
         switch (msg.kind) {
           case 'outbound-frame':
@@ -314,8 +309,7 @@ function run(
   })();
 
   async function completeTransfer(msg: Extract<WorkerToHost, { kind: 'done' }>): Promise<void> {
-    const gen = generation;
-    if (gen !== generation) return;
+    if (!generation.isCurrent(gen)) return;
     const first = msg.files[0]!;
     if (spec.role === 'receive') {
       try {

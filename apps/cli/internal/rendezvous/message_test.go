@@ -117,7 +117,7 @@ func keysOf(m map[string]any) []string {
 	return ks
 }
 
-// SB-1140: fuzz the signaling envelope decoder. Every JSON frame must decode or
+// Fuzz the signaling envelope decoder. Every JSON frame must decode or
 // fail without panicking, and a successfully decoded message must round-trip so
 // the session can act on it consistently.
 func FuzzUnmarshalMessage(f *testing.F) {
