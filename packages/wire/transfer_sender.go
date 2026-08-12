@@ -98,6 +98,7 @@ type Sender struct {
 	activeFileAcknowledged int64
 	paused                 bool
 	completeSent           bool
+	complete               *Complete
 	settled                bool
 	err                    error
 	// handleMu serializes Handle so two byte paths (direct and relay pumps during a
@@ -298,8 +299,10 @@ func (s *Sender) Run(ctx context.Context) (string, error) {
 	}
 	s.mu.Lock()
 	s.completeSent = true
+	s.complete = NewComplete(transferDigest)
+	complete := s.complete
 	s.mu.Unlock()
-	if err := s.sendControl(NewComplete(transferDigest)); err != nil {
+	if err := s.sendControl(complete); err != nil {
 		s.fail(err)
 		return "", err
 	}
@@ -407,6 +410,10 @@ func (s *Sender) TransportChanged() {
 	if s.manifestSent && s.acknowledged == 0 {
 		resend = s.manifest
 	}
+	var resendComplete *Complete
+	if s.completeSent && s.complete != nil && !s.settled {
+		resendComplete = s.complete
+	}
 	s.cond.Broadcast()
 	s.mu.Unlock()
 	if resend != nil {
@@ -414,6 +421,15 @@ func (s *Sender) TransportChanged() {
 		// identical duplicates and stray pre-manifest data, so resending it is
 		// safe and lets the transfer continue on the new path.
 		_ = s.sendControl(resend)
+	}
+	if resendComplete != nil {
+		// The one-shot Complete can be starved by the Direct channel teardown after
+		// every block is acknowledged but before the recipient sees it. The receiver
+		// sends Done once it has settled, and a settled receiver ignores a duplicate
+		// Complete, so retransmitting it on a path change is safe. It is sent on a
+		// background goroutine: a relay connection may not have granted send credit
+		// yet, so this must not block TransportChanged (or the sender's Run) on it.
+		go func(complete *Complete) { _ = s.sendControl(complete) }(resendComplete)
 	}
 }
 

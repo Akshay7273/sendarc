@@ -35,9 +35,9 @@ function u32(rand: () => number): number {
 
 const master = new Uint8Array(32).fill(9);
 
-// SB-1144: frame header encode/decode round-trip over many arbitrary but
+// Frame header encode/decode round-trip over many arbitrary but
 // in-range headers; decode(encode(h)) must equal h exactly and stay 16 bytes.
-describe('SB-1144 frame header property', () => {
+describe('frame header property', () => {
   it('round-trips arbitrary in-range headers', () => {
     const rand = rng(0xbeef);
     for (let i = 0; i < 2000; i++) {
@@ -89,9 +89,9 @@ describe('SB-1144 frame header property', () => {
   });
 });
 
-// SB-1144: AEAD seal/open inverse over arbitrary plaintext lengths, plus the
+// AEAD seal/open inverse over arbitrary plaintext lengths, plus the
 // guarantee that any single-byte mutation of a sealed frame fails to open.
-describe('SB-1144 AEAD frame property', () => {
+describe('AEAD frame property', () => {
   it('seal then open recovers plaintext and header len', async () => {
     const keys = await deriveTransferKeys(await deriveMaster(master, new Uint8Array(0)));
     const rand = rng(0xdeadbeef);
@@ -130,9 +130,9 @@ describe('SB-1144 AEAD frame property', () => {
   });
 });
 
-// SB-1145: arbitrary safe relative segment strings must produce canonical,
+// Arbitrary safe relative segment strings must produce canonical,
 // absolute-free, dot-free output; structural invariants mirror the Go fuzzer.
-describe('SB-1145 normalizeTransferPath property', () => {
+describe('normalizeTransferPath property', () => {
   const alpha = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_ .',
     legal = 64;
 
@@ -200,9 +200,9 @@ describe('SB-1145 normalizeTransferPath property', () => {
   });
 });
 
-// SB-1145: validateManifest accepts geometrically consistent manifests and
+// validateManifest accepts geometrically consistent manifests and
 // rejects any whose block geometry, size sum, or paths are inconsistent.
-describe('SB-1145 validateManifest property', () => {
+describe('validateManifest property', () => {
   function file(idx: number, name: string, size: number, blockSize: number): FileEntry {
     return {
       idx,
