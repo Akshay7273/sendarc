@@ -123,8 +123,24 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
+          version: v2.12.2
           working-directory: ${{ matrix.module }}
+
+  branding:
+    name: branding (no stale SendArc references)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard against stale branding
+        run: |
+          if grep -rInE "sendarc|SendArc|SENDARC" \
+            --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist \
+            --exclude-dir=.svelte-kit --exclude-dir=test-results \
+            --exclude-dir=playwright-report --exclude-dir=coverage .; then
+            echo "::error::Stale 'sendarc' branding found (repo was renamed to SendBeam)."
+            exit 1
+          fi
 
   docker:
     name: container (build + smoke)
