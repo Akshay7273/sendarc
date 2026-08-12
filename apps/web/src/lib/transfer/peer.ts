@@ -20,6 +20,29 @@ export interface CreatePeerOptions {
   /** Sign-and-forward an outbound signaling frame over the adopted socket. */
   send: (msg: SdpMsg | IceMsg) => void;
   iceServers?: RTCIceServer[];
+  /**
+   * Invoked as ICE gathering/connection state transitions occur. Primarily for diagnostics
+   * and adaptive selection.
+   */
+  onIceState?: (state: ICEState) => void;
+}
+
+/** A sanitized snapshot of a peer's ICE setup for diagnostics. */
+export interface PeerDiagnostics {
+  /** Milliseconds from createPeer to the data channel opening (0 if not yet open). */
+  setupMs: number;
+  /** Ordered ICE gathering-state history. */
+  gatheringStates: RTCIceGatheringState[];
+  /** Ordered ICE connection-state history. */
+  connectionStates: RTCIceConnectionState[];
+  /** Selected candidate pair type, e.g. "host"|"srflx"|"prflx"|"relay"; "" if none yet. */
+  selectedPairType: string;
+}
+
+/** ICE gathering+connection state published to onIceState. */
+export interface ICEState {
+  gathering: RTCIceGatheringState;
+  connection: RTCIceConnectionState;
 }
 
 export interface Peer {
@@ -34,12 +57,27 @@ export interface Peer {
   onData(handler: (frame: ArrayBuffer) => void): void;
   /** Register for an established channel becoming unusable. */
   onDisconnect(handler: (err: Error) => void): void;
+  /** Sanitized ICE setup telemetry for diagnostics. */
+  diagnostics(): PeerDiagnostics;
   /** Tear down the peer connection. Idempotent. */
   close(): void;
 }
 
 export function createPeer(opts: CreatePeerOptions): Peer {
   const pc = new RTCPeerConnection({ iceServers: opts.iceServers ?? DEFAULT_ICE_SERVERS });
+
+  // ICE setup telemetry: gathering/connection history, setup timing, and the selected pair
+  // type, exposed sanitized via diagnostics().
+  const startedAt = performance.now();
+  let connectedAt = 0;
+  const gatheringStates: RTCIceGatheringState[] = [pc.iceGatheringState];
+  const connectionStates: RTCIceConnectionState[] = [pc.iceConnectionState];
+  let selectedPairType = '';
+  const publishIceState = (): void => {
+    const lastGathering = gatheringStates[gatheringStates.length - 1]!;
+    const lastConnection = connectionStates[connectionStates.length - 1]!;
+    opts.onIceState?.({ gathering: lastGathering, connection: lastConnection });
+  };
 
   let resolveChannel!: (ch: RTCDataChannel) => void;
   let rejectChannel!: (err: Error) => void;
@@ -75,6 +113,7 @@ export function createPeer(opts: CreatePeerOptions): Peer {
       if (settled) return;
       settled = true;
       channelOpen = true;
+      if (connectedAt === 0) connectedAt = performance.now();
       resolveChannel(ch);
     };
     ch.onmessage = (ev: MessageEvent) => {
@@ -99,8 +138,45 @@ export function createPeer(opts: CreatePeerOptions): Peer {
   pc.onicecandidate = (ev) => {
     if (ev.candidate) void opts.auth.signIce(JSON.stringify(ev.candidate)).then(opts.send);
   };
+  pc.onicegatheringstatechange = () => {
+    gatheringStates.push(pc.iceGatheringState);
+    publishIceState();
+  };
+  pc.oniceconnectionstatechange = () => {
+    connectionStates.push(pc.iceConnectionState);
+    if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+      void captureSelectedPairType();
+    }
+    publishIceState();
+  };
   pc.onconnectionstatechange = () => {
     if (pc.connectionState === 'failed') disconnected(new Error('peer connection failed'));
+  };
+
+  // Query getStats() for the selected candidate pair and record the local candidate's type
+  // (e.g. host/srflx/prflx/relay). Best-effort: leaves "" if stats are unavailable.
+  const captureSelectedPairType = async (): Promise<void> => {
+    if (selectedPairType !== '') return;
+    try {
+      const stats = await pc.getStats();
+      const candidates = new Map<string, string>();
+      let pairLocal: string | undefined;
+      for (const stat of stats.values()) {
+        if (stat.type === 'candidate') {
+          const c = stat as { id: string; candidateType?: string };
+          candidates.set(stat.id, c.candidateType ?? '');
+        } else if (stat.type === 'candidate-pair') {
+          const p = stat as RTCIceCandidatePairStats;
+          if (p.state === 'succeeded') pairLocal = p.localCandidateId;
+        }
+      }
+      if (pairLocal) {
+        const t = candidates.get(pairLocal);
+        if (t) selectedPairType = t;
+      }
+    } catch {
+      // getStats is optional; leave the pair type unset.
+    }
   };
 
   if (opts.role === 'offerer') {
@@ -156,6 +232,12 @@ export function createPeer(opts: CreatePeerOptions): Peer {
       disconnectHandler = handler;
       if (disconnectError) handler(disconnectError);
     },
+    diagnostics: () => ({
+      setupMs: connectedAt !== 0 ? connectedAt - startedAt : 0,
+      gatheringStates: [...gatheringStates],
+      connectionStates: [...connectionStates],
+      selectedPairType,
+    }),
     close: () => {
       closedByUser = true;
       settled = true;

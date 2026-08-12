@@ -2,6 +2,8 @@ package rtc
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -153,5 +155,106 @@ func recvWithin(t *testing.T, ch <-chan []byte) []byte {
 	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for frame")
 		return nil
+	}
+}
+
+// TestPeerDiagnosticsReportSetupTelemetry pins the ICE telemetry surface: after a successful
+// loopback negotiation the peer reports a positive setup duration, a non-empty gathering and
+// ICE-connection state history, and a selected candidate pair type.
+func TestPeerDiagnosticsReportSetupTelemetry(t *testing.T) {
+	offerer, joiner := linkedPeers(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := offerer.Channel(ctx); err != nil {
+		t.Fatalf("offerer channel: %v", err)
+	}
+	if _, err := joiner.Channel(ctx); err != nil {
+		t.Fatalf("joiner channel: %v", err)
+	}
+
+	d := offerer.Diagnostics()
+	if d.SetupDuration <= 0 {
+		t.Errorf("SetupDuration = %v, want > 0 after open", d.SetupDuration)
+	}
+	if len(d.ConnectionStates) == 0 {
+		t.Error("no ICE connection-state history recorded")
+	}
+	if len(d.GatheringStates) == 0 {
+		t.Error("no ICE gathering-state history recorded")
+	}
+	if d.SelectedCandidatePairType == "" {
+		t.Error("selected candidate pair type not reported after connection")
+	}
+}
+
+// TestPeerOnICEStatePublishesTransitions verifies the OnICEState callback fires as
+// gathering/connection state progresses on a connected peer. At minimum the initial state and
+// at least one transition must be observed after the loopback connects.
+func TestPeerOnICEStatePublishesTransitions(t *testing.T) {
+	var fired atomic.Bool
+	var mu sync.Mutex
+	var connectionStates []webrtc.ICEConnectionState
+
+	toJoiner := make(chan rendezvous.Message, 64)
+	toOfferer := make(chan rendezvous.Message, 64)
+	offAuth, joinAuth := newPair(testRoom)
+
+	offerer, err := NewPeer(PeerOptions{
+		Role: wire.RoleOfferer, Auth: offAuth, ICEServers: hostOnly,
+		Send: func(m rendezvous.Message) error { toJoiner <- m; return nil },
+		OnICEState: func(s ICEState) {
+			fired.Store(true)
+			mu.Lock()
+			connectionStates = append(connectionStates, s.Connection)
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatalf("new offerer: %v", err)
+	}
+	joiner, err := NewPeer(PeerOptions{
+		Role: wire.RoleJoiner, Auth: joinAuth, ICEServers: hostOnly,
+		Send: func(m rendezvous.Message) error { toOfferer <- m; return nil },
+	})
+	if err != nil {
+		_ = offerer.Close()
+		t.Fatalf("new joiner: %v", err)
+	}
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case m := <-toJoiner:
+				joiner.Accept(m)
+			case <-done:
+				return
+			}
+		}
+	}()
+	go func() {
+		for {
+			select {
+			case m := <-toOfferer:
+				offerer.Accept(m)
+			case <-done:
+				return
+			}
+		}
+	}()
+	defer func() { _ = offerer.Close(); _ = joiner.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := offerer.Channel(ctx); err != nil {
+		t.Fatalf("offerer channel: %v", err)
+	}
+
+	if !fired.Load() {
+		t.Error("OnICEState callback never fired")
+	}
+	if len(connectionStates) == 0 {
+		t.Error("no ICE connection states reported via callback")
 	}
 }

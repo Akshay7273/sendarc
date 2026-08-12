@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/pion/webrtc/v4"
 	"github.com/sendbeam/cli/internal/rendezvous"
@@ -36,6 +37,15 @@ type PeerOptions struct {
 	// API optionally supplies a pre-built webrtc.API (e.g. with a SettingEngine); nil uses the
 	// package default.
 	API *webrtc.API
+	// OnICEState, if set, is invoked as ICE gathering/connection state transitions occur.
+	// Useful for diagnostics and adaptive selection; see Peer.Diagnostics.
+	OnICEState func(ICEState)
+}
+
+// ICEState is a snapshot of ICE gathering/connection telemetry for one peer.
+type ICEState struct {
+	Gathering  webrtc.ICEGatheringState
+	Connection webrtc.ICEConnectionState
 }
 
 // Peer owns one PeerConnection and drives it to an open DataChannel. Construct it with NewPeer;
@@ -49,10 +59,37 @@ type Peer struct {
 	connCh chan *DataConn // buffered(1): the channel once open
 	errCh  chan error     // buffered(1): first fatal negotiation error
 
+	onICEState func(ICEState)
+
+	// telemetry holds ICE setup instrumentation. It is guarded by mu and is safe to read once
+	// the peer settles.
+	telemetry telemetry
+
 	mu          sync.Mutex
 	settled     bool
 	remoteReady bool
 	pendingICE  []webrtc.ICECandidateInit
+}
+
+// telemetry records ICE gathering/connection history and setup timing for Diagnostics.
+type telemetry struct {
+	StartAt     time.Time
+	ConnectedAt time.Time // zero until the DataChannel opens
+	Gathering   []webrtc.ICEGatheringState
+	Connection  []webrtc.ICEConnectionState
+}
+
+// Diagnostic is a sanitized snapshot of a peer's ICE setup for diagnostics/telemetry output.
+type Diagnostic struct {
+	// SetupDuration is the time from NewPeer to the DataChannel opening (0 if not yet open).
+	SetupDuration time.Duration
+	// GatheringStates is the ordered gathering-state history.
+	GatheringStates []webrtc.ICEGatheringState
+	// ConnectionStates is the ordered ICE-connection-state history.
+	ConnectionStates []webrtc.ICEConnectionState
+	// SelectedCandidatePairType is the type of the currently selected candidate pair, or ""
+	// if none is selected yet (e.g. "host", "srflx", "prflx", "relay").
+	SelectedCandidatePairType string
 }
 
 // NewPeer creates the PeerConnection and starts negotiation. For an offerer it immediately
@@ -73,12 +110,18 @@ func NewPeer(opts PeerOptions) (*Peer, error) {
 	}
 
 	p := &Peer{
-		pc:     pc,
-		role:   opts.Role,
-		auth:   opts.Auth,
-		send:   opts.Send,
-		connCh: make(chan *DataConn, 1),
-		errCh:  make(chan error, 1),
+		pc:         pc,
+		role:       opts.Role,
+		auth:       opts.Auth,
+		send:       opts.Send,
+		connCh:     make(chan *DataConn, 1),
+		errCh:      make(chan error, 1),
+		onICEState: opts.OnICEState,
+		telemetry: telemetry{
+			StartAt:    time.Now(),
+			Gathering:  []webrtc.ICEGatheringState{pc.ICEGatheringState()},
+			Connection: []webrtc.ICEConnectionState{pc.ICEConnectionState()},
+		},
 	}
 
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -104,6 +147,26 @@ func NewPeer(opts PeerOptions) (*Peer, error) {
 			} else {
 				p.fail(errors.New("rtc: peer connection failed"))
 			}
+		}
+	})
+	pc.OnICEGatheringStateChange(func(s webrtc.ICEGatheringState) {
+		p.mu.Lock()
+		p.telemetry.Gathering = append(p.telemetry.Gathering, s)
+		now := ICEState{Gathering: s, Connection: p.telemetry.Connection[len(p.telemetry.Connection)-1]}
+		cb := p.onICEState
+		p.mu.Unlock()
+		if cb != nil {
+			cb(now)
+		}
+	})
+	pc.OnICEConnectionStateChange(func(s webrtc.ICEConnectionState) {
+		p.mu.Lock()
+		p.telemetry.Connection = append(p.telemetry.Connection, s)
+		now := ICEState{Gathering: p.telemetry.Gathering[len(p.telemetry.Gathering)-1], Connection: s}
+		cb := p.onICEState
+		p.mu.Unlock()
+		if cb != nil {
+			cb(now)
 		}
 	})
 
@@ -245,6 +308,9 @@ func (p *Peer) wireChannel(dc *webrtc.DataChannel) {
 			p.mu.Unlock()
 			return
 		}
+		if p.telemetry.ConnectedAt.IsZero() {
+			p.telemetry.ConnectedAt = time.Now()
+		}
 		p.settled = true
 		p.mu.Unlock()
 		p.connCh <- conn
@@ -253,6 +319,49 @@ func (p *Peer) wireChannel(dc *webrtc.DataChannel) {
 		conn.shutdown()
 		_ = p.pc.Close()
 	})
+}
+
+// Diagnostics returns a sanitized snapshot of the peer's ICE setup for telemetry. It never
+// exposes invite codes, IPs, SDP, or credentials. It is safe to call before settlement (the
+// SelectedCandidatePairType may be ""), and after teardown.
+func (p *Peer) Diagnostics() Diagnostic {
+	p.mu.Lock()
+	d := Diagnostic{
+		GatheringStates:           append([]webrtc.ICEGatheringState(nil), p.telemetry.Gathering...),
+		ConnectionStates:          append([]webrtc.ICEConnectionState(nil), p.telemetry.Connection...),
+		SelectedCandidatePairType: "",
+	}
+	if !p.telemetry.ConnectedAt.IsZero() {
+		d.SetupDuration = p.telemetry.ConnectedAt.Sub(p.telemetry.StartAt)
+	}
+	p.mu.Unlock()
+
+	// Query pion's selected pair without holding p.mu so we never risk a lock inversion
+	// between our mutex and pion's internal transport locks.
+	if pair, err := p.selectedCandidatePair(); err == nil && pair != nil {
+		if c := pair.Local; c != nil {
+			d.SelectedCandidatePairType = c.Typ.String()
+		}
+	}
+	return d
+}
+
+// selectedCandidatePair reaches pion's selected ICE candidate pair through the transport
+// chain (SCTP -> DTLS -> ICE). Returns nil when no pair is selected yet.
+func (p *Peer) selectedCandidatePair() (*webrtc.ICECandidatePair, error) {
+	sctp := p.pc.SCTP()
+	if sctp == nil {
+		return nil, nil
+	}
+	dtls := sctp.Transport()
+	if dtls == nil {
+		return nil, nil
+	}
+	ice := dtls.ICETransport()
+	if ice == nil {
+		return nil, nil
+	}
+	return ice.GetSelectedCandidatePair()
 }
 
 // fail records the first fatal error and closes the PeerConnection; later calls are no-ops.
