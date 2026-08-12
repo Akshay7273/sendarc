@@ -220,6 +220,15 @@ func (d *driver) run(ctx context.Context) (*Outcome, error) {
 			out, terr = result.out, result.err
 			cancelTransfer()
 			goto transferSettled
+		case <-ctx.Done():
+			// The engine may be stuck inside Send on a stalled transport (SCTP or relay
+			// credit waits have no deadline of their own); closing the connection is the
+			// only thing that unblocks it, so never wait for transferDone first.
+			cancelTransfer()
+			_ = conn.Close()
+			<-transferDone
+			terr = ctx.Err()
+			goto transferSettled
 		case sigErr := <-readCh:
 			readEnded = true
 			if sigErr == nil {
