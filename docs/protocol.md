@@ -58,7 +58,7 @@ Error codes are a closed set:
 `relay_not_ready`, `relay_credit`, `relay_limit`.
 
 Pairing is strictly 1:1: a second `join` on a live room is refused (`room_full`). Rooms are
-reaped after the signaling idle timeout (default 2 minutes; `SENDBEAM_SIGNAL_IDLE_TIMEOUT`)
+reaped after the signaling idle timeout (default 10 minutes; `SENDBEAM_SIGNAL_IDLE_TIMEOUT`)
 with no traffic. If a socket drops and reconnects within that window, `resume` re-attaches
 it to the same slot (routing only — it still must pass the SPAKE2 handshake), so a stray
 reconnect cannot hijack a session; the paired peer sees `peer_left`/`peer_rejoined`.
