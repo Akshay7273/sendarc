@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// SB-1141 (wire): fuzz the transfer control-message decoders via DecodeControl.
+// fuzz the transfer control-message decoders via DecodeControl.
 // Every per-type decoder is exercised by arbitrary payloads; the fragment sizes
 // and numeric ranges are validated later, so the invariant is "never panic, never
 // reject a structurally valid round-trip".
@@ -48,8 +48,11 @@ func FuzzDecodeControl(f *testing.F) {
 	})
 }
 
-// SB-1142 (wire): fuzz the frame-header decoder over arbitrary (often truncated)
-// buffers. It must never panic and must only accept exactly 16-byte inputs.
+// (wire): fuzz the frame-header decoder over arbitrary (often truncated)
+// buffers. The wire contract is that the decoder reads the first 16 bytes of any
+// buffer that is at least 16 bytes long and rejects shorter buffers, so it must
+// never panic; the round-trip invariant below is that any successfully decoded
+// header re-encodes to the same header.
 func FuzzDecodeFrameHeader(f *testing.F) {
 	f.Add([]byte{0, 1, 2, 3, 0, 1, 0, 0, 0, 1, 0, 0, 0, 2, 0, 16})
 	f.Add([]byte{1, 2, 3})
@@ -71,7 +74,7 @@ func FuzzDecodeFrameHeader(f *testing.F) {
 	})
 }
 
-// SB-1142 (wire): fuzz the sealed-frame open path with a fixed valid key.
+// (wire): fuzz the sealed-frame open path with a fixed valid key.
 // Any tampered/truncated/short frame must return an error, never panic and never
 // yield a donated plaintext without GCM authentication.
 func FuzzOpenSequenced(f *testing.F) {
@@ -79,6 +82,19 @@ func FuzzOpenSequenced(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
+	// Seed with a genuinely valid, authenticated frame generated via Seal so the
+	// fuzzer starts from an accepted input and explores the successful
+	// OpenSequenced path and its neighborhoods (single-bit flips, body edits,
+	// truncations) around a frame the decoder verifies.
+	valid, err := Seal(keys.O2J, 0, FrameHeaderInput{
+		Version: FrameVersion, Type: FrameBlockData, Flags: 0,
+		FileIdx: 0, BlockIdx: 7, FrameOff: 0,
+	}, []byte("authenticated payload"))
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(valid)
+	f.Add(valid[:len(valid)-1])
 	// Seed with a handful of adversarially shaped frames.
 	f.Add([]byte{})
 	f.Add([]byte("short"))
@@ -97,7 +113,7 @@ func FuzzOpenSequenced(f *testing.F) {
 	})
 }
 
-// SB-1143 (wire): fuzz the decode+validate manifest path. The invariant is that
+// (wire): fuzz the decode+validate manifest path. The invariant is that
 // a validated manifest never carries out-of-range geometry that would drive the
 // receiver into an oversized allocation or a divide-by-zero.
 func FuzzValidateManifest(f *testing.F) {
@@ -138,7 +154,7 @@ func FuzzValidateManifest(f *testing.F) {
 	})
 }
 
-// SB-1143 (wire): fuzz the JSON shape-checking of a manifest decoder alone. A
+// (wire): fuzz the JSON shape-checking of a manifest decoder alone. A
 // payload that decodes must never crash on unbounded slice lengths caused by a
 // huge literal array; the post-decode ValidateManifest caps at MaxTransferFiles.
 func FuzzDecodeManifestShape(f *testing.F) {

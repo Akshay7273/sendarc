@@ -11,7 +11,7 @@ import (
 )
 
 // fixedSeeds are the seeds every CI run exercises; a failure at seed N is
-// reproduced locally with -run TestFaultRandomizedFailClosed (SB-1127).
+// reproduced locally with -run TestFaultRandomizedFailClosed.
 var fixedSeeds = []int64{11, 22, 33, 44, 55, 66, 77, 88}
 
 // TestFaultRandomizedFailClosed pins the fail-closed contract under every
@@ -39,7 +39,7 @@ func TestFaultRandomizedFailClosed(t *testing.T) {
 	}
 }
 
-// faultFixture is one recorded regression scenario (SB-1128). Want is
+// faultFixture is one recorded regression scenario. Want is
 // "success" or "fail_closed".
 type faultFixture struct {
 	Seed        int64  `json:"seed"`
