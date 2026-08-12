@@ -46,6 +46,14 @@ type PeerOptions struct {
 type ICEState struct {
 	Gathering  webrtc.ICEGatheringState
 	Connection webrtc.ICEConnectionState
+	// HasServerReflexive reports whether any candidate gathered so far is a server-reflexive,
+	// peer-reflexive, or relayed candidate — i.e. the NAT is not fully blocking a direct path.
+	// It is the strongest available hint that a direct connection is viable and drives the
+	// adaptive direct/relay racing policy.
+	HasServerReflexive bool
+	// HasAnyCandidate reports whether any candidate at all (including host) has been gathered.
+	// Zero candidates means there is no direct path to attempt.
+	HasAnyCandidate bool
 }
 
 // Peer owns one PeerConnection and drives it to an open DataChannel. Construct it with NewPeer;
@@ -77,6 +85,10 @@ type telemetry struct {
 	ConnectedAt time.Time // zero until the DataChannel opens
 	Gathering   []webrtc.ICEGatheringState
 	Connection  []webrtc.ICEConnectionState
+	// anyCandidate is set once any candidate (including host) has been gathered.
+	anyCandidate bool
+	// anyViableCandidate is set once a srflx/prflx/relay candidate has been gathered.
+	anyViableCandidate bool
 }
 
 // Diagnostic is a sanitized snapshot of a peer's ICE setup for diagnostics/telemetry output.
@@ -128,6 +140,15 @@ func NewPeer(opts PeerOptions) (*Peer, error) {
 		if c == nil {
 			return // end-of-candidates
 		}
+		p.mu.Lock()
+		p.telemetry.anyCandidate = true
+		// A server-reflexive (or peer-reflexive/relayed) candidate is the signal that a direct
+		// path through NAT is plausible; record it for the adaptive racing policy.
+		if c.Typ == webrtc.ICECandidateTypeSrflx ||
+			c.Typ == webrtc.ICECandidateTypePrflx || c.Typ == webrtc.ICECandidateTypeRelay {
+			p.telemetry.anyViableCandidate = true
+		}
+		p.mu.Unlock()
 		body, err := json.Marshal(c.ToJSON())
 		if err != nil {
 			p.fail(fmt.Errorf("rtc: marshal ice candidate: %w", err))
@@ -152,7 +173,7 @@ func NewPeer(opts PeerOptions) (*Peer, error) {
 	pc.OnICEGatheringStateChange(func(s webrtc.ICEGatheringState) {
 		p.mu.Lock()
 		p.telemetry.Gathering = append(p.telemetry.Gathering, s)
-		now := ICEState{Gathering: s, Connection: p.telemetry.Connection[len(p.telemetry.Connection)-1]}
+		now := p.snapshotLocked()
 		cb := p.onICEState
 		p.mu.Unlock()
 		if cb != nil {
@@ -162,7 +183,7 @@ func NewPeer(opts PeerOptions) (*Peer, error) {
 	pc.OnICEConnectionStateChange(func(s webrtc.ICEConnectionState) {
 		p.mu.Lock()
 		p.telemetry.Connection = append(p.telemetry.Connection, s)
-		now := ICEState{Gathering: p.telemetry.Gathering[len(p.telemetry.Gathering)-1], Connection: s}
+		now := p.snapshotLocked()
 		cb := p.onICEState
 		p.mu.Unlock()
 		if cb != nil {
@@ -319,6 +340,19 @@ func (p *Peer) wireChannel(dc *webrtc.DataChannel) {
 		conn.shutdown()
 		_ = p.pc.Close()
 	})
+}
+
+// snapshotLocked builds the current ICEState from telemetry. Caller must hold p.mu.
+func (p *Peer) snapshotLocked() ICEState {
+	g := webrtc.ICEGatheringStateNew
+	if len(p.telemetry.Gathering) > 0 {
+		g = p.telemetry.Gathering[len(p.telemetry.Gathering)-1]
+	}
+	c := webrtc.ICEConnectionStateNew
+	if len(p.telemetry.Connection) > 0 {
+		c = p.telemetry.Connection[len(p.telemetry.Connection)-1]
+	}
+	return ICEState{Gathering: g, Connection: c, HasServerReflexive: p.telemetry.anyViableCandidate, HasAnyCandidate: p.telemetry.anyCandidate}
 }
 
 // Diagnostics returns a sanitized snapshot of the peer's ICE setup for telemetry. It never

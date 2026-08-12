@@ -20,7 +20,7 @@ var hostOnly = []webrtc.ICEServer{}
 // each drained by a goroutine that feeds the other peer's Accept. Decoupling through channels
 // (rather than calling Accept inline from Send) avoids re-entrancy: handling an offer synchronously
 // signs and sends the answer, which would otherwise recurse back into the sender.
-func linkedPeers(t *testing.T) (offerer, joiner *Peer) {
+func linkedPeers(t testing.TB) (offerer, joiner *Peer) {
 	t.Helper()
 	offAuth, joinAuth := newPair(testRoom)
 

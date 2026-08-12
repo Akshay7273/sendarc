@@ -66,6 +66,23 @@ faster on the direct path (no veth overhead) and slower on the relay (internet R
 the 32 MiB/s relay ceiling). Browser-level E2E (100 MiB round-trip, Playwright) passes in
 CI on Chromium and Firefox; timing is CI-host-dependent and not a spec number.
 
+## Path-selection timing
+
+Measured separately from throughput (`apps/cli/internal/rtc/peer_bench_test.go`, loopback
+direct) and guarding the adaptive racing policy's "connect fast" goal on a healthy direct
+path:
+
+```text
+BenchmarkPeerTimeToActivePathDirect        ~6.8 ms/active-path
+BenchmarkPeerTimeToFirstPayloadDirect      ~6.1 ms/first-payload
+BenchmarkAdaptivePolicyObserveThroughput    ~42 ns/op (0 allocs/op)
+```
+
+The two peer benchmarks are the time to an open DataChannel and to the first delivered
+frame on the direct path; the policy-observe number is the per-ICE-event cost of the
+adaptive selection decision. These are host/CI dependent and are relative, not spec
+numbers.
+
 ## CPU
 
 Crypto is the only CPU-heavy step: ~12.5 µs per 16 KiB frame, or ~0.8 s of one core per
