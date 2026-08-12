@@ -135,7 +135,7 @@ jobs:
       - name: Guard against stale branding
         run: |
           if grep -rInE "sendarc|SendArc|SENDARC" \
-            --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist \
+            --exclude-dir=.git --exclude-dir=.github --exclude-dir=node_modules --exclude-dir=dist \
             --exclude-dir=.svelte-kit --exclude-dir=test-results \
             --exclude-dir=playwright-report --exclude-dir=coverage .; then
             echo "::error::Stale 'sendarc' branding found (repo was renamed to SendBeam)."
