@@ -99,8 +99,9 @@ Full analysis, accepted limitations, and the trust boundary are in the
 [docs/test-vectors/](docs/test-vectors/), and dependency audits run in CI.
 
 > [!NOTE]
-> SendBeam is pre-release software without a stable release or an independent security
-> audit. Do not use it for irreplaceable or highly sensitive data.
+> SendBeam is stable open-source software (v1.0). It has not had an independent
+> security audit; review the [threat model](docs/threat-model.md) before using it
+> for irreplaceable or highly sensitive data.
 
 ## Documentation
 

@@ -13,7 +13,7 @@ COPY apps/web ./apps/web
 RUN pnpm --filter @sendbeam/protocol build && pnpm --filter @sendbeam/web build
 
 # --- Stage 2: build the server binary --------------------------------------------
-FROM golang:1.24-alpine AS server
+FROM golang:1.25-alpine AS server
 WORKDIR /src
 COPY apps/server/go.mod apps/server/go.sum ./apps/server/
 RUN cd apps/server && go mod download
