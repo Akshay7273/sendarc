@@ -8,7 +8,7 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-// DataConn wraps the open "sendarc" DataChannel as the byte transport the transfer engine rides
+// DataConn wraps the open "sendbeam" DataChannel as the byte transport the transfer engine rides
 // on: Send emits one frame, OnData registers the inbound handler, Close tears it down. It is the
 // Go counterpart of the browser peer's channel/onData surface, adapted for pion's threading:
 // pion delivers inbound messages on its own goroutine, so a single pump goroutine serializes

@@ -65,7 +65,7 @@ export function humanBytes(n: number): string {
   const kib = 2 ** 10;
   const mib = 2 ** 20;
   // Bitwise operators coerce to signed u32: `2 GiB >> 20` becomes `-2048`. Arithmetic
-  // division stays exact for these power-of-two units throughout SendArc's safe file range.
+  // division stays exact for these power-of-two units throughout SendBeam's safe file range.
   if (n >= mib && n % mib === 0) return `${n / mib} MiB`;
   if (n >= kib && n % kib === 0) return `${n / kib} KiB`;
   return `${n} B`;
