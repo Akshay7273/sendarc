@@ -28,6 +28,26 @@ real CLI transfer (`sendbeam send` / `sendbeam receive`, 4 MiB payload, SHA-256 
 
 All rows end with the receiver's recomputed SHA-256 matching the sender's (digest ✓).
 
+## Restrictive-network fallback timing
+
+Time from sender start until the selected transport is engaged, measured in the NAT lab
+(`-measure`, 4 MiB payload, digest verified). These numbers gauge the adaptive racing
+policy's fallback speed, not throughput.
+
+| NAT combo               | Transport | Time to active path |
+| ----------------------- | --------- | ------------------- |
+| full-cone/full-cone     | direct    | ~1.2s               |
+| udp-blocked/udp-blocked | relay     | ~5.2s               |
+| symmetric/symmetric     | relay     | ~11.2s              |
+
+- **udp-blocked** (WebRTC UDP fully dropped): gathering yields host-only candidates with no
+  server-reflexive hint, so the relay warms once the bounded no-hint escalation elapses
+  (~5s). This is a material improvement over the legacy blind ~8s relay timer (~8.3s).
+- **symmetric NAT**: a server-reflexive candidate is gathered but is unreachable by the
+  peer, so the policy keeps racing direct (to preserve a slow-but-healthy direct path) until
+  ICE connectivity fails (~11s). This is the residual cost of not preempting a direct path
+  that has a server-reflexive hint.
+
 ### How to reproduce
 
 ```sh
@@ -74,9 +94,13 @@ differ by version; treat mobile as best-effort until the opt-in suite covers it.
 
 ## Interpretation
 
-- **Relay baseline is ~8s, not the transfer**: symmetric NAT has no usable direct path,
-  so the client waits out the ICE gathering/connectivity phase (~7.6s) before the relay
-  is selected. The relay transfer itself adds well under a second at these sizes.
+- **Restrictive networks engage the relay without a blind fixed wait**: there is no fixed
+  ~8s selection timer in production. When ICE shows a direct path is not viable the relay is
+  warmed promptly (udp-blocked → ~5.2s to active path) and raced; healthy direct still wins
+  in ~1.2s and is never preempted once a server-reflexive hint appears. The only unbounded
+  residual is symmetric NAT, where an unreachable-but-present serve-reflexive candidate is
+  indistinguishable from a slow healthy direct, so the policy waits for ICE connectivity to
+  fail before falling back (~11s).
 - **Packet loss**: the direct path degrades markedly (SCTP/DTLS retransmission backoff),
   while the relay (TCP) is unaffected — TCP's retransmission and congestion control hide
   3% loss behind the scenes.

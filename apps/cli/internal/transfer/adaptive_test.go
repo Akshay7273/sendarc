@@ -168,3 +168,14 @@ func TestAdaptiveEscalationBoundedHostOnly(t *testing.T) {
 		t.Fatalf("expected warm-relay after deadline for stuck host-only, got %q", d)
 	}
 }
+
+// TestAdaptiveDefaultEscalationFasterThanLegacyBlindTimer pins the production default
+// escalation window below the old blind ~8s fallback timer, so restrictive-network
+// fallback (udp-blocked / host-only symmetric NAT) engages sooner than the legacy baseline.
+func TestAdaptiveDefaultEscalationFasterThanLegacyBlindTimer(t *testing.T) {
+	const legacyBlindTimer = 8 * time.Second
+	p := NewAdaptivePolicy(0)
+	if got := p.escalation; got <= 0 || got >= legacyBlindTimer {
+		t.Fatalf("default escalation = %v, want 0 < escalation < %v so restrictive fallback beats the legacy blind timer", got, legacyBlindTimer)
+	}
+}

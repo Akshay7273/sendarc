@@ -83,6 +83,15 @@ frame on the direct path; the policy-observe number is the per-ICE-event cost of
 adaptive selection decision. These are host/CI dependent and are relative, not spec
 numbers.
 
+### Restrictive-network fallback (time-to-active-path)
+
+Measured in the NAT lab with `-measure` and the adaptive policy (see compat-matrix.md). On
+a UDP-blocked network the relay fallback engages in ~5.2s — a material improvement over the
+legacy blind ~8s relay timer — while a healthy direct path still connects in ~1.2s and is
+never preempted once a server-reflexive hint appears. Symmetric NAT remains bounded by ICE
+connectivity-check failure (~11s) because its unusable server-reflexive candidate is
+indistinguishable from a slow-but-healthy direct path.
+
 ## CPU
 
 Crypto is the only CPU-heavy step: ~12.5 µs per 16 KiB frame, or ~0.8 s of one core per

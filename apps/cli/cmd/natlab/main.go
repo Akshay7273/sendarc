@@ -140,6 +140,7 @@ func main() {
 		Transport   string `json:"transport"`
 		DigestOK    bool   `json:"digestOk"`
 		WallMS      int64  `json:"wallMs"`
+		PathMS      int64  `json:"pathMs,omitempty"` // sender time to selected transport, -1 if not observed
 		ReceiverRSS int64  `json:"receiverRSSKiB,omitempty"`
 		RelayUsed   bool   `json:"relayUsed"`
 	}
@@ -147,7 +148,7 @@ func main() {
 	for _, pair := range pairs {
 		for c := 1; c <= *cycles; c++ {
 			start := time.Now()
-			ok, transport, err := lab.runTransfer(pair[0], pair[1])
+			ok, transport, pathMs, err := lab.runTransfer(pair[0], pair[1])
 			recvRSS := lab.lastRecvRSS
 			wall := time.Since(start).Round(time.Millisecond)
 			if err != nil {
@@ -155,7 +156,7 @@ func main() {
 				failed = true
 				continue
 			}
-			log.Printf("combo %s/%s cycle %d: %s, digest %t, %v", pair[0], pair[1], c, transport, ok, wall)
+			log.Printf("combo %s/%s cycle %d: %s, digest %t, path %v, %v", pair[0], pair[1], c, transport, ok, (time.Duration(pathMs) * time.Millisecond).Round(time.Millisecond), wall)
 			if !ok {
 				failed = true
 			}
@@ -166,6 +167,7 @@ func main() {
 					Transport:   transport,
 					DigestOK:    ok,
 					WallMS:      wall.Milliseconds(),
+					PathMS:      pathMs,
 					ReceiverRSS: recvRSS,
 					RelayUsed:   transport == "relay",
 				})
@@ -454,9 +456,21 @@ func (l *lab) nsPID(name string) int {
 	return 0
 }
 
+// findInviteCode returns the first invite code found in any of the given output
+// buffers. The CLI prints the invite frame on stderr, but keep scanning stdout too so
+// the extractor is robust to output placement.
+func findInviteCode(buffers ...string) string {
+	for _, b := range buffers {
+		if m := codeRe.FindString(b); m != "" {
+			return m
+		}
+	}
+	return ""
+}
+
 // runTransfer runs one CLI transfer with the given NAT policies and reports the
-// transport that carried it.
-func (l *lab) runTransfer(polA, polB string) (bool, string, error) {
+// transport that carried it and (if -measure) the sender's time to the selected transport.
+func (l *lab) runTransfer(polA, polB string) (bool, string, int64, error) {
 	dst := l.comboDstDir()
 	if l.noproxy {
 		// Relay-path control: no NAT boxes, both peers sit in the public segment.
@@ -495,10 +509,10 @@ func (l *lab) runTransfer(polA, polB string) (bool, string, error) {
 		return nil
 	}
 	if err := spawnBox(natA, polA, privAIP, "a1", "pa0", "10.0.3.1"); err != nil {
-		return false, "", fmt.Errorf("natbox A: %w", err)
+		return false, "", -1, fmt.Errorf("natbox A: %w", err)
 	}
 	if err := spawnBox(natB, polB, privBIP, "b1", "pb0", "10.0.3.2"); err != nil {
-		return false, "", fmt.Errorf("natbox B: %w", err)
+		return false, "", -1, fmt.Errorf("natbox B: %w", err)
 	}
 	defer l.killCombo()
 
@@ -510,8 +524,9 @@ func (l *lab) runTransfer(polA, polB string) (bool, string, error) {
 	sender.Stdout = &senderOut
 	sender.Stderr = &senderErr
 	if err := sender.Start(); err != nil {
-		return false, "", fmt.Errorf("start sender: %w", err)
+		return false, "", -1, fmt.Errorf("start sender: %w", err)
 	}
+	senderStart := time.Now()
 	l.mu.Lock()
 	l.procs = append(l.procs, sender)
 	l.mu.Unlock()
@@ -519,15 +534,14 @@ func (l *lab) runTransfer(polA, polB string) (bool, string, error) {
 	code := ""
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		if m := codeRe.FindString(senderOut.String()); m != "" {
-			code = m
+		if code = findInviteCode(senderOut.String(), senderErr.String()); code != "" {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	if code == "" {
 		_ = sender.Process.Kill()
-		return false, "", fmt.Errorf("no invite code from sender: %s", senderErr.String())
+		return false, "", -1, fmt.Errorf("no invite code from sender: %s", senderErr.String())
 	}
 
 	receiver := exec.Command("nsenter", "-t", fmt.Sprint(nsB.pid), "-n",
@@ -539,14 +553,31 @@ func (l *lab) runTransfer(polA, polB string) (bool, string, error) {
 	receiver.Stdout = &recvOut
 	receiver.Stderr = &recvErr
 	if err := receiver.Start(); err != nil {
-		return false, "", fmt.Errorf("start receiver: %w", err)
+		return false, "", -1, fmt.Errorf("start receiver: %w", err)
 	}
 	l.mu.Lock()
 	l.procs = append(l.procs, receiver)
 	l.mu.Unlock()
 
+	// Watch the sender's stderr for the transport-selection line to time how long the
+	// restrictive network takes to engage its chosen path (the adaptive-policy fallback
+	// timing that matters for the release gate).
+	var pathMs int64 = -1
 	done := make(chan error, 1)
 	go func() { done <- receiver.Wait() }()
+	pathTicker := time.NewTicker(50 * time.Millisecond)
+	defer pathTicker.Stop()
+	pathWatched := make(chan struct{})
+	go func() {
+		defer close(pathWatched)
+		for range pathTicker.C {
+			if strings.Contains(senderErr.String(), "Transport:") {
+				pathMs = time.Since(senderStart).Milliseconds()
+				return
+			}
+		}
+	}()
+
 	snap := time.NewTicker(2 * time.Second)
 	defer snap.Stop()
 	go func() {
@@ -561,14 +592,15 @@ func (l *lab) runTransfer(polA, polB string) (bool, string, error) {
 	}()
 	select {
 	case err := <-done:
+		<-pathWatched
 		if err != nil {
 			_ = sender.Process.Kill()
-			return false, "", fmt.Errorf("receiver failed: %v\n--- receiver ---\n%s\n--- sender ---\n%s", err, recvErr.String(), senderErr.String())
+			return false, "", pathMs, fmt.Errorf("receiver failed: %v\n--- receiver ---\n%s\n--- sender ---\n%s", err, recvErr.String(), senderErr.String())
 		}
 	case <-time.After(120 * time.Second):
 		_ = receiver.Process.Kill()
 		_ = sender.Process.Kill()
-		return false, "", fmt.Errorf("transfer timed out\n--- receiver ---\n%s\n--- sender ---\n%s", recvErr.String(), senderErr.String())
+		return false, "", pathMs, fmt.Errorf("transfer timed out\n--- receiver ---\n%s\n--- sender ---\n%s", recvErr.String(), senderErr.String())
 	}
 	_ = sender.Wait()
 	l.lastRecvRSS = peakRSS(receiver.Process.Pid)
@@ -584,9 +616,9 @@ func (l *lab) runTransfer(polA, polB string) (bool, string, error) {
 
 	got, err := os.ReadFile(filepath.Join(dst, filepath.Base(l.src)))
 	if err != nil {
-		return false, transport, fmt.Errorf("read received file: %w\n--- receiver ---\n%s\n--- sender ---\n%s", err, recvErr.String(), senderErr.String())
+		return false, transport, pathMs, fmt.Errorf("read received file: %w\n--- receiver ---\n%s\n--- sender ---\n%s", err, recvErr.String(), senderErr.String())
 	}
-	return sha256.Sum256(got) == l.expect, transport, nil
+	return sha256.Sum256(got) == l.expect, transport, pathMs, nil
 }
 
 // comboDstDir returns a fresh output directory for each combo; the CLI's sink
@@ -599,7 +631,7 @@ func (l *lab) comboDstDir() string {
 
 // runPlainRelay is a no-NAT control: both peers run in the public segment over the
 // forced relay, isolating the relay path from the NAT boxes.
-func (l *lab) runPlainRelay(dst string) (bool, string, error) {
+func (l *lab) runPlainRelay(dst string) (bool, string, int64, error) {
 	l.mu.Lock()
 	var pub *netns
 	for _, n := range l.nses {
@@ -636,45 +668,59 @@ func (l *lab) runPlainRelay(dst string) (bool, string, error) {
 
 	sender, senderOut, senderErr, err := runPeer("send", l.src)
 	if err != nil {
-		return false, "", fmt.Errorf("start sender: %w", err)
+		return false, "", -1, fmt.Errorf("start sender: %w", err)
 	}
+	senderStart := time.Now()
 	code := ""
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		if m := codeRe.FindString(senderOut.String()); m != "" {
-			code = m
+		if code = findInviteCode(senderOut.String(), senderErr.String()); code != "" {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	if code == "" {
 		_ = sender.Process.Kill()
-		return false, "", fmt.Errorf("no invite code from sender: %s", senderErr.String())
+		return false, "", -1, fmt.Errorf("no invite code from sender: %s", senderErr.String())
 	}
 	receiver, _, recvErr, err := runPeer("receive", code, "--out", dst)
 	if err != nil {
-		return false, "", fmt.Errorf("start receiver: %w", err)
+		return false, "", -1, fmt.Errorf("start receiver: %w", err)
 	}
+	var pathMs int64 = -1
 	done := make(chan error, 1)
 	go func() { done <- receiver.Wait() }()
+	pathTicker := time.NewTicker(50 * time.Millisecond)
+	defer pathTicker.Stop()
+	pathWatched := make(chan struct{})
+	go func() {
+		defer close(pathWatched)
+		for range pathTicker.C {
+			if strings.Contains(senderErr.String(), "Transport:") {
+				pathMs = time.Since(senderStart).Milliseconds()
+				return
+			}
+		}
+	}()
 	select {
 	case err := <-done:
+		<-pathWatched
 		if err != nil {
 			_ = sender.Process.Kill()
-			return false, "", fmt.Errorf("receiver failed: %v\n--- receiver stderr ---\n%s\n--- sender stderr ---\n%s", err, recvErr.String(), senderErr.String())
+			return false, "", pathMs, fmt.Errorf("receiver failed: %v\n--- receiver stderr ---\n%s\n--- sender stderr ---\n%s", err, recvErr.String(), senderErr.String())
 		}
 	case <-time.After(60 * time.Second):
 		_ = receiver.Process.Kill()
 		_ = sender.Process.Kill()
-		return false, "", fmt.Errorf("plain relay timed out")
+		return false, "", pathMs, fmt.Errorf("plain relay timed out")
 	}
 	_ = sender.Wait()
 	l.lastRecvRSS = peakRSS(receiver.Process.Pid)
 	got, err := os.ReadFile(filepath.Join(dst, filepath.Base(l.src)))
 	if err != nil {
-		return false, "relay", fmt.Errorf("read received file: %w\n--- receiver ---\n%s\n--- sender ---\n%s", err, recvErr.String(), senderErr.String())
+		return false, "relay", pathMs, fmt.Errorf("read received file: %w\n--- receiver ---\n%s\n--- sender ---\n%s", err, recvErr.String(), senderErr.String())
 	}
-	return sha256.Sum256(got) == l.expect, "relay", nil
+	return sha256.Sum256(got) == l.expect, "relay", pathMs, nil
 }
 
 // peakRSS reads a process's VmRSS (KiB) from /proc. Returns 0 if the process or its stat
