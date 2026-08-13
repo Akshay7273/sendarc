@@ -24,9 +24,22 @@ func transfersUsage(w *os.File) {
 	_, _ = fmt.Fprintln(w, "  resume   verify a journal is resumable and how to resume it")
 	_, _ = fmt.Fprintln(w, "  discard  explicitly delete a journal and its partials (idempotent)")
 	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, s.dim("Sender records (kept under the user config dir):"))
+	_, _ = fmt.Fprintln(w, "  list     also shows interrupted sends and their source paths")
+	_, _ = fmt.Fprintln(w, "  discard  also removes the matching sender record (idempotent)")
+	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, s.dim("Discard flags:"))
 	_, _ = fmt.Fprintln(w, "  --all    discard every journal and orphaned partial tree in the store")
 	_, _ = fmt.Fprintln(w, "  --yes    confirm --all without prompting")
+}
+
+// senderStore opens the sender-state store, reporting honest failures.
+func senderStore() (*clitransfer.SenderStore, error) {
+	dir, err := clitransfer.SenderStoreDir()
+	if err != nil {
+		return nil, err
+	}
+	return clitransfer.OpenSenderStore(dir)
 }
 
 // runTransfers dispatches the transfers subcommand group.
@@ -80,28 +93,60 @@ func transfersList(args []string) int {
 	s := newStyle(os.Stderr)
 	if len(entries) == 0 {
 		fmt.Fprintln(os.Stderr, s.dim("No durable transfers in "+store.Root()+"."))
+	} else {
+		fmt.Fprintln(os.Stderr, s.dim("Durable receive state in "+store.Root()+":"))
+		fmt.Fprintln(os.Stderr)
+		for _, entry := range entries {
+			if !entry.JournalOK {
+				kind := "unreadable journal"
+				if entry.Orphaned {
+					kind = "orphaned partials"
+				}
+				fmt.Fprintf(os.Stderr, "  %s  %s\n", s.yellow(entry.TransferID), s.dim(kind+": "+entry.Err))
+				fmt.Fprintf(os.Stderr, "      %s\n", s.dim("run: sendbeam transfers discard "+entry.TransferID+" --out "+*outDir))
+				continue
+			}
+			label := entry.TransferID
+			if entry.Files > 1 {
+				label = fmt.Sprintf("%s (%d files)", label, entry.Files)
+			}
+			fmt.Fprintf(os.Stderr, "  %s  %s committed / %s total · updated %s\n",
+				s.cyan(label),
+				humanBytes(entry.CommittedBytes), humanBytes(entry.TotalSize),
+				formatTime(entry.UpdatedAt))
+		}
+	}
+	// Interrupted sends: the sender-side records of transfers whose manifest was
+	// advertised but which never completed. They are local to this machine.
+	fmt.Fprintln(os.Stderr)
+	sender, senderErr := senderStore()
+	if senderErr != nil {
+		fmt.Fprintln(os.Stderr, s.yellow("Sender records unavailable: "+senderErr.Error()+"."))
 		return 0
 	}
-	fmt.Fprintln(os.Stderr, s.dim("Durable receive state in "+store.Root()+":"))
+	senderEntries, senderListErr := sender.List()
+	if senderListErr != nil {
+		fmt.Fprintln(os.Stderr, s.yellow("Sender records unavailable: "+senderListErr.Error()+"."))
+		return 0
+	}
+	if len(senderEntries) == 0 {
+		fmt.Fprintln(os.Stderr, s.dim("No interrupted sends."))
+		return 0
+	}
+	fmt.Fprintln(os.Stderr, s.dim("Interrupted sends (re-run the same send command to resume):"))
 	fmt.Fprintln(os.Stderr)
-	for _, entry := range entries {
-		if !entry.JournalOK {
-			kind := "unreadable journal"
-			if entry.Orphaned {
-				kind = "orphaned partials"
-			}
-			fmt.Fprintf(os.Stderr, "  %s  %s\n", s.yellow(entry.TransferID), s.dim(kind+": "+entry.Err))
-			fmt.Fprintf(os.Stderr, "      %s\n", s.dim("run: sendbeam transfers discard "+entry.TransferID+" --out "+*outDir))
+	for _, entry := range senderEntries {
+		if !entry.RecordOK {
+			fmt.Fprintf(os.Stderr, "  %s  %s\n", s.yellow(entry.TransferID), s.dim("unreadable record: "+entry.Err))
+			fmt.Fprintf(os.Stderr, "      %s\n", s.dim("run: sendbeam transfers discard "+entry.TransferID))
 			continue
 		}
-		label := entry.TransferID
-		if entry.Files > 1 {
-			label = fmt.Sprintf("%s (%d files)", label, entry.Files)
-		}
-		fmt.Fprintf(os.Stderr, "  %s  %s committed / %s total · updated %s\n",
-			s.cyan(label),
-			humanBytes(entry.CommittedBytes), humanBytes(entry.TotalSize),
+		fmt.Fprintf(os.Stderr, "  %s  %d file(s) · %s · updated %s\n",
+			s.cyan(entry.TransferID), entry.Files, humanBytes(entry.TotalSize),
 			formatTime(entry.UpdatedAt))
+		for _, p := range entry.Paths {
+			fmt.Fprintf(os.Stderr, "      %s\n", s.dim(p))
+		}
 	}
 	return 0
 }
@@ -217,6 +262,13 @@ func transfersDiscard(args []string) int {
 			return 1
 		}
 		fmt.Fprintln(os.Stderr, s.check("Discarded all durable transfer state in "+store.Root()+"."))
+		// Also drop every interrupted-send record on this machine (idempotent).
+		if sender, err := senderStore(); err == nil {
+			if err := sender.DiscardAll(); err != nil {
+				fmt.Fprintf(os.Stderr, "sendbeam transfers discard: %s\n", err)
+				return 1
+			}
+		}
 		return 0
 	}
 	if len(positionals) == 0 {
@@ -229,6 +281,16 @@ func transfersDiscard(args []string) int {
 			return 1
 		}
 		fmt.Fprintln(os.Stderr, s.check("Discarded "+id+"."))
+	}
+	// A discarded id may also have an interrupted-send record on this machine; removing it
+	// is idempotent and bounded to the named id.
+	if sender, err := senderStore(); err == nil {
+		for _, id := range positionals {
+			if err := sender.Discard(id); err != nil {
+				fmt.Fprintf(os.Stderr, "sendbeam transfers discard: %s\n", err)
+				return 1
+			}
+		}
 	}
 	return 0
 }

@@ -475,4 +475,109 @@ describe('TransferSender', () => {
     // fail with retry_exhausted instead of hanging.
     await expect(runP).rejects.toThrow(/retry_exhausted/);
   });
+
+  it('awaits onManifest before the manifest frame is emitted, with the validated manifest', async () => {
+    const keys = await deriveTransferKeys(master);
+    const data = new Uint8Array(20).map((_, i) => i);
+    const outbound: Uint8Array[] = [];
+    let hookDone = false;
+    let firstFrameHookDone = false;
+    let seenFirst = false;
+    let received: { transferId: string; files: { name: string; size: number }[] } | undefined;
+
+    const sender = new TransferSender({
+      file: bytesSource(data, { name: 'f', size: 20, mime: '', lastModified: 0 }),
+      send: (f) => {
+        if (!seenFirst) {
+          seenFirst = true;
+          firstFrameHookDone = hookDone;
+        }
+        outbound.push(f);
+      },
+      sendDir: keys.o2j,
+      recvDir: keys.j2o,
+      sendCounterStart: 0,
+      recvCounterStart: 0,
+      createDigest: nodeDigest,
+      blockSize: 8,
+      frameSize: 4,
+      window: 1,
+      transferId: '0123456789abcdef0123456789abcdef',
+      onManifest: async (manifest) => {
+        await Promise.resolve(); // persist asynchronously; the sender must await this
+        received = {
+          transferId: manifest.transferId,
+          files: manifest.files.map((f) => ({ name: f.name, size: f.size })),
+        };
+        hookDone = true;
+      },
+    });
+
+    const runP = sender.run();
+    await waitFor(() => outbound.length >= 1);
+    expect(seenFirst).toBe(true);
+    expect(firstFrameHookDone).toBe(true);
+    expect(received?.transferId).toBe('0123456789abcdef0123456789abcdef');
+    expect(received?.files).toEqual([{ name: 'f', size: 20 }]);
+
+    // Drain the window (block=8 → 3 blocks) and send done so the run settles. With a
+    // transferId the sender first waits for the receiver's resume_state (fresh: all zero).
+    let ackCtr = 0;
+    const send = async (type: FrameType, payload: Uint8Array, fileIdx = 0, blockIdx = 0) => {
+      const frame = await seal(
+        keys.j2o,
+        ackCtr++,
+        {
+          version: FRAME_VERSION,
+          type,
+          flags: 0,
+          fileIdx,
+          blockIdx,
+          frameOff: 0,
+        },
+        payload,
+      );
+      sender.handle(frame);
+      await new Promise((r) => setTimeout(r, 10));
+    };
+    await send(
+      FrameType.ResumeState,
+      encodeControl({
+        type: FrameType.ResumeState,
+        transferId: '0123456789abcdef0123456789abcdef',
+        files: [{ idx: 0, haveBlocks: 0 }],
+      }),
+    );
+    for (const b of [0, 1, 2]) {
+      await send(FrameType.Ack, encodeControl({ type: FrameType.Ack, fileIdx: 0, blockIdx: b }));
+    }
+    await send(FrameType.Done, encodeControl({ type: FrameType.Done }));
+    await runP;
+  });
+
+  it('rejects run when onManifest rejects, before any frame is emitted', async () => {
+    const keys = await deriveTransferKeys(master);
+    const outbound: Uint8Array[] = [];
+
+    const sender = new TransferSender({
+      file: bytesSource(new Uint8Array(20), { name: 'f', size: 20, mime: '', lastModified: 0 }),
+      send: (f) => void outbound.push(f),
+      sendDir: keys.o2j,
+      recvDir: keys.j2o,
+      sendCounterStart: 0,
+      recvCounterStart: 0,
+      createDigest: nodeDigest,
+      blockSize: 8,
+      frameSize: 4,
+      window: 1,
+      transferId: '0123456789abcdef0123456789abcdef',
+      onManifest: async () => {
+        await Promise.resolve();
+        throw new Error('sender-state write failed');
+      },
+    });
+
+    await expect(sender.run()).rejects.toThrow(/sender-state write failed/);
+    expect(outbound.length).toBe(0);
+  });
 });

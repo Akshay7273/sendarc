@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -445,5 +447,127 @@ func TestSenderFailsOnDoneBeforeComplete(t *testing.T) {
 	s.Handle(frame)
 	if runErr := <-res; runErr == nil {
 		t.Fatal("Run succeeded on Done before Complete was sent")
+	}
+}
+
+func TestSenderOnManifestRunsBeforeFirstFrame(t *testing.T) {
+	keys, err := DeriveTransferKeys(senderMaster())
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := seq(20) // block=8 → blocks 0,1 full, block 2 = 4 bytes
+	var out outbox
+	hookDone := make(chan *Manifest, 1)
+	var hookRan atomic.Bool
+	firstFrameHookRan := false
+	seenFirst := false
+	s := NewSender(SenderOptions{
+		File:       BytesSource(data, FileMeta{Name: "f", Size: 20}, 0),
+		Send:       out.push,
+		SendDir:    keys.O2J,
+		RecvDir:    keys.J2O,
+		BlockSize:  8,
+		FrameSize:  4,
+		Window:     1,
+		TransferID: "0123456789abcdef0123456789abcdef",
+		OnManifest: func(m Manifest) error {
+			hookRan.Store(true)
+			hookDone <- &m
+			return nil
+		},
+	})
+	// The hook must have completed before the very first frame (the manifest) is emitted:
+	// the sender's own goroutine runs the hook, then Send; capturing order proves the
+	// record would be durable before the id is advertised.
+	origSend := out.push
+	s.o.Send = func(f []byte) error {
+		if !seenFirst {
+			seenFirst = true
+			firstFrameHookRan = hookRan.Load()
+		}
+		return origSend(f)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	res := make(chan error, 1)
+	go func() { _, runErr := s.Run(ctx); res <- runErr }()
+
+	select {
+	case m := <-hookDone:
+		if m.TransferID != "0123456789abcdef0123456789abcdef" {
+			t.Fatalf("hook manifest transferId = %q", m.TransferID)
+		}
+		if len(m.Files) != 1 || m.Files[0].Name != "f" || m.Files[0].Size != 20 {
+			t.Fatalf("hook manifest files = %#v", m.Files)
+		}
+		sum := sha256.Sum256(data)
+		if m.Files[0].FileDigest != hex.EncodeToString(sum[:]) {
+			t.Fatalf("hook manifest digest = %s", m.Files[0].FileDigest)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnManifest never called")
+	}
+
+	cancel()
+	if err := <-res; err == nil {
+		t.Fatalf("Run unexpectedly succeeded after cancellation")
+	}
+	if !seenFirst {
+		t.Fatal("no frame was ever sent")
+	}
+	if !firstFrameHookRan {
+		t.Fatal("the manifest frame was emitted before OnManifest completed")
+	}
+	if out.len() == 0 {
+		t.Fatal("manifest frame missing after hook")
+	}
+	opened, err := Open(keys.O2J, 0, out.snapshot()[0])
+	if err != nil {
+		t.Fatalf("open first frame: %v", err)
+	}
+	if opened.Header.Type != FrameManifest {
+		t.Fatalf("first frame type = %d, want manifest", opened.Header.Type)
+	}
+	msg, err := DecodeControl(opened.Plaintext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := msg.(*Manifest)
+	if !ok || m.TransferID != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("first frame manifest = %#v", msg)
+	}
+}
+
+func TestSenderOnManifestErrorAbortsBeforeManifestSent(t *testing.T) {
+	keys, err := DeriveTransferKeys(senderMaster())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out outbox
+	s := NewSender(SenderOptions{
+		File:       BytesSource(seq(20), FileMeta{Name: "f", Size: 20}, 0),
+		Send:       out.push,
+		SendDir:    keys.O2J,
+		RecvDir:    keys.J2O,
+		BlockSize:  8,
+		FrameSize:  4,
+		TransferID: "0123456789abcdef0123456789abcdef",
+		OnManifest: func(Manifest) error {
+			return errors.New("sender-state write failed")
+		},
+	})
+	res := make(chan error, 1)
+	go func() { _, runErr := s.Run(context.Background()); res <- runErr }()
+	select {
+	case runErr := <-res:
+		if runErr == nil || !strings.Contains(runErr.Error(), "sender-state write failed") {
+			t.Fatalf("Run error = %v, want the hook failure", runErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after hook failure")
+	}
+	if out.len() != 0 {
+		t.Fatalf("hook failure still emitted %d frames; the manifest must never reach the wire", out.len())
 	}
 }

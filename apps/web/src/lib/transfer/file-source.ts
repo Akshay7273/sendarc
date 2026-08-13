@@ -9,9 +9,18 @@ import type { FileMeta, FileSource } from '@sendbeam/protocol';
 
 const DEFAULT_CHUNK = 64 * 1024;
 
-export function blobFileSource(file: File, chunk: number = DEFAULT_CHUNK): FileSource {
+/**
+ * Adapt a browser File into a {@link FileSource}. `name` overrides the canonical manifest
+ * name — used for handle-derived Files whose relative path lives in their constructed
+ * name rather than `webkitRelativePath` (V13-PR04 reattachment).
+ */
+export function blobFileSource(
+  file: File,
+  chunk: number = DEFAULT_CHUNK,
+  name?: string,
+): FileSource {
   const meta: FileMeta = {
-    name: file.webkitRelativePath || file.name,
+    name: name ?? (file.webkitRelativePath || file.name),
     size: file.size,
     mime: file.type,
     lastModified: file.lastModified,

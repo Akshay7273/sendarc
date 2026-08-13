@@ -72,7 +72,14 @@ export interface TransferSenderOptions {
   onProgress?(acknowledgedBytes: number): void;
   /** Reports verified progress for the active file plus aggregate acknowledged bytes. */
   onFileProgress?(fileIdx: number, fileBytes: number, acknowledgedBytes: number): void;
-  onManifest?(manifest: Manifest): void;
+  /**
+   * Called with the validated manifest immediately before its frame is transmitted — the
+   * seam the caller uses to make sender-side state durable (stable transfer id + canonical
+   * source identity) strictly before the id is advertised. May be async; a rejection
+   * aborts the send without transmitting the manifest. Local API only: nothing on the
+   * wire changes.
+   */
+  onManifest?(manifest: Manifest): void | Promise<void>;
   onStateChange?(state: TransferRunState): void;
 }
 
@@ -262,7 +269,11 @@ export class TransferSender {
       totalSize,
     });
     const transferDigest = await completionDigest(manifest.files);
-    this.o.onManifest?.(manifest);
+    // The onManifest hook runs after every whole-file digest is computed and the manifest
+    // validated, strictly before its frame is transmitted: sender-side records (stable
+    // transfer id + canonical source identity) are durable before the id is advertised,
+    // and a rejection means the manifest never reaches the wire.
+    await this.o.onManifest?.(manifest);
     await this.sendControl(FrameType.Manifest, manifest);
     this.manifest = manifest;
 
