@@ -36,7 +36,7 @@ content digest. Any difference means a different source — that is the whole po
 
 ### Platform-specific identity claims
 
-The record's file set is platform-identical; only *how a restart locates the source*
+The record's file set is platform-identical; only _how a restart locates the source_
 differs, and that is local state, never on the wire:
 
 - **CLI** (`apps/cli/internal/transfer/sender_state.go`): the record adds
@@ -69,6 +69,7 @@ manifest frame is transmitted, and a rejection aborts the send with nothing sent
    resumable.
 
 Storage and integrity:
+
 - CLI: `os.UserConfigDir()/sendbeam/sender/<transferId>.json` (env override
   `SENDBEAM_SENDER_STATE`), mode 0600, atomic replace (temp + fsync + rename + directory
   sync). Decode is strict fail-closed: exact schema version, unknown fields rejected, no
@@ -85,6 +86,7 @@ Storage and integrity:
 ## Reopen behavior
 
 **CLI** — `sendbeam send` re-runs with the same arguments:
+
 1. The store `Lookup`s the record by the canonical path key. No record → fresh send with
    a minted id. Corrupt → fail closed with discard guidance.
 2. Cheap pre-check: the freshly statted source (count, and per-file name/size/mime/mtime
@@ -96,6 +98,7 @@ Storage and integrity:
 
 **Browser** — the offerer's pick screen lists "Interrupted sends" (records are loaded
 from IndexedDB; corrupt ones are surfaced with a Forget action):
+
 1. **Handle records** ("Send again"): the persisted handle is reopened (read permission
    queried/requested; revocation or a dead handle falls back to reselection), the files
    are re-materialized with their canonical relative names, and the send restarts under
