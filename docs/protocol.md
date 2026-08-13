@@ -63,6 +63,27 @@ with no traffic. If a socket drops and reconnects within that window, `resume` r
 it to the same slot (routing only — it still must pass the SPAKE2 handshake), so a stray
 reconnect cannot hijack a session; the paired peer sees `peer_left`/`peer_rejoined`.
 
+### Connection recovery
+
+Once the data channel is open (transfer already running), both CLI and browser treat a
+WebRTC ICE `disconnected` as a **transient** condition first, with a bounded observation
+window (default 6 s) rather than failing the path outright:
+
+1. Entering `disconnected` on an established direct path reports a distinct `recovering`
+   transport state and, on the offerer, issues an **ICE restart** (`CreateOffer` with
+   `ICERestart: true` / `pc.restartIce()`), renegotiating the SDP over signaling. The
+   existing data channel and its committed transfer progress are untouched.
+2. If the path returns to `connected`/`completed` before the window elapses, recovery clears
+   and the direct path keeps transferring.
+3. If the window elapses or the restart fails, the direct path is declared unrecoverable and
+   the transfer falls back to the encrypted relay (`resume` re-attaches the signaling socket
+   if it dropped, so the relay handshake and later SDP/ICE frames can still flow). Transfer
+   progress and AEAD counters are preserved across the cutover.
+
+The signaling socket itself is independently resumable: a post-establishment drop on an open
+room is re-dialed and re-attached with `resume` (bounded retries), so ICE-restart
+renegotiation can still exchange SDP/ICE even if signaling dropped earlier.
+
 ### Flow
 
 ```

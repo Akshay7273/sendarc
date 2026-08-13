@@ -153,6 +153,7 @@ function run(
         onMessage: (handler) => (route = handler),
         onBinary: (handler) => (routeBinary = handler),
         onClose: (handler) => (routeClose = handler),
+        setResume: (room, role) => client.setResume(room, role),
         close: () => client.close(),
       };
     },
