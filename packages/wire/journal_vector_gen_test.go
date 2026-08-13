@@ -13,16 +13,17 @@ import (
 // TypeScript suites must reproduce `journal` byte-for-byte, pinning the schema's key order,
 // the fingerprint definition, and the checksum definition across languages.
 type journalVectorDoc struct {
-	Description         string          `json:"description"`
-	TransferID          string          `json:"transferId"`
-	Manifest            string          `json:"manifest"` // canonical wire JSON of the validated manifest
-	SourceIdentity      JournalIdentity `json:"sourceIdentity"`
-	DestinationIdentity JournalIdentity `json:"destinationIdentity"`
-	CreatedAt           int64           `json:"createdAt"`
-	UpdatedAt           int64           `json:"updatedAt"`
-	CommittedBlocks     []int           `json:"committedBlocks"`
-	Fingerprint         string          `json:"fingerprint"`
-	Journal             string          `json:"journal"` // canonical encoded journal incl. checksum
+	Description         string                     `json:"description"`
+	TransferID          string                     `json:"transferId"`
+	Manifest            string                     `json:"manifest"` // canonical wire JSON of the validated manifest
+	SourceIdentity      JournalIdentity            `json:"sourceIdentity"`
+	DestinationIdentity JournalIdentity            `json:"destinationIdentity"`
+	CreatedAt           int64                      `json:"createdAt"`
+	UpdatedAt           int64                      `json:"updatedAt"`
+	CommittedBlocks     []int                      `json:"committedBlocks"`
+	DigestCheckpoints   []*JournalDigestCheckpoint `json:"digestCheckpoints"` // per-file, null when absent
+	Fingerprint         string                     `json:"fingerprint"`
+	Journal             string                     `json:"journal"` // canonical encoded journal incl. checksum
 }
 
 // TestGenerateJournalVector rewrites docs/test-vectors/durable-journal.json from the Go
@@ -65,8 +66,10 @@ func buildJournalVectorDoc(j DurableJournal) (journalVectorDoc, error) {
 		return journalVectorDoc{}, err
 	}
 	committed := make([]int, len(j.Files))
+	checkpoints := make([]*JournalDigestCheckpoint, len(j.Files))
 	for i, f := range j.Files {
 		committed[i] = f.CommittedBlocks
+		checkpoints[i] = f.DigestCheckpoint
 	}
 	return journalVectorDoc{
 		Description: "Canonical schema-v1 durable journal, produced by the Go implementation " +
@@ -79,6 +82,7 @@ func buildJournalVectorDoc(j DurableJournal) (journalVectorDoc, error) {
 		CreatedAt:           j.CreatedAt,
 		UpdatedAt:           j.UpdatedAt,
 		CommittedBlocks:     committed,
+		DigestCheckpoints:   checkpoints,
 		Fingerprint:         j.ManifestFingerprint,
 		Journal:             string(encoded),
 	}, nil

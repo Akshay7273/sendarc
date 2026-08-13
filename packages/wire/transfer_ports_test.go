@@ -5,6 +5,90 @@ import (
 	"testing"
 )
 
+// TestSHA256DigestStateRoundTrip pins the V13-PR05 digest checkpoint capability: a
+// serialized state restores to exactly the digest of the prefix fed so far, restore fails
+// closed on foreign or truncated bytes, and MarshalState never disturbs the live digest.
+func TestSHA256DigestStateRoundTrip(t *testing.T) {
+	prefix := []byte("the quick brown fox jumps over the lazy dog")
+	suffix := []byte(" and then some more bytes past a compression boundary")
+
+	live := NewSHA256Digest()
+	live.Update(prefix)
+	state, err := live.(DigestState).MarshalState()
+	if err != nil {
+		t.Fatalf("MarshalState: %v", err)
+	}
+	if len(state) == 0 {
+		t.Fatal("serialized state is empty")
+	}
+	// The digest remains usable after marshaling, exactly like Sum.
+	live.Update(suffix)
+	want := live.HexDigest()
+
+	restored, err := RestoreSHA256Digest(state)
+	if err != nil {
+		t.Fatalf("RestoreSHA256Digest: %v", err)
+	}
+	restored.Update(suffix)
+	if got := restored.HexDigest(); got != want {
+		t.Fatalf("restored digest = %s, want %s (restore must equal hashing the prefix)", got, want)
+	}
+
+	// A state covering a DIFFERENT prefix must produce a different final digest — the
+	// state is trusted only insofar as the final verification catches it.
+	other := NewSHA256Digest()
+	other.Update([]byte("different prefix"))
+	otherState, err := other.(DigestState).MarshalState()
+	if err != nil {
+		t.Fatalf("MarshalState: %v", err)
+	}
+	restoredOther, err := RestoreSHA256Digest(otherState)
+	if err != nil {
+		t.Fatalf("RestoreSHA256Digest(other): %v", err)
+	}
+	restoredOther.Update(suffix)
+	if got := restoredOther.HexDigest(); got == want {
+		t.Fatal("restore of a different prefix must not equal the original digest")
+	}
+
+	// Foreign and truncated state fail closed — never guessed.
+	if _, err := RestoreSHA256Digest([]byte("not a sha256 state")); err == nil {
+		t.Fatal("garbage state must be rejected")
+	}
+	if _, err := RestoreSHA256Digest(state[:len(state)-1]); err == nil {
+		t.Fatal("truncated state must be rejected")
+	}
+	if _, err := RestoreSHA256Digest(nil); err == nil {
+		t.Fatal("empty state must be rejected")
+	}
+
+	// Cross-check against a full re-hash on a longer input spanning block boundaries.
+	big := make([]byte, 3*1024)
+	for i := range big {
+		big[i] = byte(i * 7)
+	}
+	a := NewSHA256Digest()
+	a.Update(big[:900])
+	bigState, err := a.(DigestState).MarshalState()
+	if err != nil {
+		t.Fatalf("MarshalState(big): %v", err)
+	}
+	b, err := RestoreSHA256Digest(bigState)
+	if err != nil {
+		t.Fatalf("RestoreSHA256Digest(big): %v", err)
+	}
+	a.Update(big[900:])
+	b.Update(big[900:])
+	if a.HexDigest() != b.HexDigest() {
+		t.Fatal("restore + continuation must equal one-shot hashing")
+	}
+	oneShot := NewSHA256Digest()
+	oneShot.Update(big)
+	if b.HexDigest() != oneShot.HexDigest() {
+		t.Fatal("restored continuation must equal one-shot hashing of the whole input")
+	}
+}
+
 func TestMemorySinkReassemblesOutOfOrder(t *testing.T) {
 	var s MemorySink
 	if err := s.Write(4, []byte{5, 6, 7, 8}); err != nil {
