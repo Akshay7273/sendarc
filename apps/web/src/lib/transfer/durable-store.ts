@@ -406,7 +406,27 @@ class IndexedDbDurableStore implements DurableJournalStore {
 class SyncPartialWriter implements PartialWriter {
   constructor(private readonly handle: FileSystemSyncAccessHandle) {}
   async write(offset: number, bytes: Uint8Array): Promise<void> {
-    this.handle.write(bytes, { at: offset });
+    // A sync access handle may persist only part of a buffer per call (short write). Loop
+    // on the returned byte count until the whole verified block is on disk, failing closed
+    // on zero/no-progress or impossible results instead of risking a torn checkpoint. The
+    // durability barrier (flush) runs only after the complete block has been written.
+    let written = 0;
+    while (written < bytes.length) {
+      const count = this.handle.write(bytes.subarray(written), { at: offset + written });
+      if (count <= 0) {
+        throw new TransferError(
+          'sink_error',
+          'sync write made no progress; failing closed rather than checkpointing a torn block',
+        );
+      }
+      if (count > bytes.length - written) {
+        throw new TransferError(
+          'sink_error',
+          'sync write reported an impossible byte count; failing closed',
+        );
+      }
+      written += count;
+    }
     this.handle.flush();
   }
   async close(): Promise<void> {
@@ -618,16 +638,87 @@ class OpfsDurableFiles implements DurableFiles {
   }
 
   async removeData(transferId: string): Promise<void> {
+    let dir: FileSystemDirectoryHandle;
     try {
       const root = await this.root();
-      let dir = await root.getDirectoryHandle(DURABLE_ROOT.split('/')[0]!, { create: false });
+      dir = await root.getDirectoryHandle(DURABLE_ROOT.split('/')[0]!, { create: false });
       for (const part of DURABLE_ROOT.split('/').slice(1)) {
         dir = await dir.getDirectoryHandle(part, { create: false });
       }
-      await dir.removeEntry(transferId, { recursive: true });
-    } catch {
-      // Nothing to remove.
+    } catch (e) {
+      // An absent durable namespace means there is nothing to remove; any other failure
+      // (storage unavailable, permissions, quota) must surface so discard never reports
+      // success while durable bytes may still exist.
+      if (e instanceof DOMException && e.name === 'NotFoundError') return;
+      throw e;
     }
+    try {
+      await dir.removeEntry(transferId, { recursive: true });
+    } catch (e) {
+      // Idempotent repeat: the per-transfer directory is already gone.
+      if (e instanceof DOMException && e.name === 'NotFoundError') return;
+      throw e;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Explicit discard: durable receive cleanup
+// ---------------------------------------------------------------------------
+
+export interface DurableCleanupDeps {
+  files: DurableFiles;
+  store: DurableJournalStore;
+  /** Injectable clock (unix ms); defaults to Date.now (tests use a fixed clock). */
+  now?(): number;
+}
+
+/**
+ * Explicitly discard one transfer's durable receive state — journal, lease, and every OPFS
+ * partial/output under its per-transfer namespace — idempotently and never touching any other
+ * transfer.
+ *
+ * Ordering (data first, metadata last) is deliberate because IDB + OPFS cannot be one atomic
+ * transaction; it is chosen to be fail-closed and retryable:
+ *
+ *  1. Acquire the transfer's lease first (test-and-set). A live lease owned by another
+ *     receiver means the transfer is actively being received there, so the discard is refused
+ *     rather than deleting state underneath it — a stale failure page can never destroy a live
+ *     receiver. An absent, stale, or self-owned lease lets the discard proceed and guarantees
+ *     exclusive ownership for the rest of the cleanup, so no receiver can start between steps.
+ *  2. Remove the OPFS data while the lease is held. Because we own the lease, this cannot
+ *     collide with a live receive, and a failure here aborts with the journal + partials still
+ *     fully intact and resumable.
+ *  3. Remove the journal + lease metadata last, only after the backing data is provably gone —
+ *     a journal never survives without its data. If metadata removal fails, the journal remains
+ *     but is provably unusable (partials are gone) and a repeat of the discard is safe.
+ *
+ * On any failure the lease taken for the discard is released so a retry can acquire
+ * immediately; no state is deleted on a failure path and no success is reported unless both the
+ * data and metadata are actually gone.
+ */
+export async function discardDurableTransfer(
+  transferId: string,
+  ownerId: string,
+  deps: DurableCleanupDeps,
+): Promise<void> {
+  if (transferId === '') {
+    throw new TransferError('sink_error', 'refusing to discard an empty transfer id');
+  }
+  const now = deps.now ?? (() => Date.now());
+  const outcome = await deps.store.acquireLease(transferId, ownerId, now());
+  if (outcome.kind === 'contended') {
+    throw new TransferError(
+      'sink_error',
+      'another receiver is actively using this transfer; refusing to discard underneath it',
+    );
+  }
+  try {
+    await deps.files.removeData(transferId);
+    await deps.store.discard(transferId);
+  } catch (e) {
+    await deps.store.releaseLease(transferId, ownerId).catch(() => {});
+    throw e;
   }
 }
 

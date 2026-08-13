@@ -24,7 +24,11 @@ import {
 } from '../transfer/adaptive.js';
 import { ProgressTracker, type TransferSnapshot } from '../transfer/progress.js';
 import { readOpfsOutput, removeOpfsOutput } from '../transfer/sink.js';
-import { indexedDbDurableStore } from '../transfer/durable-store.js';
+import {
+  discardDurableTransfer,
+  durableOpfsFiles,
+  indexedDbDurableStore,
+} from '../transfer/durable-store.js';
 import type {
   HostToWorker,
   ReceiveDestinationSpec,
@@ -517,7 +521,13 @@ function run(
     durable: () => durableInfo,
     discardDurable: async () => {
       if (!durableInfo) return;
-      await indexedDbDurableStore().discard(durableInfo.transferId);
+      // Full durable-receive cleanup: lease-guarded, OPFS data first, then journal + lease
+      // metadata; refuses to run underneath a live foreign lease and surfaces any failure so
+      // the UI never claims success while durable bytes still exist.
+      await discardDurableTransfer(durableInfo.transferId, durableInfo.ownerId, {
+        files: durableOpfsFiles(),
+        store: indexedDbDurableStore(),
+      });
     },
   };
 }

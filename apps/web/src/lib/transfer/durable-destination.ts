@@ -231,7 +231,8 @@ export class DurableDestination implements BrowserDestination {
   /**
    * Finalize — runs only after the wire receiver verified the whole transfer. The journal
    * (and lease) are removed only after the deliverable is fully produced; any failure keeps
-   * every partial and the journal intact for retry or explicit discard.
+   * every partial and the journal intact for retry or explicit discard, and releases the lease
+   * promptly so a retry can acquire immediately instead of waiting out the stale TTL.
    */
   async close(): Promise<void> {
     if (this.closed) return;
@@ -241,36 +242,49 @@ export class DurableDestination implements BrowserDestination {
     const journal = this.journal;
     const manifest = this.manifest;
     if (!journal || !manifest) return;
-    // Whole-transfer verification already happened (the receiver calls close() after
-    // onComplete); double-check no checkpoint lags so finalization is never partial.
-    for (let i = 0; i < journal.files.length; i++) {
-      const f = journal.files[i]!;
-      if (f.committedBlocks !== f.blocks) {
-        throw new TransferError('sink_error', `file ${i} not fully committed at finalize`);
+    try {
+      // Whole-transfer verification already happened (the receiver calls close() after
+      // onComplete); double-check no checkpoint lags so finalization is never partial.
+      for (let i = 0; i < journal.files.length; i++) {
+        const f = journal.files[i]!;
+        if (f.committedBlocks !== f.blocks) {
+          throw new TransferError('sink_error', `file ${i} not fully committed at finalize`);
+        }
       }
-    }
-    if (manifest.files.length === 1) {
-      // The verified partial IS the deliverable; the host reads it and cleans it up.
-      // The journal is removed only after whole-transfer verification, then the output is
-      // advertised — never before.
-      const file = manifest.files[0]!;
-      const key = this.files.partialKey(this.transferId, normalizeTransferPath(file.name));
+      if (manifest.files.length === 1) {
+        // The verified partial IS the deliverable; the host reads it and cleans it up.
+        // The journal is removed only after whole-transfer verification, then the output is
+        // advertised — never before.
+        const file = manifest.files[0]!;
+        const key = this.files.partialKey(this.transferId, normalizeTransferPath(file.name));
+        await this.store.discard(this.transferId);
+        this.output = { kind: 'opfs', key, name: file.name, mime: file.mime };
+        return;
+      }
+      // Multi-file: assemble a store-only ZIP from the verified partials, then remove the
+      // journal and the consumed partials — never before the ZIP is fully written and closed.
+      const zip = await this.buildZip();
       await this.store.discard(this.transferId);
-      this.output = { kind: 'opfs', key, name: file.name, mime: file.mime };
-      return;
+      // Best-effort cleanup: the ZIP is the verified deliverable, so leftover partials after a
+      // removal failure are harmless orphans rather than a reason to fail a done transfer.
+      for (const file of manifest.files) {
+        await this.files
+          .removePartial(this.transferId, normalizeTransferPath(file.name))
+          .catch(() => {});
+      }
+      this.output = { kind: 'opfs', key: zip.key, name: zip.name, mime: 'application/zip' };
+    } catch (e) {
+      // Finalization failed. The journal + recoverable partials must stay usable (they are the
+      // only resumable copy) and the active lease is released promptly rather than forcing the
+      // 120s stale TTL, so a retry — same or another tab — acquires immediately. Any still-open
+      // writers are aborted so no handles survive a failed finalize. Nothing is deleted on a
+      // failure path and no output is advertised.
+      await this.releaseLease();
+      for (const sink of this.sinks.values()) {
+        await sink.abort().catch(() => {});
+      }
+      throw e;
     }
-    // Multi-file: assemble a store-only ZIP from the verified partials, then remove the
-    // journal and the consumed partials — never before the ZIP is fully written and closed.
-    const zip = await this.buildZip();
-    await this.store.discard(this.transferId);
-    // Best-effort cleanup: the ZIP is the verified deliverable, so leftover partials after a
-    // removal failure are harmless orphans rather than a reason to fail a done transfer.
-    for (const file of manifest.files) {
-      await this.files
-        .removePartial(this.transferId, normalizeTransferPath(file.name))
-        .catch(() => {});
-    }
-    this.output = { kind: 'opfs', key: zip.key, name: zip.name, mime: 'application/zip' };
   }
 
   /**
@@ -285,9 +299,7 @@ export class DurableDestination implements BrowserDestination {
     for (const sink of this.sinks.values()) {
       await sink.abort().catch(() => {});
     }
-    if (this.prepared && !this.closed && this.transferId !== '') {
-      await this.store.releaseLease(this.transferId, this.ownerId).catch(() => {});
-    }
+    if (!this.closed) await this.releaseLease();
   }
 
   result(): DestinationOutput | undefined {
@@ -418,6 +430,13 @@ export class DurableDestination implements BrowserDestination {
     if (this.renewTimer !== undefined) {
       clearInterval(this.renewTimer);
       this.renewTimer = undefined;
+    }
+  }
+
+  /** Owner-bound lease release (no-op when not prepared or already released); best-effort. */
+  private async releaseLease(): Promise<void> {
+    if (this.prepared && this.transferId !== '') {
+      await this.store.releaseLease(this.transferId, this.ownerId).catch(() => {});
     }
   }
 }
