@@ -46,7 +46,7 @@ ONLY NOW may that checkpoint be advertised as resumable
 
 The schema cannot observe whether block data reached stable storage; enforcing the
 durability barrier is the storage layer's job (PR02 CLI, PR03 browser). What the schema
-and its API enforce instead is that progress can only be *recorded* through the single
+and its API enforce instead is that progress can only be _recorded_ through the single
 checkpoint-advance API (`CommitBlocks` / `commitBlocks`), which refuses out-of-bounds and
 regressing values, and that any journal failing structural validation, fingerprint
 self-consistency, version dispatch, or checksum verification is rejected closed.
@@ -95,19 +95,19 @@ change or protocol-version bump.
 
 Schema version 1 fields:
 
-| Field | Semantics |
-| --- | --- |
-| `schemaVersion` | On-disk schema identifier (currently `1`). |
-| `transferId` | Stable 128-bit hex id carried by the authenticated manifest; must match the manifest's `transferId`. |
-| `manifestFingerprint` | Canonical SHA-256 over the validated manifest's canonical wire JSON (see §5). |
-| `protocolVersion` | Wire-protocol version the transfer ran under (`sendbeam/1`); recorded, never implied. |
-| `resumeVersion` | Durability resume protocol version (currently `1`); independent of schema and wire versions. |
-| `blockSize` | Transfer's negotiated logical block size; every file entry must match it. |
-| `createdAt` / `updatedAt` | Unix milliseconds; `updatedAt ≥ createdAt`. |
-| `sourceIdentity` / `destinationIdentity` | Opaque versioned identity envelopes (see §5). |
-| `files[]` | Per-file entries: the wire `FileEntry` geometry (`idx, name, size, mime, lastModified, blockSize, blocks, fileDigest`) plus `committedBlocks`. Stored so the journal alone can re-validate the resumed transfer and reproduce the fingerprint. |
-| `resumeSecret` (optional) | Opaque versioned resume-secret envelope (see §5). |
-| `checksum` | SHA-256 over the canonical JSON of every other field; a write-time derivation, verified on load. |
+| Field                                    | Semantics                                                                                                                                                                                                                                      |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schemaVersion`                          | On-disk schema identifier (currently `1`).                                                                                                                                                                                                     |
+| `transferId`                             | Stable 128-bit hex id carried by the authenticated manifest; must match the manifest's `transferId`.                                                                                                                                           |
+| `manifestFingerprint`                    | Canonical SHA-256 over the validated manifest's canonical wire JSON (see §5).                                                                                                                                                                  |
+| `protocolVersion`                        | Wire-protocol version the transfer ran under (`sendbeam/1`); recorded, never implied.                                                                                                                                                          |
+| `resumeVersion`                          | Durability resume protocol version (currently `1`); independent of schema and wire versions.                                                                                                                                                   |
+| `blockSize`                              | Transfer's negotiated logical block size; every file entry must match it.                                                                                                                                                                      |
+| `createdAt` / `updatedAt`                | Unix milliseconds; `updatedAt ≥ createdAt`.                                                                                                                                                                                                    |
+| `sourceIdentity` / `destinationIdentity` | Opaque versioned identity envelopes (see §5).                                                                                                                                                                                                  |
+| `files[]`                                | Per-file entries: the wire `FileEntry` geometry (`idx, name, size, mime, lastModified, blockSize, blocks, fileDigest`) plus `committedBlocks`. Stored so the journal alone can re-validate the resumed transfer and reproduce the fingerprint. |
+| `resumeSecret` (optional)                | Opaque versioned resume-secret envelope (see §5).                                                                                                                                                                                              |
+| `checksum`                               | SHA-256 over the canonical JSON of every other field; a write-time derivation, verified on load.                                                                                                                                               |
 
 ## 5. Secret handling and identity
 
@@ -155,20 +155,20 @@ in PR02/PR03, peer identity binding in PR07). Validation checks only the envelop
 
 The authoritative recovery point is always safe. Modeled cases:
 
-| Crash point | Recovery behavior |
-| --- | --- |
-| Before data write | Previous checkpoint authoritative; journal untouched. |
-| During data write | Partial/absent block data; journal claims nothing new. |
-| After data write, before durability barrier | Data may be lost on reboot; journal must not have advanced (the storage layer performs the barrier before `CommitBlocks`). |
-| After durable data, before journal update | Data durable but unclaimed; resume re-verifies and continues from the previous checkpoint (bytes may be re-requested). |
-| During journal update | Atomic replace leaves old or new journal; never torn; torn files fail closed on load. |
-| After journal commit | Checkpoint authoritative; must not claim bytes that were not made durable first. |
-| Truncated journal | JSON parse or checksum failure → reject closed. |
-| Malformed/corrupt journal | Validation or checksum failure → reject closed. |
-| Valid old supported version | v1 decodes. |
-| Unsupported future version | Rejected closed (COMPAT). |
-| Missing partial data | Journal may exist with no partial data → see §8. |
-| Checkpoint beyond available durable data | Impossible to *write* (bounds + API), and detected on load as inconsistent state → reject; storage layer never deletes potentially resumable data automatically on error (§8). |
+| Crash point                                 | Recovery behavior                                                                                                                                                              |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Before data write                           | Previous checkpoint authoritative; journal untouched.                                                                                                                          |
+| During data write                           | Partial/absent block data; journal claims nothing new.                                                                                                                         |
+| After data write, before durability barrier | Data may be lost on reboot; journal must not have advanced (the storage layer performs the barrier before `CommitBlocks`).                                                     |
+| After durable data, before journal update   | Data durable but unclaimed; resume re-verifies and continues from the previous checkpoint (bytes may be re-requested).                                                         |
+| During journal update                       | Atomic replace leaves old or new journal; never torn; torn files fail closed on load.                                                                                          |
+| After journal commit                        | Checkpoint authoritative; must not claim bytes that were not made durable first.                                                                                               |
+| Truncated journal                           | JSON parse or checksum failure → reject closed.                                                                                                                                |
+| Malformed/corrupt journal                   | Validation or checksum failure → reject closed.                                                                                                                                |
+| Valid old supported version                 | v1 decodes.                                                                                                                                                                    |
+| Unsupported future version                  | Rejected closed (COMPAT).                                                                                                                                                      |
+| Missing partial data                        | Journal may exist with no partial data → see §8.                                                                                                                               |
+| Checkpoint beyond available durable data    | Impossible to _write_ (bounds + API), and detected on load as inconsistent state → reject; storage layer never deletes potentially resumable data automatically on error (§8). |
 
 ## 8. GC / expiry / disk policy (contract)
 
