@@ -5,6 +5,17 @@
   import { offer, join, type RendezvousController } from './lib/session/rendezvous.js';
   import type { SignalChannel } from './lib/signaling/client.js';
   import type { ReceiveDestinationSpec } from './lib/transfer/wire.js';
+  import {
+    canonicalizeFiles,
+    cheapSourceCheck,
+    ensureReadPermission,
+    materializeHandle,
+  } from './lib/transfer/sender-reattach.js';
+  import {
+    senderRecordStoreWhenAvailable,
+    type SenderRecord,
+    type SenderRecordListEntry,
+  } from './lib/transfer/sender-record.js';
   import { baseUrl, iceServers, loadConfig } from './lib/config.js';
   import { toJSON } from './lib/transfer/diagnostics.js';
   import QrCode from './lib/QrCode.svelte';
@@ -48,6 +59,14 @@
   // Durable-receive Keep/Discard surface (V13-PR03): an interrupted resumable receive keeps
   // its journal + partials until the user explicitly discards them.
   let durableDiscarded = $state(false);
+  // Interrupted-send surface (V13-PR04): sender records persisted before the manifest frame
+  // let an interrupted send be reopened against its original source.
+  let senderRecordList = $state.raw<SenderRecordListEntry[]>([]);
+  let pendingResume = $state.raw<SenderRecord | undefined>(undefined);
+  let resumeHint = $state('');
+  let pickError = $state('');
+  let directoryPickerAvailable = $state(false);
+  directoryPickerAvailable = typeof (window as PickerWindow).showDirectoryPicker === 'function';
 
   // Transfer state, live once the handshake settles and the socket is adopted.
   let role = $state<Role | undefined>(undefined);
@@ -169,6 +188,7 @@
         // the joiner begins receiving straight away.
         screen = 'done';
         startTransferIfReady();
+        if (role === 'offerer') void refreshSenderRecords();
       },
       (err: unknown) => {
         if (controller !== ctrl) return;
@@ -185,7 +205,9 @@
 
   function onPick(ev: Event) {
     const input = ev.currentTarget as HTMLInputElement;
-    pickedFiles = Array.from(input.files ?? []);
+    // Canonical (sorted-by-relative-name) order: the same folder re-picked in any order
+    // yields the same manifest, so an interrupted send's fingerprint stays comparable.
+    pickedFiles = canonicalizeFiles(Array.from(input.files ?? []));
     startTransferIfReady();
   }
 
@@ -198,6 +220,27 @@
     const ice = iceServers();
     if (role === 'offerer') {
       if (pickedFiles.length === 0) return;
+      if (pendingResume) {
+        // Resuming an interrupted send: the picked selection is cheap-checked against the
+        // record first (a friendly refusal beats a pointless transfer), then re-verified
+        // authoritatively by the worker before the manifest frame goes out.
+        const mismatch = cheapSourceCheck(pendingResume, pickedFiles);
+        if (mismatch !== undefined) {
+          pickError = `Resume refused — ${mismatch}`;
+          return;
+        }
+        beginTransfer(
+          runSend(handshake, signaling, {
+            files: pickedFiles,
+            transferId: pendingResume.transferId,
+            reattachment: { kind: 'reselection' },
+            ...(ice ? { iceServers: ice } : {}),
+          }),
+        );
+        pendingResume = undefined;
+        resumeHint = '';
+        return;
+      }
       beginTransfer(
         runSend(handshake, signaling, {
           files: pickedFiles,
@@ -294,6 +337,10 @@
     errorText = '';
     failureDiag = '';
     durableDiscarded = false;
+    senderRecordList = [];
+    pendingResume = undefined;
+    resumeHint = '';
+    pickError = '';
   }
 
   async function discardDurable() {
@@ -302,6 +349,81 @@
       durableDiscarded = true;
     } catch {
       // Keep the block visible if the discard itself failed; the data is still kept.
+    }
+  }
+
+  /** Reload the interrupted-sends list from the sender record store. */
+  async function refreshSenderRecords() {
+    const store = senderRecordStoreWhenAvailable();
+    senderRecordList = store ? await store.list() : [];
+  }
+
+  /** Resume an interrupted send from its record. */
+  async function sendAgain(rec: SenderRecord) {
+    if (handshake === undefined || signaling === undefined) return;
+    pickError = '';
+    const ice = iceServers();
+    if (rec.reattachment.kind === 'handle') {
+      // The persisted handle reopens the original source directly; a revoked permission or a
+      // dead handle falls back to re-selection (the record keeps the transfer id either way).
+      const granted = await ensureReadPermission(rec.reattachment.handle);
+      if (granted) {
+        try {
+          const files = await materializeHandle(rec.reattachment.handle);
+          if (files.length === 0) throw new Error('the folder is empty');
+          beginTransfer(
+            runSend(handshake, signaling, {
+              files,
+              transferId: rec.transferId,
+              reattachment: rec.reattachment,
+              ...(ice ? { iceServers: ice } : {}),
+            }),
+          );
+          return;
+        } catch {
+          // fall through to re-selection
+        }
+      }
+    }
+    pendingResume = rec;
+    resumeHint = `Pick the original source to resume transfer ${rec.transferId.slice(0, 8)} — it will be verified before anything is sent.`;
+  }
+
+  /** Forget an interrupted-send record (keeps nothing; no transfer state depends on it). */
+  async function forgetSenderRecord(entry: SenderRecordListEntry) {
+    const store = senderRecordStoreWhenAvailable();
+    if (!store) return;
+    await store.remove(entry.transferId);
+    if (pendingResume?.transferId === entry.transferId) {
+      pendingResume = undefined;
+      resumeHint = '';
+    }
+    await refreshSenderRecords();
+  }
+
+  /**
+   * Fresh send via the File System Access picker (feature-detected): the persisted handle
+   * lets the folder be reopened after an interruption instead of re-picked.
+   */
+  async function sendFolderReopenable() {
+    if (handshake === undefined || signaling === undefined) return;
+    pickError = '';
+    const ice = iceServers();
+    try {
+      const handle = await (window as PickerWindow).showDirectoryPicker!();
+      const files = await materializeHandle(handle);
+      if (files.length === 0) throw new Error('the folder is empty');
+      beginTransfer(
+        runSend(handshake, signaling, {
+          files,
+          reattachment: { kind: 'handle', handleKind: 'directory', handle },
+          ...(ice ? { iceServers: ice } : {}),
+        }),
+      );
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      errorText = err instanceof Error ? err.message : String(err);
+      screen = 'failed';
     }
   }
 
@@ -577,6 +699,63 @@
             <span class="filepick-sub">all files inside</span>
             <input type="file" multiple webkitdirectory onchange={onPick} />
           </label>
+          {#if directoryPickerAvailable}
+            <button class="filepick" onclick={sendFolderReopenable}>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M10 4H4C2.9 4 2 4.9 2 6V18C2 19.1 2.9 20 4 20H20C21.1 20 22 19.1 22 18V8C22 6.9 21.1 6 20 6H12L10 4Z"
+                  fill="currentColor"
+                />
+              </svg>
+              <span class="filepick-title">Send folder (reopenable){'\u{2026}'}</span>
+              <span class="filepick-sub">resumes after interruption without re-picking</span>
+            </button>
+          {/if}
+          {#if resumeHint}
+            <p class="resume-hint">{resumeHint}</p>
+          {/if}
+          {#if pickError}
+            <p class="resume-hint bad">{pickError}</p>
+          {/if}
+          {#if senderRecordList.length > 0}
+            <div class="resume-zone">
+              <h3>Interrupted sends</h3>
+              {#each senderRecordList as entry (entry.transferId)}
+                <div class="resume-card">
+                  {#if entry.kind === 'ok'}
+                    <p class="resume-name">
+                      {entry.record.files.length} file{entry.record.files.length === 1 ? '' : 's'}
+                      ({humanBytes(entry.record.files.reduce((total, f) => total + f.size, 0))})
+                    </p>
+                    <p class="muted">
+                      {entry.record.reattachment.kind === 'handle'
+                        ? 'Reopens the original folder'
+                        : 'Re-select the original source'}
+                      {'\u00b7'} interrupted {new Date(entry.record.updatedAt).toLocaleString()}
+                    </p>
+                    <div class="resume-actions">
+                      <button class="ghost" onclick={() => sendAgain(entry.record)}>
+                        Send again
+                      </button>
+                      <button class="ghost" onclick={() => forgetSenderRecord(entry)}>
+                        Forget
+                      </button>
+                    </div>
+                  {:else}
+                    <p class="resume-name">Corrupt sender record</p>
+                    <p class="muted">
+                      {entry.error} — nothing was sent; forget it to start a new transfer.
+                    </p>
+                    <div class="resume-actions">
+                      <button class="ghost" onclick={() => forgetSenderRecord(entry)}>
+                        Forget
+                      </button>
+                    </div>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {/if}
         </div>
       {:else}
         <div class="phase" aria-live="polite">
@@ -1192,6 +1371,61 @@
   }
   .filepick input {
     display: none;
+  }
+  button.filepick {
+    font: inherit;
+    color: inherit;
+    text-align: center;
+  }
+
+  /* ————— interrupted sends (V13-PR04) ————— */
+  .resume-hint {
+    grid-column: 1 / -1;
+    margin: 0;
+    font-size: 0.85rem;
+    color: #a5b4fc;
+  }
+  .resume-hint.bad {
+    color: #fca5a5;
+  }
+  .resume-zone {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    margin-top: 0.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid rgba(139, 124, 246, 0.2);
+  }
+  .resume-zone h3 {
+    margin: 0;
+    font-size: 0.8rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #77849f;
+  }
+  .resume-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.75rem 0.9rem;
+    border-radius: 0.75rem;
+    background: rgba(139, 124, 246, 0.06);
+    border: 1px solid rgba(139, 124, 246, 0.18);
+  }
+  .resume-name {
+    margin: 0;
+    font-weight: 600;
+    font-size: 0.92rem;
+  }
+  .resume-card .muted {
+    margin: 0;
+    font-size: 0.8rem;
+  }
+  .resume-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.35rem;
   }
 
   /* ————— failure ————— */

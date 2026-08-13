@@ -35,6 +35,7 @@ import type {
   SessionCrypto,
   WorkerToHost,
 } from '../transfer/wire.js';
+import type { SenderReattachment } from '../transfer/sender-record.js';
 import { GenerationGuard } from './generation.js';
 import { type Snapshot, sanitize } from '../transfer/diagnostics.js';
 import type { PathKind } from '../transfer/diagnostics.js';
@@ -88,6 +89,10 @@ export interface DurableInfo {
 
 export interface SendOptions {
   files: File[];
+  /** Reuse the stable transfer id of an interrupted send; the worker re-verifies the source. */
+  transferId?: string;
+  /** How this send's source can be reopened after an interruption (persisted with the record). */
+  reattachment?: SenderReattachment;
   /** Operator-published ICE servers; omitting keeps the bundled default STUN. */
   iceServers?: RTCIceServer[];
 }
@@ -102,7 +107,13 @@ export function runSend(
     role: 'send',
     total: opts.files.reduce((total, file) => total + file.size, 0),
     ...(opts.iceServers ? { iceServers: opts.iceServers } : {}),
-    start: () => ({ kind: 'start-send', files: opts.files, ...crypto(rendezvous) }),
+    start: () => ({
+      kind: 'start-send',
+      files: opts.files,
+      ...(opts.transferId !== undefined ? { transferId: opts.transferId } : {}),
+      ...(opts.reattachment !== undefined ? { reattachment: opts.reattachment } : {}),
+      ...crypto(rendezvous),
+    }),
   });
 }
 

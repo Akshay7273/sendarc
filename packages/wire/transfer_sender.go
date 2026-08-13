@@ -66,6 +66,14 @@ type SenderOptions struct {
 	OnProgress     func(acknowledgedBytes int64)
 	OnFileProgress func(fileIdx int, fileBytes, acknowledgedBytes int64)
 	OnStateChange  func(TransferState)
+	// OnManifest, when set, is called with the validated manifest immediately before its
+	// frame is transmitted. It lets the caller make sender-side state durable — the stable
+	// transfer id and canonical source identity — strictly before the manifest can
+	// advertise that id, so a crash after this call can be resumed with the same id and a
+	// changed source can be refused before it is ever advertised. Returning an error
+	// aborts the send without transmitting the manifest. Local API only: nothing on the
+	// wire changes.
+	OnManifest func(manifest Manifest) error
 }
 
 type inflightBlock struct {
@@ -229,6 +237,16 @@ func (s *Sender) Run(ctx context.Context) (string, error) {
 		return "", err
 	}
 	transferDigest := CompletionDigest(manifest.Files)
+	// The OnManifest hook runs after every whole-file digest is computed and the manifest
+	// validated, strictly before its frame is transmitted: sender-side records (stable
+	// transfer id + canonical source identity) are durable before the id is advertised,
+	// and a hook error means the manifest never reaches the wire.
+	if s.o.OnManifest != nil {
+		if err := s.o.OnManifest(manifest); err != nil {
+			s.fail(err)
+			return "", err
+		}
+	}
 	if err := s.sendControl(&manifest); err != nil {
 		s.fail(err)
 		return "", err

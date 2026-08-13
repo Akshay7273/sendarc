@@ -17,6 +17,7 @@ import {
   type Destination,
   type FileEntry,
   type FileSource,
+  type Manifest,
   type Sink,
 } from '@sendbeam/protocol';
 import type {
@@ -28,6 +29,7 @@ import type {
   WorkerToHost,
 } from './wire.js';
 import type { BrowserDestination } from './sink.js';
+import { newSenderRecord, refreshSenderRecord, type SenderRecordStore } from './sender-record.js';
 
 export interface TransferCoreDeps {
   /** Fresh streaming whole-file hasher (matches `sha256sum`). One live digest per call. */
@@ -38,6 +40,11 @@ export interface TransferCoreDeps {
   createDestination?(spec: ReceiveDestinationSpec): BrowserDestination;
   /** Adapt the sender's File into a re-callable byte source. */
   fileSource(file: File): FileSource;
+  /**
+   * Sender metadata store (V13-PR04). Absent when the platform cannot persist records
+   * (no IndexedDB): the send proceeds but offers no restart/reopen capability.
+   */
+  senderRecords?: SenderRecordStore;
 }
 
 type Port = DuplexPort<HostToWorker, WorkerToHost>;
@@ -142,6 +149,7 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
       try {
         const sources = msg.files.map((file) => deps.fileSource(file));
         let manifestFiles: FileEntry[] = [];
+        let transferId = msg.transferId ?? '';
         const sender = new TransferSender({
           files: sources,
           send,
@@ -151,11 +159,22 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
           recvCounterStart: msg.recvCounter,
           createDigest: deps.createDigest,
           // Mint a stable transfer id so the manifest opts into resumption and a crashed
-          // receiver can journal and resume this exact transfer (V13-PR03).
-          newTransferId: () => mintTransferId(),
+          // receiver can journal and resume this exact transfer (V13-PR03). A restart
+          // reuses the caller's id instead (V13-PR04).
+          newTransferId: () => {
+            transferId = mintTransferId();
+            return transferId;
+          },
+          ...(msg.transferId !== undefined ? { transferId: msg.transferId } : {}),
           onProgress: (bytes) => post({ kind: 'progress', bytes }),
-          onManifest: (manifest) => {
+          onManifest: async (manifest) => {
             manifestFiles = manifest.files;
+            const store = deps.senderRecords;
+            if (!store) return;
+            // Persist or verify the sender record strictly before the manifest frame goes
+            // out: the stable id + canonical source identity are durable before the id is
+            // advertised, and a changed source aborts the send with nothing transmitted.
+            await persistSenderRecord(store, msg, manifest);
           },
           onStateChange: (state) => post({ kind: 'state', state }),
           ...(msg.blockSize !== undefined ? { blockSize: msg.blockSize } : {}),
@@ -164,6 +183,12 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
         });
         bind(sender);
         const digest = await sender.run();
+        // Verified success: the transfer settled, so the sender record is spent. Removal
+        // is post-success cleanup, so a failure here must not fail the transfer — the
+        // lingering record only offers a harmless (receiver-verified) re-send.
+        if (transferId !== '' && deps.senderRecords) {
+          await deps.senderRecords.remove(transferId).catch(() => {});
+        }
         post({
           kind: 'done',
           files: manifestFiles.map((file) => ({
@@ -287,4 +312,51 @@ function mintTransferId(): string {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
   return bytesToHex(bytes);
+}
+
+/**
+ * The V13-PR04 sender seam, run strictly before the manifest frame is transmitted:
+ *
+ *  - Fresh send (no caller-supplied id): persist a new record binding the minted id to the
+ *    canonical source identity. A persist failure aborts the send — the id is never
+ *    advertised unless a durable record backs it.
+ *  - Restart (caller-supplied id): the record must exist and be valid, and its canonical
+ *    fingerprint must match the manifest about to be advertised. Any mismatch (or a
+ *    missing/corrupt record) fails closed with nothing transmitted, so a changed source is
+ *    never advertised under the old id.
+ */
+async function persistSenderRecord(
+  store: SenderRecordStore,
+  msg: StartSendMsg,
+  manifest: Manifest,
+): Promise<void> {
+  if (manifest.transferId === undefined) {
+    throw new TransferError('integrity', 'sender record requires a manifest with a transfer id');
+  }
+  const prior = await store.load(manifest.transferId);
+  if (prior.kind === 'corrupt') {
+    throw new TransferError(
+      'integrity',
+      `the sender record for transfer ${manifest.transferId} is corrupt and cannot verify ` +
+        'the source; forget it and start a new transfer',
+    );
+  }
+  if (prior.kind === 'none') {
+    if (msg.transferId !== undefined) {
+      throw new TransferError(
+        'integrity',
+        `no sender record for transfer ${msg.transferId}; the record was lost, so the ` +
+          'source cannot be verified — start a new transfer',
+      );
+    }
+    const record = await newSenderRecord(
+      manifest,
+      msg.reattachment ?? { kind: 'reselection' },
+      Date.now(),
+    );
+    await store.put(record);
+    return;
+  }
+  const refreshed = await refreshSenderRecord(prior.record, manifest, msg.reattachment, Date.now());
+  await store.put(refreshed);
 }

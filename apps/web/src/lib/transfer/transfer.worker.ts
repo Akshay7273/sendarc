@@ -13,6 +13,7 @@ import { runTransferCore } from './transfer-core.js';
 import { createSha256DigestFactory } from './digest.js';
 import { blobFileSource } from './file-source.js';
 import { createBrowserDestination } from './sink.js';
+import { senderRecordStoreWhenAvailable } from './sender-record.js';
 import type { DuplexPort, HostToWorker, WorkerToHost } from './wire.js';
 
 /** The slice of the worker global we touch, typed narrowly to avoid the DOM/WebWorker lib clash. */
@@ -32,6 +33,7 @@ const port: DuplexPort<HostToWorker, WorkerToHost> = {
 
 async function main(): Promise<void> {
   const createDigest = await createSha256DigestFactory();
+  const senderRecords = senderRecordStoreWhenAvailable();
   post({ kind: 'ready' });
   await runTransferCore(port, {
     createDigest,
@@ -40,6 +42,9 @@ async function main(): Promise<void> {
     },
     createDestination: (spec) => createBrowserDestination(spec, createDigest),
     fileSource: (file) => blobFileSource(file),
+    // Sender metadata (V13-PR04): degraded (no restart support) when IndexedDB is
+    // unavailable; any store failure still fails the send before the manifest frame.
+    ...(senderRecords ? { senderRecords } : {}),
   });
 }
 
