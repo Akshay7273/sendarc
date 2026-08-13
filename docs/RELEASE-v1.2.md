@@ -1,0 +1,26 @@
+# SendBeam v1.2 — release gate
+
+The v1.2 milestone (Connection Engine v2) gates release on the checks below, each verified
+against merged `main`. Evidence is a file:test or a measured number; all digests verified.
+
+## Gate checks
+
+| #   | Requirement                                                         | Result             | Evidence                                                                                                                                                                                                                                                                                                                      |
+| --- | ------------------------------------------------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | No blind fixed ~8s production selection dependency                  | pass               | `apps/cli/internal/transfer/adaptive.go` (policy), `apps/cli/internal/transfer/driver.go:selectTransport` races direct vs warmed relay with no fixed timer; browser twin `apps/web/src/lib/transfer/adaptive.ts`; tests `adaptive_test.go`, `adaptive.test.ts`. Lab: udp-blocked relay engages in ~5.2s, no fixed ~8s window. |
+| 2   | Restrictive-network fallback materially improves vs baseline        | pass (UDP-blocked) | NAT lab `-measure`: udp-blocked relay ~5.2s vs legacy blind ~8s baseline (~8.3s); healthy direct ~1.2s. Regression test pins default escalation < 8s (`TestAdaptiveDefaultEscalationFasterThanLegacyBlindTimer`, web `default escalation is faster...`). See `docs/compat-matrix.md`.                                         |
+| 3   | Healthy direct latency not regressed for relay cases                | pass               | `TestAdaptiveLateDirect` / web `late-direct` prove a server-reflexive-hinted direct is never preempted; lab direct time-to-active-path ~1.2s; `apps/cli/internal/rtc/peer_bench_test.go` (direct active-path/first-payload).                                                                                                  |
+| 4   | A tested interface/network change survives via recovery or fallback | pass               | V12-PR04 recovery under `-race`: `apps/cli/internal/rtc/peer_test.go` (ICE restart, recovery cycles, teardown), `driver_faults_test.go:TestDriverFallsBackOnFailedDirectRecovery`; web `recovery.test.ts`.                                                                                                                    |
+| 5   | Direct→relay migration preserves exact digest, no byte-zero restart | pass               | `packages/wire/transfer_cutover_test.go`, `transfer_sender_cutover_test.go`, `apps/cli/internal/transfer/driver_faults_test.go` (before/all-acked/mid cutover, all byte-identical), `driver_test.go` digest equality; web `transfer-core.test.ts`.                                                                            |
+| 6   | Browser and CLI use matching selection semantics                    | pass               | Mirrored `adaptive.go`/`adaptive.ts` (same decisions + defaults, now both 5s escalation), `recovery.ts`/`peer.go`, `generation.ts`/supervisor epoch; `adaptive_test.go`/`adaptive.test.ts` share scenario names.                                                                                                              |
+| 7   | Runtime ICE config works for self-hosting                           | pass               | `/config.json` (`apps/server/internal/httpserver/server.go`), `packages/wire/iceservers.go`+`icecache.go`; web `config.ts`; CLI `--ice-server`; tests `iceservers_test.go`, `config.test.ts`, `ice_test.go`.                                                                                                                  |
+| 8   | TURN is optional and does not weaken E2EE                           | pass               | ADR 0003 (`docs/adr/0003-path-selection.md`); TURN optional/short-lived, `no-cache`; frame sealing (AES-GCM) active on every candidate incl. TURN; relay sees only sealed bytes.                                                                                                                                              |
+| 9   | Direct/relay/cross-client/race/network gates all green              | pass               | CI (`.github/workflows/ci.yml`): web lint/typecheck/test/build, e2e chromium+firefox, Go `vet` + `test -race` per module, branding, docker. NAT-lab restricts run manually with `unshare -Urnm`.                                                                                                                              |
+
+## Scope notes
+
+- The NAT lab was fixed and measured for this gate: invite codes are printed on the sender's
+  stderr, and `natlab` now parses stderr (with a pinned unit test) and `-measure` reports
+  time-to-active-path (`pathMs`) per cycle.
+- Released as the release-tag trigger publishes the multi-arch image and CLI binaries
+  (`publish.yml`); tag `v1.2` is created from this merge.

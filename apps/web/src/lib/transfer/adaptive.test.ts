@@ -191,4 +191,9 @@ describe('AdaptivePolicy — direct/relay racing', () => {
       }),
     ).toBe('warm-relay');
   });
+
+  it('default escalation stays faster than the legacy ~8s blind timer', () => {
+    expect(DEFAULT_ESCALATION_MS).toBeGreaterThan(0);
+    expect(DEFAULT_ESCALATION_MS).toBeLessThan(8000);
+  });
 });

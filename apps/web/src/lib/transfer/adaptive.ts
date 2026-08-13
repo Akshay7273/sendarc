@@ -54,7 +54,7 @@ export interface AdaptivePolicyOptions {
 }
 
 /** Default escalation window for a stalled no-srflx direct attempt. */
-export const DEFAULT_ESCALATION_MS = 10_000;
+export const DEFAULT_ESCALATION_MS = 5_000;
 
 /**
  * Decides when to warm the relay based on ICE progress. It is a state machine driven by

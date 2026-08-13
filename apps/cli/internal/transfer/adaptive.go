@@ -86,7 +86,7 @@ type AdaptivePolicy struct {
 // a sane production default.
 func NewAdaptivePolicy(escalation time.Duration) *AdaptivePolicy {
 	if escalation <= 0 {
-		escalation = 10 * time.Second
+		escalation = 5 * time.Second
 	}
 	return &AdaptivePolicy{
 		startedAt:      time.Now(),
