@@ -1,11 +1,76 @@
-# CLI durable receive (v1.3 PR02)
+# Durable receive (v1.3 PR02/PR03)
+
+Receivers keep verified progress so a crash, cancellation, or reload does not force a
+large transfer to restart from zero. This page documents the storage layout, the
+durability ordering, finalization, the management surfaces, and the limits that are
+deliberately deferred to later v1.3 PRs. The durability contract itself is defined in
+[ADR 0004](adr/0004-durable-journal.md); this page describes the CLI (PR02) and browser
+(PR03) implementations of it.
+
+## Browser (v1.3 PR03)
+
+The web receiver is durable by default: the sender mints a `transferId` in the manifest
+(the wire protocol already supports it), and the browser receive destination journals
+verified progress against that id. Storage is split across the two origin-scoped
+backends:
+
+```
+OPFS:  sendbeam/durable/<transferId>/<rel>.part   # verified partial data
+IDB:   sendbeam-durable → journals, leases         # journal + lock/lease metadata
+```
+
+- **OPFS partials** mirror manifest paths under a per-transfer directory and always
+  carry the `.part` suffix, so partial data can never be mistaken for a finished file.
+  The final deliverable appears only after whole-transfer verification: a single-file
+  transfer serves the verified partial itself; multi-file transfers assemble a
+  store-only ZIP from the partials (the same ZIP writer as the archive fallback).
+- **The journal** lives in IndexedDB (`sendbeam-durable`), never localStorage and never
+  an OPFS JSON sidecar pretending to be transactional. Every checkpoint advance is one
+  atomic readwrite transaction over the journal plus lease stores, using the same
+  schema-v1 `DurableJournal` contract (checksum, fingerprint, block granularity) as the
+  CLI — decode fails closed on any deviation.
+- **Writer**: where sync access handles are supported (dedicated workers on
+  Chromium/Firefox) the transfer worker writes each verified block with a
+  `FileSystemSyncAccessHandle`, then flushes it, then advances the journal checkpoint in
+  the same ordering as the CLI (`write → flush → commit → ack`). Browsers without sync
+  access handles (Safari) fall back to async `createWritable` streams with an honest
+  granularity: the stream can only be flushed at close, so a file's checkpoint advances
+  only when its whole stream is closed — never block-by-block.
+- **Lock/lease**: an atomic IDB test-and-set lease (`transferId → ownerId, expiresAt`)
+  serializes concurrent tabs and survives reloads and worker death. A second tab that
+  joins the same transfer fails closed with guidance; a lease that outlives its TTL is
+  taken over deterministically (bounded stale recovery). The lease is renewed by every
+  checkpoint commit plus a bounded timer, released best-effort on pagehide, and released
+  on abort so a retry acquires immediately. A lost/foreign lease makes the next
+  checkpoint commit abort — two receivers can never both advance one journal.
+- **Keep/Discard**: an interrupted receive deliberately keeps the journal and partials at
+  their last durable checkpoint (they are the only resumable copy; never silently
+  deleted). The failure screen shows a small "partial data kept" block with an explicit
+  **Discard partial data** button; discard is idempotent and removes exactly that
+  transfer's journal, lease, and partials.
+- **Fail-closed loading**: on reload the receiver revalidates every journal claim against
+  the authenticated manifest (checksum, manifest fingerprint, destination identity,
+  checkpoint bounds) and cross-checks each partial against its checkpoint — corrupt,
+  torn, tampered, foreign, mismatched, missing, or truncated state fails the receive
+  closed with guidance and deletes nothing. Quota is preflighted via
+  `navigator.storage.estimate()` and write-time exhaustion maps to the `quota` failure.
+- **Destinations**: `auto` downloads are reload-durable. The direct-file and
+  direct-directory picker modes are capability-gated and are **not** reload-durable:
+  their persistence/reopen semantics (a user-selected handle) do not satisfy the
+  contract, and the UI never claims otherwise.
+- **Resume**: same-session recovery. The sender stays in the room; the receiver re-joins
+  with the same code, re-hashes the persisted prefix per file (correctness-first;
+  digest-state checkpointing is V13-PR05), reports per-file high-water marks, and
+  streams only the missing blocks. Handshakes always derive fresh traffic keys.
+- **Secrets**: the journal never persists invite codes, the session master key,
+  directional traffic keys, or live AEAD counters.
+
+## CLI (v1.3 PR02)
 
 The CLI receiver keeps verified progress on disk so a crash, cancellation, or process
-restart does not force a large transfer to restart from zero. This page documents the
-storage layout, the durability ordering, finalization, the management commands, and the
-limits that are deliberately deferred to later v1.3 PRs. The durability contract itself
-is defined in [ADR 0004](adr/0004-durable-journal.md); this page describes the CLI
-implementation of it.
+restart does not force a large transfer to restart from zero. Everything lives under a
+hidden `.sendbeam` directory inside the receive out directory (the `--out` argument,
+default `.`):
 
 ## Storage layout
 
@@ -135,4 +200,3 @@ sendbeam transfers discard  <id>... [--out DIR] [--all] [--yes]
 - Resume validation against authenticated peer identity (beyond the manifest fingerprint
   and destination location) is PR06/PR07.
 - Digest-state checkpointing (avoid re-hashing the persisted prefix on resume) is PR05.
-- Browser (OPFS) durable receive is PR03.
