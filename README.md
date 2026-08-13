@@ -2,11 +2,14 @@
 
 **Encrypted peer-to-peer file transfer for the browser and the terminal. No accounts, no uploads, no server-side storage.**
 
+**[Try SendBeam live →](https://omnitrix.space)** — a hosted instance of the same
+open-source application, ready in your browser without installing anything.
+
 [![CI](https://github.com/Akshay7273/sendbeam/actions/workflows/ci.yml/badge.svg)](https://github.com/Akshay7273/sendbeam/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Akshay7273/sendbeam/blob/main/LICENSE)
 [![Image](https://img.shields.io/badge/image-ghcr.io%2Fakshay7273%2Fsendbeam-blue.svg)](https://github.com/Akshay7273/sendbeam/pkgs/container/sendbeam)
 
-[Quick start](#quick-start) · [CLI](#cli) · [Self-hosting](#self-hosting) · [Security](#security) · [Documentation](#documentation) · [Development](#development)
+[Live demo](https://omnitrix.space) · [Quick start](#quick-start) · [CLI](#cli) · [Self-hosting](#self-hosting) · [Security](#security) · [Documentation](#documentation) · [Development](#development)
 
 ## About
 
@@ -25,16 +28,20 @@ The design is documented in the [protocol specification](docs/protocol.md) and t
 
 ## Quick start
 
-The easiest way to try SendBeam is the public container image — no toolchain required:
+**Try it live.** Open [https://omnitrix.space](https://omnitrix.space) in two browser tabs,
+create a room, and share the link (or the short code) with the receiver — no account, no
+install, no configuration.
+
+**Run it yourself.** The public container image is the fastest self-hosted path, with no
+toolchain required:
 
 ```bash
 docker run -d --name sendbeam -p 8443:8443 ghcr.io/akshay7273/sendbeam
 ```
 
-Open `http://localhost:8443` in two browser tabs, create a room, and share the link (or
-the short code) with the receiver. No account, no install, no configuration. Files stream
-with bounded memory — size is not a limit — and the receiver can verify the final SHA-256
-against `sha256sum`.
+Then open `http://localhost:8443` and follow the same flow. Files stream with bounded
+memory — size is not a limit — and the receiver can verify the final SHA-256 against
+`sha256sum`.
 
 ## Browser
 
@@ -99,7 +106,7 @@ Full analysis, accepted limitations, and the trust boundary are in the
 [docs/test-vectors/](docs/test-vectors/), and dependency audits run in CI.
 
 > [!NOTE]
-> SendBeam is stable open-source software (v1.0). It has not had an independent
+> SendBeam is stable open-source software (v1.2). It has not had an independent
 > security audit; review the [threat model](docs/threat-model.md) before using it
 > for irreplaceable or highly sensitive data.
 
