@@ -194,7 +194,7 @@ func (r *Receiver) Cancel(reason string) error {
 
 func (r *Receiver) process(frame []byte) error {
 	if r.isSettled() {
-		return nil
+		return r.replyDoneAfterCutover(frame)
 	}
 	opened, err := OpenSequenced(r.o.RecvDir, r.recvCounter, frame)
 	if err != nil {
@@ -537,6 +537,33 @@ func (r *Receiver) onPeerFail(payload []byte) error {
 	}
 	r.abortWith(NewTransferError(fail.Reason, "sender failed: "+string(fail.Reason)), false)
 	return nil
+}
+
+// settledOK reports whether the receiver already settled successfully (err is nil).
+func (r *Receiver) settledOK() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.settled && r.err == nil
+}
+
+// replyDoneAfterCutover handles a frame that arrives after the receiver has already settled.
+// A direct→relay cutover can lose the receiver's one-shot Done after it settled; the sender
+// then retransmits Complete on the new path and must get a fresh Done, or it stalls waiting
+// for Done until it times out. A settled receiver ignores everything else — it has no more
+// work to do and no longer validates data.
+func (r *Receiver) replyDoneAfterCutover(frame []byte) error {
+	if !r.settledOK() {
+		return nil
+	}
+	opened, err := OpenSequenced(r.o.RecvDir, r.recvCounter, frame)
+	if err != nil {
+		return nil
+	}
+	if opened.Header.Type != FrameComplete {
+		return nil
+	}
+	r.recvCounter = opened.Counter + 1
+	return r.sendControl(NewDone())
 }
 
 func (r *Receiver) onComplete(payload []byte) error {

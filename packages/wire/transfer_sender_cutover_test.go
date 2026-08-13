@@ -109,3 +109,105 @@ func TestSenderRetransmitsCompleteOnCutover(t *testing.T) {
 		t.Fatal("receiver did not produce a digest")
 	}
 }
+
+// TestReceiverResendsDoneOnCutover pins the terminal settlement in the opposite
+// direction from TestSenderRetransmitsCompleteOnCutover: the receiver settles and sends
+// its one-shot Done, but that Done is lost — the exact loss a direct→relay cutover can
+// cause right after every block is acknowledged. The receiver is already settled, so it
+// would never process the sender's retransmitted Complete and never re-send Done, leaving
+// the sender pinning in waitDone until its DoneTimeout.
+//
+// The harness drops the receiver's first Done, then simulates the cutover by calling
+// TransportChanged once the sender has attempted Complete. The settled receiver must
+// re-answer the retransmitted Complete with a fresh Done so the sender settles.
+func TestReceiverResendsDoneOnCutover(t *testing.T) {
+	data := testData(64_000, 7)
+	keys, err := DeriveTransferKeys(loopbackMaster())
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := newFaultLink(faultScript{}.at(dirR2S, FrameDone, fDrop), nil)
+	doneTimeout := 2 * time.Second // keep the no-fix failure fast
+	sink := &MemorySink{}
+
+	sender := NewSender(SenderOptions{
+		File:        BytesSource(data, FileMeta{Name: "f", Size: int64(len(data)), Mime: "application/octet-stream", LastModified: 1}, 0),
+		Send:        func(f []byte) error { return link.send(dirS2R, f) },
+		SendDir:     keys.O2J,
+		RecvDir:     keys.J2O,
+		BlockSize:   1024,
+		FrameSize:   256,
+		Window:      4,
+		AckTimeout:  250 * time.Millisecond,
+		MaxRetries:  5,
+		DoneTimeout: doneTimeout,
+	})
+	receiver := NewReceiver(ReceiverOptions{
+		Send:    func(f []byte) error { return link.send(dirR2S, f) },
+		SendDir: keys.J2O,
+		RecvDir: keys.O2J,
+		Sink:    sink,
+	})
+
+	go func() {
+		for {
+			if link.isClosed() {
+				return
+			}
+			f, ok := <-link.s2r
+			if !ok {
+				return
+			}
+			receiver.Handle(f)
+		}
+	}()
+	go func() {
+		for {
+			if link.isClosed() {
+				return
+			}
+			f, ok := <-link.r2s
+			if !ok {
+				return
+			}
+			sender.Handle(f)
+		}
+	}()
+
+	// Once the receiver has settled and sent (a now-lost) Done, simulate the cutover by
+	// telling the sender the path changed: it retransmits Complete, and the settled
+	// receiver must answer with a fresh Done.
+	go func() {
+		for !link.doneSeen() && !link.isClosed() {
+			time.Sleep(2 * time.Millisecond)
+		}
+		sender.TransportChanged()
+	}()
+
+	runCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	runErrCh := make(chan error, 1)
+	go func() {
+		_, e := sender.Run(runCtx)
+		runErrCh <- e
+	}()
+	recvRes, recvErr := receiver.Wait(runCtx)
+	var runErr error
+	select {
+	case runErr = <-runErrCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("sender.Run did not return; re-sent Done missing")
+	}
+	if runErr != nil {
+		t.Fatalf("sender: %v", runErr)
+	}
+	if recvErr != nil {
+		t.Fatalf("receiver: %v", recvErr)
+	}
+	if string(sink.Bytes()) != string(data) {
+		t.Fatal("received bytes differ from source after cutover Done recovery")
+	}
+	if recvRes.Digest == "" {
+		t.Fatal("receiver did not produce a digest")
+	}
+}

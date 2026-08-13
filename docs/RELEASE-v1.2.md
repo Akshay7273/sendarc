@@ -22,5 +22,10 @@ against merged `main`. Evidence is a file:test or a measured number; all digests
 - The NAT lab was fixed and measured for this gate: invite codes are printed on the sender's
   stderr, and `natlab` now parses stderr (with a pinned unit test) and `-measure` reports
   time-to-active-path (`pathMs`) per cycle.
+- Terminal settlement was hardened for cutover (Req 5): a settled receiver now re-answers a
+  retransmitted `Complete` with a fresh `Done` (it previously ignored it, stalling the
+  sender), and the sender retransmits `Complete` on an interval while awaiting `Done`, so a
+  `Complete`/`Done` exchange lost in a direct→relay cutover converges instead of timing out.
+  Go + TS regression tests drop the receiver's `Done` mid-cutover and pin recovery.
 - Released as the release-tag trigger publishes the multi-arch image and CLI binaries
   (`publish.yml`); tag `v1.2` is created from this merge.

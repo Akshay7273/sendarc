@@ -113,6 +113,7 @@ export class TransferReceiver {
   private inbound: Promise<void> = Promise.resolve();
   private outbound: Promise<void> = Promise.resolve();
   private settled = false;
+  private resolved = false;
 
   constructor(opts: TransferReceiverOptions) {
     this.o = opts;
@@ -187,7 +188,9 @@ export class TransferReceiver {
   }
 
   private async process(frame: Uint8Array): Promise<void> {
-    if (this.settled) return;
+    if (this.settled) {
+      return this.replyDoneAfterCutover(frame);
+    }
     let opened;
     try {
       opened = await openSequenced(this.o.recvDir, this.recvCounter, frame);
@@ -524,6 +527,7 @@ export class TransferReceiver {
     }
     await this.sendControl(FrameType.Done, { type: FrameType.Done });
     this.settled = true;
+    this.resolved = true;
     this.resolveDone({
       files: manifest.files,
       digests: [...this.digests],
@@ -531,6 +535,25 @@ export class TransferReceiver {
       file: manifest.files[0]!,
       digest: got,
     });
+  }
+
+  /**
+   * Handle a frame that arrives after the receiver has already settled. A direct→relay
+   * cutover can lose the receiver's one-shot Done after it settled; the sender then
+   * retransmits Complete on the new path and must get a fresh Done, or it stalls waiting
+   * for Done until it times out. A settled receiver ignores everything else.
+   */
+  private async replyDoneAfterCutover(frame: Uint8Array): Promise<void> {
+    if (!this.resolved) return;
+    let opened;
+    try {
+      opened = await openSequenced(this.o.recvDir, this.recvCounter, frame);
+    } catch {
+      return;
+    }
+    if (opened.header.type !== FrameType.Complete) return;
+    this.recvCounter = opened.counter + 1;
+    await this.sendControl(FrameType.Done, { type: FrameType.Done });
   }
 
   private async abortWith(

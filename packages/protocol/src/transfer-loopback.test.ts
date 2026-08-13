@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
 import { deriveTransferKeys } from './keyschedule.js';
 import { bytesSource, MemorySink, type Destination, type Digest } from './transfer-ports.js';
+import { FrameType } from './transfer.js';
 import type { FileEntry, Manifest } from './transfer.js';
 import { TransferSender } from './transfer-sender.js';
 import { TransferReceiver } from './transfer-receiver.js';
@@ -98,6 +99,68 @@ describe('transfer loopback (no browser)', () => {
     });
     expect(result.some((r) => r.status === 'rejected')).toBe(true);
     expect(sink.isClosed).toBe(false);
+  });
+
+  it('re-sends Done when a cutover drops it after the receiver settled', async () => {
+    // The receiver settles and sends its one-shot Done, but that Done is lost — the exact
+    // loss a direct→relay cutover can cause right after every block is acknowledged. The
+    // sender retransmits Complete on the new path; a settled receiver must re-answer with
+    // a fresh Done or the sender stalls waiting for it.
+    const keys = await deriveTransferKeys(master);
+    const data = new Uint8Array(64_000).map((_, i) => (i * 131 + 7) & 0xff);
+    const sink = new MemorySink();
+
+    const box: { receiver?: TransferReceiver } = {};
+    let didCutover = false;
+    let doneDropped = false;
+    const sender = new TransferSender({
+      file: bytesSource(data, {
+        name: 'f',
+        size: data.length,
+        mime: 'application/octet-stream',
+        lastModified: 1,
+      }),
+      send: (frame) => queueMicrotask(() => box.receiver!.handle(frame)),
+      sendDir: keys.o2j,
+      recvDir: keys.j2o,
+      sendCounterStart: 0,
+      recvCounterStart: 0,
+      createDigest: nodeDigest,
+      blockSize: 1024,
+      frameSize: 256,
+      window: 4,
+      doneTimeoutMs: 2000, // keep the no-fix failure fast
+    });
+    const receiver = new TransferReceiver({
+      send: (frame) => {
+        queueMicrotask(() => {
+          // Drop the receiver's first Done (type byte at sealed offset 9), then simulate
+          // the sender's path change so it retransmits Complete.
+          if (!doneDropped && frame[9] === FrameType.Done) {
+            doneDropped = true;
+            if (!didCutover) {
+              didCutover = true;
+              sender.transportChanged();
+            }
+            return;
+          }
+          sender.handle(frame);
+        });
+      },
+      sendDir: keys.j2o,
+      recvDir: keys.o2j,
+      sendCounterStart: 0,
+      recvCounterStart: 0,
+      createDigest: nodeDigest,
+      sink,
+    });
+    box.receiver = receiver;
+
+    const [digest, result] = await Promise.all([sender.run(), receiver.done]);
+    expect(doneDropped).toBe(true);
+    expect([...sink.bytes()]).toEqual([...data]);
+    expect(result.digest).toBe(createHash('sha256').update(data).digest('hex'));
+    expect(digest).toBe(result.digest);
   });
 
   it('streams a nested multi-file set with empty files and aggregate progress', async () => {

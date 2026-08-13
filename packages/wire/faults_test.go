@@ -183,6 +183,14 @@ func (l *faultLink) completeSeen() bool {
 	return l.counts[dirS2R][FrameComplete] > 0
 }
 
+// doneSeen reports whether the receiver has transmitted at least one FrameDone on
+// the r2s path (dropped or not).
+func (l *faultLink) doneSeen() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.counts[dirR2S][FrameDone] > 0
+}
+
 // randomAction draws a fault from a fixed probability table so seeds stay
 // comparable across runs.
 func (l *faultLink) randomAction(_ int, typ uint8) faultAction {
