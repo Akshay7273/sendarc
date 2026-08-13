@@ -56,7 +56,7 @@
   let rateBps = $state(0);
   let etaSeconds = $state<number | undefined>(undefined);
   let transferState = $state<'running' | 'paused' | 'canceled'>('running');
-  let transportPath = $state<'connecting' | 'direct' | 'relay'>('connecting');
+  let transportPath = $state<'connecting' | 'direct' | 'recovering' | 'relay'>('connecting');
   let outcome = $state<TransferOutcome | null>(null);
   let downloadUrl = $state<string | null>(null);
 
@@ -522,7 +522,9 @@
                   ? 'Encrypted relay'
                   : transportPath === 'direct'
                     ? 'Direct P2P'
-                    : 'Connecting…'}
+                    : transportPath === 'recovering'
+                      ? 'Recovering connection…'
+                      : 'Connecting…'}
               </span>
             </div>
           </div>

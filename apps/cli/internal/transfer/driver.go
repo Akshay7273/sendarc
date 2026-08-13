@@ -29,6 +29,13 @@ type Signal interface {
 	Close()
 }
 
+// ReconnectSetter is implemented by signals that can re-attach to the signaling room after a
+// post-establishment drop (e.g. wsclient.ReconnectingSignal), so the driver can arm them with
+// the room and role once the handshake settles.
+type ReconnectSetter interface {
+	SetResume(room int, role string)
+}
+
 // Controls is the live transfer surface exposed to terminal frontends.
 type Controls interface {
 	Pause() error
@@ -69,6 +76,9 @@ type Spec struct {
 	OnStateChange func(wire.TransferState)
 	// breakDirect is a deterministic in-package integration hook.
 	breakDirect <-chan struct{}
+	// breakDirectRecovery simulates the peer's recovery-failure hook firing (direct recovery
+	// failed) so the driver falls back to the relay. Test-only.
+	breakDirectRecovery <-chan struct{}
 }
 
 // Outcome is the result of a completed transfer.
@@ -119,6 +129,12 @@ type driver struct {
 	// starts is not lost).
 	pol        *AdaptivePolicy
 	warmSignal chan struct{}
+
+	// adaptive is the direct→relay cutover connection once selected (set in run()); the peer's
+	// recovery-failure hook uses it to fall back to the relay. recovering reports the transient
+	// ICE-disconnect recovery window for the terminal's OnTransport status. Both are guarded by mu.
+	adaptive   *adaptiveConn
+	recovering bool
 }
 
 // Send implements rendezvous.Sink for the handshake session and doubles as the peer's send
@@ -192,6 +208,9 @@ func (d *driver) run(ctx context.Context) (*Outcome, error) {
 	if path == "direct" {
 		sv = supervisor.New()
 		adaptive = newAdaptiveConn(conn.(*rtc.DataConn), d.relay, d.spec.OnTransport, sv)
+		d.mu.Lock()
+		d.adaptive = adaptive
+		d.mu.Unlock()
 		_ = sv.Register(supervisor.PathDirect, conn.(*rtc.DataConn))
 		_ = sv.Warming(supervisor.PathDirect)
 		_ = sv.Ready(supervisor.PathDirect)
@@ -203,6 +222,20 @@ func (d *driver) run(ctx context.Context) (*Outcome, error) {
 				select {
 				case <-d.spec.breakDirect:
 					_ = peer.Close()
+				case <-ctx.Done():
+				}
+			}()
+		}
+		if d.spec.breakDirectRecovery != nil {
+			go func() {
+				select {
+				case <-d.spec.breakDirectRecovery:
+					d.mu.Lock()
+					ad := d.adaptive
+					d.mu.Unlock()
+					if ad != nil {
+						ad.FallbackToRelay()
+					}
 				case <-ctx.Done():
 				}
 			}()
@@ -415,6 +448,15 @@ func (d *driver) route(m rendezvous.Message) {
 					}
 				}
 			},
+			OnRecovering: func(rec bool) { d.reportRecovering(rec) },
+			OnRecoverFailed: func() {
+				d.mu.Lock()
+				ad := d.adaptive
+				d.mu.Unlock()
+				if ad != nil {
+					ad.FallbackToRelay()
+				}
+			},
 		})
 		if perr != nil {
 			d.sig.Close()
@@ -422,6 +464,11 @@ func (d *driver) route(m rendezvous.Message) {
 		}
 	}
 	d.res = res
+	// Arm a reconnect-capable signal with the room/role once the handshake settles, so a later
+	// signaling drop can re-attach to the room (V12-PR04 signaling recovery).
+	if rs, ok := d.sig.(ReconnectSetter); ok {
+		rs.SetResume(res.Room, string(res.Role))
+	}
 	d.relay = relaytransport.New(d)
 	d.peer = peer
 	d.peerCh <- peer
@@ -430,6 +477,32 @@ func (d *driver) route(m rendezvous.Message) {
 func (d *driver) routeBinary(frame []byte) {
 	if d.relay != nil {
 		d.relay.HandleBinary(frame)
+	}
+}
+
+// reportRecovering exposes the direct path's transient ICE-disconnect recovery window as a
+// distinct transport status ("recovering"), and returns to "direct" once the path recovers.
+// A recovery that never returns to connected transfers to the relay via the fallback hook, so
+// reporting "direct" here only fires while the byte path is still direct.
+func (d *driver) reportRecovering(rec bool) {
+	if rec {
+		d.mu.Lock()
+		d.recovering = true
+		d.mu.Unlock()
+		if d.spec.OnTransport != nil {
+			d.spec.OnTransport("recovering")
+		}
+		return
+	}
+	d.mu.Lock()
+	d.recovering = false
+	ad := d.adaptive
+	d.mu.Unlock()
+	if ad == nil || ad.IsRelay() {
+		return
+	}
+	if d.spec.OnTransport != nil {
+		d.spec.OnTransport("direct")
 	}
 }
 
