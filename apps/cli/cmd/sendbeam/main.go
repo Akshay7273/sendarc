@@ -245,12 +245,13 @@ func runReceive(args []string) int {
 	return 0
 }
 
-// dial opens the signaling socket, reporting the server it is contacting. The transfer
-// driver adopts the returned client for the whole exchange and closes it when done.
-func dial(ctx context.Context, server string, insecure bool) (*wsclient.Client, error) {
+// dial opens the signaling socket, reporting the server it is contacting. It returns a
+// reconnecting signal so a post-establishment socket drop can re-attach to the room when the
+// transfer is healthy; the driver adopts it for the whole exchange and closes it when done.
+func dial(ctx context.Context, server string, insecure bool) (*wsclient.ReconnectingSignal, error) {
 	s := newStyle(os.Stderr)
 	fmt.Fprintln(os.Stderr, s.dim("Connecting to "+server+" …"))
-	return wsclient.Dial(ctx, server, wsclient.DialOptions{InsecureSkipVerify: insecure})
+	return wsclient.NewReconnectingSignal(ctx, server, wsclient.DialOptions{InsecureSkipVerify: insecure})
 }
 
 // parseArgs parses flags that may appear before or after positional arguments. Go's flag
@@ -311,9 +312,12 @@ func connectPrinter(line string) func() {
 
 func transportPrinter(path string) {
 	s := newStyle(os.Stderr)
-	if path == "relay" {
+	switch path {
+	case "relay":
 		fmt.Fprintln(os.Stderr, s.dim("Transport: encrypted WebSocket relay"))
-	} else {
+	case "recovering":
+		fmt.Fprintln(os.Stderr, s.cyan("Transport: recovering connection…"))
+	default:
 		fmt.Fprintln(os.Stderr, s.dim("Transport: direct WebRTC"))
 	}
 }

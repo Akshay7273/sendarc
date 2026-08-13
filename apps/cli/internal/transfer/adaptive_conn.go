@@ -165,6 +165,11 @@ func (c *adaptiveConn) requestRelay() {
 	}
 }
 
+// FallbackToRelay starts the encrypted-relay fallback in response to a failed direct recovery.
+// It is idempotent: a path already on the relay (or already switching) is a no-op. Called from
+// the peer's recovery-failure hook without resetting transfer progress.
+func (c *adaptiveConn) FallbackToRelay() { c.requestRelay() }
+
 func (c *adaptiveConn) activateRelay() {
 	c.mu.Lock()
 	if c.closed || c.path == "relay" || c.switchErr != nil {

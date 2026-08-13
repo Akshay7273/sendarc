@@ -40,7 +40,22 @@ type PeerOptions struct {
 	// OnICEState, if set, is invoked as ICE gathering/connection state transitions occur.
 	// Useful for diagnostics and adaptive selection; see Peer.Diagnostics.
 	OnICEState func(ICEState)
+	// OnRecovering, if set, is invoked with true when an established direct path enters the
+	// transient-disconnected recovery window (an ICE restart is under way) and false when it
+	// recovers back to connected. Used to expose a distinct "recovering connection" state.
+	OnRecovering func(recovering bool)
+	// OnRecoverFailed, if set, is invoked when the recovery window elapses (or the ICE restart
+	// fails) without returning to connected, meaning the direct path is gone and the caller
+	// should fall back to the relay without resetting transfer progress.
+	OnRecoverFailed func()
+	// RecoverWindow bounds how long the peer observes a transient disconnect before giving up
+	// and failing recovery. Zero uses the production default.
+	RecoverWindow time.Duration
 }
+
+// DefaultRecoverWindow is the default bound for observing a transient ICE disconnect before the
+// direct path is declared unrecoverable and the caller falls back to the relay.
+const DefaultRecoverWindow = 6 * time.Second
 
 // ICEState is a snapshot of ICE gathering/connection telemetry for one peer.
 type ICEState struct {
@@ -67,7 +82,10 @@ type Peer struct {
 	connCh chan *DataConn // buffered(1): the channel once open
 	errCh  chan error     // buffered(1): first fatal negotiation error
 
-	onICEState func(ICEState)
+	onICEState     func(ICEState)
+	onRecovering   func(recovering bool)
+	onRecoverFailed func()
+	recoverWindow  time.Duration
 
 	// telemetry holds ICE setup instrumentation. It is guarded by mu and is safe to read once
 	// the peer settles.
@@ -75,8 +93,14 @@ type Peer struct {
 
 	mu          sync.Mutex
 	settled     bool
+	closed      bool
 	remoteReady bool
 	pendingICE  []webrtc.ICECandidateInit
+
+	// recovering is true while an established direct path is in the transient-disconnect
+	// recovery window. recoverTimer bounds that window. Both are guarded by mu.
+	recovering   bool
+	recoverTimer *time.Timer
 }
 
 // telemetry records ICE gathering/connection history and setup timing for Diagnostics.
@@ -112,9 +136,20 @@ func NewPeer(opts PeerOptions) (*Peer, error) {
 	if iceServers == nil {
 		iceServers = DefaultICEServers
 	}
-	newPC := webrtc.NewPeerConnection
+	recoverWindow := opts.RecoverWindow
+	if recoverWindow <= 0 {
+		recoverWindow = DefaultRecoverWindow
+	}
+	var newPC func(webrtc.Configuration) (*webrtc.PeerConnection, error)
 	if opts.API != nil {
 		newPC = opts.API.NewPeerConnection
+	} else {
+		// Observe a transient disconnect promptly and bound the failed state so recovery (or
+		// fallback) is decided within a controlled window rather than Pion's long defaults.
+		s := webrtc.SettingEngine{}
+		s.SetICETimeouts(3*time.Second, 8*time.Second, 2*time.Second)
+		api := webrtc.NewAPI(webrtc.WithSettingEngine(s))
+		newPC = api.NewPeerConnection
 	}
 	pc, err := newPC(webrtc.Configuration{ICEServers: iceServers})
 	if err != nil {
@@ -122,13 +157,16 @@ func NewPeer(opts PeerOptions) (*Peer, error) {
 	}
 
 	p := &Peer{
-		pc:         pc,
-		role:       opts.Role,
-		auth:       opts.Auth,
-		send:       opts.Send,
-		connCh:     make(chan *DataConn, 1),
-		errCh:      make(chan error, 1),
-		onICEState: opts.OnICEState,
+		pc:             pc,
+		role:           opts.Role,
+		auth:           opts.Auth,
+		send:           opts.Send,
+		connCh:         make(chan *DataConn, 1),
+		errCh:          make(chan error, 1),
+		onICEState:     opts.OnICEState,
+		onRecovering:   opts.OnRecovering,
+		onRecoverFailed: opts.OnRecoverFailed,
+		recoverWindow:  recoverWindow,
 		telemetry: telemetry{
 			StartAt:    time.Now(),
 			Gathering:  []webrtc.ICEGatheringState{pc.ICEGatheringState()},
@@ -184,10 +222,23 @@ func NewPeer(opts PeerOptions) (*Peer, error) {
 		p.mu.Lock()
 		p.telemetry.Connection = append(p.telemetry.Connection, s)
 		now := p.snapshotLocked()
-		cb := p.onICEState
+		settled := p.settled
 		p.mu.Unlock()
-		if cb != nil {
-			cb(now)
+		if p.onICEState != nil {
+			p.onICEState(now)
+		}
+		// Recovery applies only to an established direct path (the channel already opened).
+		// Before settlement, disconnected/failed continue to fail the peer outright.
+		if !settled {
+			return
+		}
+		switch s {
+		case webrtc.ICEConnectionStateDisconnected:
+			p.enterRecover()
+		case webrtc.ICEConnectionStateConnected, webrtc.ICEConnectionStateCompleted:
+			p.exitRecover()
+		case webrtc.ICEConnectionStateFailed:
+			p.failRecover()
 		}
 	})
 
@@ -234,6 +285,11 @@ func (p *Peer) Accept(msg rendezvous.Message) {
 func (p *Peer) Close() error {
 	p.mu.Lock()
 	p.settled = true
+	p.closed = true
+	if p.recoverTimer != nil {
+		p.recoverTimer.Stop()
+		p.recoverTimer = nil
+	}
 	p.mu.Unlock()
 	return p.pc.Close()
 }
@@ -353,6 +409,103 @@ func (p *Peer) snapshotLocked() ICEState {
 		c = p.telemetry.Connection[len(p.telemetry.Connection)-1]
 	}
 	return ICEState{Gathering: g, Connection: c, HasServerReflexive: p.telemetry.anyViableCandidate, HasAnyCandidate: p.telemetry.anyCandidate}
+}
+
+// Recovering reports whether the established direct path is currently in the
+// transient-disconnect recovery window.
+func (p *Peer) Recovering() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.recovering
+}
+
+// enterRecover starts recovery for an established direct path that has gone transiently
+// disconnected: it reports the recovering state, has the offerer issue an ICE restart over
+// signaling, and bounds the observation window so a path that cannot return to connected fails
+// over to the relay rather than stalling forever.
+func (p *Peer) enterRecover() {
+	p.mu.Lock()
+	if p.closed || p.recovering {
+		p.mu.Unlock()
+		return
+	}
+	p.recovering = true
+	restart := p.role == wire.RoleOfferer
+	onRecovering := p.onRecovering
+	p.mu.Unlock()
+
+	if onRecovering != nil {
+		onRecovering(true)
+	}
+	if restart {
+		if err := p.restartOffer(); err != nil {
+			p.failRecover()
+			return
+		}
+	}
+	p.mu.Lock()
+	if p.closed || p.recoverTimer != nil {
+		p.mu.Unlock()
+		return
+	}
+	p.recoverTimer = time.AfterFunc(p.recoverWindow, func() { p.failRecover() })
+	p.mu.Unlock()
+}
+
+// restartOffer performs an ICE restart as the offerer: a new offer with ICERestart set, sent
+// over signaling so the partner answers and both sides re-establish the ICE transport while the
+// existing data channel (and therefore the transfer progress) stays alive.
+func (p *Peer) restartOffer() error {
+	offer, err := p.pc.CreateOffer(&webrtc.OfferOptions{ICERestart: true})
+	if err != nil {
+		return fmt.Errorf("rtc: create restart offer: %w", err)
+	}
+	if err := p.pc.SetLocalDescription(offer); err != nil {
+		return fmt.Errorf("rtc: set restart offer: %w", err)
+	}
+	return p.send(p.auth.SignSDP(offer.SDP))
+}
+
+// exitRecover clears the recovery state once the path returns to connected. Idempotent.
+func (p *Peer) exitRecover() {
+	p.mu.Lock()
+	if !p.recovering {
+		p.mu.Unlock()
+		return
+	}
+	p.recovering = false
+	if p.recoverTimer != nil {
+		p.recoverTimer.Stop()
+		p.recoverTimer = nil
+	}
+	onRecovering := p.onRecovering
+	p.mu.Unlock()
+	if onRecovering != nil {
+		onRecovering(false)
+	}
+}
+
+// failRecover gives up on the direct path after the observation window elapsed (or the ICE
+// restart failed) without returning to connected: it reports recovery failure and closes the
+// PeerConnection so the DataConn teardown notifies the active-path failure and the caller falls
+// back to the relay. Idempotent and safe to call from the timer and ICE callbacks.
+func (p *Peer) failRecover() {
+	p.mu.Lock()
+	if p.closed || !p.recovering {
+		p.mu.Unlock()
+		return
+	}
+	p.recovering = false
+	if p.recoverTimer != nil {
+		p.recoverTimer.Stop()
+		p.recoverTimer = nil
+	}
+	onRecoverFailed := p.onRecoverFailed
+	p.mu.Unlock()
+	if onRecoverFailed != nil {
+		onRecoverFailed()
+	}
+	_ = p.pc.Close()
 }
 
 // Diagnostics returns a sanitized snapshot of the peer's ICE setup for telemetry. It never

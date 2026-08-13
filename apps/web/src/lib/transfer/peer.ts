@@ -10,6 +10,7 @@
 
 import type { IceMsg, Role, SdpMsg } from '@sendbeam/protocol';
 import type { SignalAuthenticator } from './authed-signaling.js';
+import { RecoveryController } from './recovery.js';
 
 /** A public STUN server is sufficient for the common NAT case. */
 export const DEFAULT_ICE_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
@@ -25,7 +26,27 @@ export interface CreatePeerOptions {
    * and adaptive selection.
    */
   onIceState?: (state: ICEState) => void;
+  /**
+   * Invoked with true when an established direct path enters the transient-disconnected
+   * recovery window (an ICE restart is under way) and false once it recovers to connected.
+   * Used to expose a distinct "recovering connection" state.
+   */
+  onRecovering?: (recovering: boolean) => void;
+  /**
+   * Invoked when the recovery window elapses (or the ICE restart fails) without returning to
+   * connected: the direct path is gone and the caller should fall back to the relay without
+   * restarting transfer progress.
+   */
+  onRecoverFailed?: () => void;
+  /**
+   * Bounds the observation of a transient disconnect before recovery is declared failed.
+   * Zero uses {@link DEFAULT_RECOVER_WINDOW_MS}.
+   */
+  recoverWindowMs?: number;
 }
+
+/** Default bound for observing a transient ICE disconnect before recovery fails over. */
+export const DEFAULT_RECOVER_WINDOW_MS = 6_000;
 
 /** A sanitized snapshot of a peer's ICE setup for diagnostics. */
 export interface PeerDiagnostics {
@@ -66,7 +87,6 @@ export interface Peer {
   /** Tear down the peer connection. Idempotent. */
   close(): void;
 }
-
 export function createPeer(opts: CreatePeerOptions): Peer {
   const pc = new RTCPeerConnection({ iceServers: opts.iceServers ?? DEFAULT_ICE_SERVERS });
 
@@ -101,6 +121,22 @@ export function createPeer(opts: CreatePeerOptions): Peer {
   let closedByUser = false;
   let disconnectHandler: ((err: Error) => void) | undefined;
   let disconnectError: Error | undefined;
+
+  // Recovery from a transient disconnect on an established direct path. The RecoveryController
+  // owns the bounded observation window and the start/clear/fail state machine (see recovery.ts).
+  const recovery = new RecoveryController({
+    windowMs: opts.recoverWindowMs ?? DEFAULT_RECOVER_WINDOW_MS,
+    callbacks: {
+      onStart: () => opts.onRecovering?.(true),
+      onRecover: () => opts.onRecovering?.(false),
+      onFail: onRecoverFail,
+    },
+  });
+  // onRecoverFail is referenced above ahead of its definition (the callback fires only later).
+  function onRecoverFail(): void {
+    opts.onRecoverFailed?.();
+    disconnected(new Error('direct recovery failed'));
+  }
 
   // Remote ICE can arrive before the remote description is set (network reorder, or the peer
   // trickling early). Buffer such candidates and flush them once the description lands.
@@ -162,10 +198,17 @@ export function createPeer(opts: CreatePeerOptions): Peer {
   };
   pc.oniceconnectionstatechange = () => {
     connectionStates.push(pc.iceConnectionState);
-    if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+    const state = pc.iceConnectionState;
+    if (state === 'connected' || state === 'completed') {
       void captureSelectedPairType();
     }
     publishIceState();
+    // Recovery applies only to an established direct path (the channel already opened).
+    // Before the channel opens, disconnected/failed continue to fail the peer outright.
+    if (!channelOpen) return;
+    if (state === 'disconnected') startRecovery();
+    else if (state === 'connected' || state === 'completed') recovery.clear();
+    else if (state === 'failed') recovery.fail();
   };
   pc.onconnectionstatechange = () => {
     if (pc.connectionState === 'failed') disconnected(new Error('peer connection failed'));
@@ -211,6 +254,26 @@ export function createPeer(opts: CreatePeerOptions): Peer {
   } else {
     pc.ondatachannel = (ev) => wireChannel(ev.channel);
   }
+
+  // Restart ICE as the offerer: a fresh negotiation with restartIce() so the ICE credentials change
+  // and the partners re-establish the transport, sent over signaling so the joiner answers while the
+  // existing data channel (and the transfer progress) stays alive.
+  const restartAsOfferer = async (): Promise<void> => {
+    pc.restartIce();
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    opts.send(await opts.auth.signSdp(offer.sdp ?? ''));
+  };
+
+  // startRecovery begins the recovery window for a transient disconnect and has the offerer
+  // issue an ICE restart over signaling; a restart failure fails recovery immediately.
+  const startRecovery = (): void => {
+    if (closedByUser) return;
+    recovery.start();
+    if (opts.role === 'offerer') {
+      void restartAsOfferer().catch(() => recovery.fail());
+    }
+  };
 
   const applyRemoteDescription = async (type: RTCSdpType, sdp: string): Promise<void> => {
     await pc.setRemoteDescription({ type, sdp });
@@ -259,6 +322,7 @@ export function createPeer(opts: CreatePeerOptions): Peer {
     close: () => {
       closedByUser = true;
       settled = true;
+      recovery.dispose();
       pc.close();
     },
   };

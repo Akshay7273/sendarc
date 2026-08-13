@@ -43,6 +43,21 @@ func killBothSignaling(hub *relay) {
 	hub.join.killSignaling()
 }
 
+// expectCutover asserts a direct→relay cutover path sequence. V12-PR04 may transiently emit a
+// "recovering" transport state between direct and relay while the direct peer's ICE observes the
+// drop; the meaningful invariant is that the path begins on direct and settles on relay.
+func expectCutover(t *testing.T, name string, paths []string) {
+	t.Helper()
+	if len(paths) < 2 || paths[0] != "direct" || paths[len(paths)-1] != "relay" {
+		t.Fatalf("%s paths = %v; want direct first and relay last", name, paths)
+	}
+	for _, p := range paths[1 : len(paths)-1] {
+		if p != "recovering" {
+			t.Fatalf("%s paths = %v; unexpected intermediate path %q", name, paths, p)
+		}
+	}
+}
+
 // TestDriverSurvivesSignalingLossOnDirect pins signaling failure is
 // independent of the data path — a healthy direct channel finishes the transfer
 // with no relay fallback and no error when the signaling socket dies mid-file.
@@ -236,9 +251,7 @@ func TestDriverCutoverBeforeDataStarts(t *testing.T) {
 		log.mu.Lock()
 		paths := append([]string(nil), log.paths...)
 		log.mu.Unlock()
-		if len(paths) != 2 || paths[0] != "direct" || paths[1] != "relay" {
-			t.Fatalf("%s paths = %v; want [direct relay]", name, paths)
-		}
+		expectCutover(t, name, paths)
 	}
 }
 
@@ -310,5 +323,75 @@ func TestDriverCutoverAfterAllDataAcked(t *testing.T) {
 		if len(paths) < 1 || paths[0] != "direct" {
 			t.Fatalf("%s paths = %v; want direct first", name, paths)
 		}
+	}
+}
+
+// TestDriverFallsBackOnFailedDirectRecovery pins the V12-PR04 recovery wiring: when the direct
+// path's recovery window fails over (the peer's OnRecoverFailed hook firing), the driver falls
+// back to the relay without restarting transfer progress — the transfer still completes with a
+// byte-identical file, reporting [direct relay] on both peers.
+func TestDriverFallsBackOnFailedDirectRecovery(t *testing.T) {
+	hub := newRelay()
+	payload := faultPayload(3*1024*1024 + 41)
+	meta := wire.FileMeta{Name: "recover-fail.bin", Size: int64(len(payload)), Mime: "application/octet-stream"}
+	dir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	trigger := make(chan struct{})
+	var triggerOnce sync.Once
+	sendPaths, recvPaths := &pathLog{}, &pathLog{}
+	type result struct {
+		out *Outcome
+		err error
+	}
+	done := make(chan result, 2)
+	go func() {
+		out, err := Run(ctx, hub.off, Spec{
+			Session:     rendezvous.Options{Role: rendezvous.RoleOfferer, Words: "alpha-bravo"},
+			Source:      wire.BytesSource(payload, meta, 64*1024),
+			ICEServers:  []webrtc.ICEServer{},
+			OnTransport: appendPath(sendPaths),
+			breakDirectRecovery: trigger,
+			OnProgress: func(bytes int64) {
+				if bytes >= 1024*1024 {
+					triggerOnce.Do(func() { close(trigger) })
+				}
+			},
+		})
+		done <- result{out: out, err: err}
+	}()
+	go func() {
+		out, err := Run(ctx, hub.join, Spec{
+			Session:     rendezvous.Options{Role: rendezvous.RoleJoiner, Code: "7-alpha-bravo"},
+			DestDir:     dir,
+			ICEServers:  []webrtc.ICEServer{},
+			OnTransport: appendPath(recvPaths),
+		})
+		done <- result{out: out, err: err}
+	}()
+
+	a, b := <-done, <-done
+	if a.err != nil || b.err != nil {
+		t.Fatalf("recovery-fallback results: %v / %v", a.err, b.err)
+	}
+	var recv *Outcome
+	if a.out.Path != "" {
+		recv = a.out
+	} else {
+		recv = b.out
+	}
+	got, err := os.ReadFile(recv.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("output differs from source after failed direct recovery")
+	}
+	for name, log := range map[string]*pathLog{"sender": sendPaths, "receiver": recvPaths} {
+		log.mu.Lock()
+		paths := append([]string(nil), log.paths...)
+		log.mu.Unlock()
+		expectCutover(t, name, paths)
 	}
 }

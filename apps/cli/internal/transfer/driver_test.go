@@ -91,6 +91,19 @@ type relayEnd struct {
 	done      chan struct{}
 	killOnce  sync.Once
 	killSig   chan struct{} // closed by killSignaling to simulate a dead signaling socket
+
+	// resume records whether the driver armed this signal as a ReconnectSetter (V12-PR04).
+	resumeCalled bool
+	resumeRoom   int
+	resumeRole   string
+}
+
+// SetResume implements ReconnectSetter: it records the room/role the driver arms once the
+// handshake settles so a reconnectable signal can re-attach to the room.
+func (e *relayEnd) SetResume(room int, role string) {
+	e.resumeCalled = true
+	e.resumeRoom = room
+	e.resumeRole = role
 }
 
 func newRelayEnd(hub *relay, role string) *relayEnd {
@@ -385,9 +398,7 @@ func TestDriverSwitchesActiveDirectTransferToRelay(t *testing.T) {
 		log.mu.Lock()
 		paths := append([]string(nil), log.paths...)
 		log.mu.Unlock()
-		if len(paths) != 2 || paths[0] != "direct" || paths[1] != "relay" {
-			t.Fatalf("%s paths = %v, want [direct relay]", name, paths)
-		}
+		expectCutover(t, name, paths)
 	}
 }
 
@@ -433,5 +444,52 @@ func TestDriverReceiverRejectsMismatchedCode(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("destination dir has %d entries, want 0 after a failed handshake", len(entries))
+	}
+}
+
+// TestDriverArmsReconnectableSignal pins the V12-PR04 signaling-recovery wiring: once the
+// handshake settles, the driver arms a ReconnectSetter signal with the room and role so a later
+// signaling drop can re-attach to the room.
+func TestDriverArmsReconnectableSignal(t *testing.T) {
+	hub := newRelay()
+	payload := faultPayload(256 * 1024)
+	meta := wire.FileMeta{Name: "resume-arm.bin", Size: int64(len(payload)), Mime: "application/octet-stream"}
+	dir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	done := make(chan error, 2)
+	go func() {
+		_, err := Run(ctx, hub.off, Spec{
+			Session:    rendezvous.Options{Role: rendezvous.RoleOfferer, Words: "alpha-bravo"},
+			Source:     wire.BytesSource(payload, meta, 64*1024),
+			ICEServers: []webrtc.ICEServer{},
+		})
+		done <- err
+	}()
+	go func() {
+		_, err := Run(ctx, hub.join, Spec{
+			Session:    rendezvous.Options{Role: rendezvous.RoleJoiner, Code: "7-alpha-bravo"},
+			DestDir:    dir,
+			ICEServers: []webrtc.ICEServer{},
+		})
+		done <- err
+	}()
+
+	for i := 0; i < 2; i++ {
+		if err := <-done; err != nil {
+			t.Fatalf("transfer error: %v", err)
+		}
+	}
+	for name, e := range map[string]*relayEnd{"offerer": hub.off, "joiner": hub.join} {
+		if !e.resumeCalled {
+			t.Fatalf("%s signal was not armed as a ReconnectSetter", name)
+		}
+		if e.resumeRoom != hub.room {
+			t.Fatalf("%s resume room = %d, want %d", name, e.resumeRoom, hub.room)
+		}
+		if e.resumeRole != name {
+			t.Fatalf("%s resume role = %q, want %q", name, e.resumeRole, name)
+		}
 	}
 }
