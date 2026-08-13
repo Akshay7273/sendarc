@@ -24,6 +24,15 @@ protocol it refers to is specified in [`protocol.md`](./protocol.md).
   can authenticate. Authentication proves "you have the code," not a human identity.
 - The **local machine and browser are trusted** (out of scope: malware, a hostile browser
   extension, a compromised OS).
+- The **durable journal is local, user-editable state** (`docs/adr/0004-durable-journal.md`).
+  Its checksum and manifest-fingerprint checks detect corruption, torn writes, and casual
+  tampering; they are **not** a trust anchor — anything that can rewrite the file can
+  recompute them. Resume-time validation binds journal claims (transfer ID, manifest
+  fingerprint, per-file digests, identity envelopes) against authenticated transfer state,
+  and the journal never persists raw session key material (no master keys, directional
+  keys, live AEAD counters, or credentials; only the opaque versioned `resumeSecret`
+  envelope defined by the future resume protocol). Corrupt, torn, unknown, or unsupported
+  journal state fails closed and is never partially applied.
 
 ## Adversaries and mitigations
 

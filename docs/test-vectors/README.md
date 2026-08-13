@@ -9,6 +9,7 @@ reference code. All hex is unprefixed lowercase.
 | `rfc9382-p256.json` | The official RFC 9382 §6 P-256 SPAKE2 vectors (fixed identities `A`/`B`, scalar `w`, shares, transcript, `Ke`/`Ka`, confirmation MACs). | `packages/protocol/src/spake2.test.ts`, `packages/wire/spake2_test.go` |
 | `sendbeam-crypto.json` | SendBeam domain-specific KATs: invite-code → SPAKE2 scalar `w` (`HKDF "sendbeam/1 spake2 w"`), the full SPAKE2 exchange with fixed secrets, `HKDF(Ke, "sendbeam/1 master" \|\| TT)` master derivation, directional AEAD keys (`sendbeam/1 o2j` / `j2o`), one AES-256-GCM seal vector (salt+counter nonce, header as AAD), and the SDP/ICE HMAC (`authmac`). | `packages/protocol/src/{spake2,keyschedule,aead,authmac}.test.ts`, `packages/wire/{spake2,authmac}_test.go` |
 | `transfer.json` | A complete 40-byte single-file transfer: derived keys, the file bytes and canonical SHA-256, and the byte-exact wire frame log (`s2r` frames the sender emitted, `r2s` frames the receiver replied). Replay the `s2r` frames in order through any receiver and expect the recorded `r2s` replies, the exact file bytes, and the recorded digest. | `packages/wire/transfer_vector_test.go` |
+| `durable-journal.json` | A canonical schema-v1 durable journal: the fixed inputs (transfer ID, manifest, identity envelopes, timestamps, per-file committed blocks), the expected manifest fingerprint, and the byte-exact canonical journal JSON including its checksum. The Go and TypeScript journal twins must reproduce the fingerprint and the `journal` JSON byte-for-byte, pinning the local persistence schema (a local format, not wire). | `packages/wire/journal_test.go`, `packages/protocol/src/journal.test.ts` |
 
 ## How the vectors are checked in CI
 
@@ -34,6 +35,16 @@ guarded by a normal (non-generated) test that fails if the committed vector stop
 reproducing. `sendbeam-crypto.json` and `rfc9382-p256.json` were produced once by the
 original implementation; only touch them with a protocol change, and update every
 consumer test in the same change.
+
+`durable-journal.json` is regenerated the same way:
+
+```sh
+cd packages/wire
+GENERATE_VECTORS=1 go test -run TestGenerateJournalVector ./...
+```
+
+and is asserted by both the Go and TypeScript suites, so any schema/codec drift between
+the two journal twins fails CI.
 
 ## Validation status
 
