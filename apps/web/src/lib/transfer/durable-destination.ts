@@ -15,15 +15,19 @@
  */
 
 import {
+  DIGEST_CHECKPOINT_FORMAT_HASH_WASM,
   TransferError,
   bytesToHex,
+  hexToBytes,
   manifestFingerprint,
   normalizeTransferPath,
   sha256,
   utf8,
   type Digest,
+  type DigestStateSink,
   type DurableJournal,
   type FileEntry,
+  type JournalDigestCheckpoint,
   type JournalIdentity,
   type Manifest,
   type ReceiverResumeFile,
@@ -38,6 +42,7 @@ import type {
   WritableFileLike,
 } from './durable-store.js';
 import { webDestinationIdentity } from './durable-store.js';
+import { createSha256DigestFactory } from './digest.js';
 import {
   centralHeader,
   crc32Update,
@@ -329,28 +334,53 @@ export class DurableDestination implements BrowserDestination {
     return total;
   }
 
-  /** Advance one file's checkpoint after its data is flushed; the only journal mutation. */
-  async commitBlocks(fileIdx: number, blocks: number): Promise<void> {
+  /**
+   * Advance one file's checkpoint after its data is flushed; the only journal mutation.
+   * `digestState` (V13-PR05), when non-null, is the serialized digest state covering
+   * exactly these blocks and is persisted atomically with the checkpoint; a null state
+   * clears the file's stale checkpoint (it could not cover the new high-water mark).
+   */
+  async commitBlocks(
+    fileIdx: number,
+    blocks: number,
+    digestState: Uint8Array | null,
+  ): Promise<void> {
     const journal = this.journal;
     if (!journal) throw new TransferError('sink_error', 'durable destination is not prepared');
+    let checkpoint: JournalDigestCheckpoint | undefined;
+    if (digestState) {
+      const state = journal.files[fileIdx]!;
+      checkpoint = {
+        format: DIGEST_CHECKPOINT_FORMAT_HASH_WASM,
+        committedBlocks: blocks,
+        committedBytes: Math.min(blocks * state.blockSize, state.size),
+        state: bytesToHex(digestState),
+      };
+    }
     this.journal = await this.store.commitBlocks(
       journal,
       fileIdx,
       blocks,
       this.now(),
       this.ownerId,
+      checkpoint,
     );
   }
 
-  /** Fail-closed resume seed: partials must back every checkpoint, prefixes are re-hashed. */
+  /**
+   * Fail-closed resume seed: partials must back every checkpoint. The digest is restored
+   * from the checkpointed state when this runtime produced it and it decodes (V13-PR05);
+   * otherwise correctness-first — the persisted prefix is re-hashed. Final whole-file
+   * verification is mandatory in every path, so an unrestorable or wrong state can never
+   * corrupt: it would fail verification.
+   */
   private async buildResumeState(): Promise<void> {
     const journal = this.journal!;
     const files = new Map<number, ReceiverResumeFile>();
     for (let i = 0; i < journal.files.length; i++) {
       const state = journal.files[i]!;
-      const digest = this.createDigest();
+      const committed = Math.min(state.committedBlocks * state.blockSize, state.size);
       if (state.committedBlocks > 0) {
-        const committed = Math.min(state.committedBlocks * state.blockSize, state.size);
         const size = await this.files.partialSize(
           this.transferId,
           normalizeTransferPath(state.name),
@@ -361,6 +391,22 @@ export class DurableDestination implements BrowserDestination {
             `journal ${this.transferId} file ${state.name}: partial data missing or truncated; refusing to resume — discard it`,
           );
         }
+      }
+      let digest: Digest;
+      let restored = false;
+      const cp = state.digestCheckpoint;
+      if (cp && cp.format === DIGEST_CHECKPOINT_FORMAT_HASH_WASM) {
+        try {
+          const factory = await createSha256DigestFactory(hexToBytes(cp.state));
+          digest = factory();
+          restored = true;
+        } catch {
+          digest = this.createDigest();
+        }
+      } else {
+        digest = this.createDigest();
+      }
+      if (!restored && state.committedBlocks > 0) {
         await this.files.readPrefix(
           this.transferId,
           normalizeTransferPath(state.name),
@@ -453,7 +499,7 @@ interface DurableFileSinkOptions {
 }
 
 /** One file's sink: write → flush → journal checkpoint, in that order, before resolving. */
-class DurableFileSink implements Sink {
+class DurableFileSink implements Sink, DigestStateSink {
   private readonly destination: DurableDestination;
   private readonly fileIdx: number;
   private readonly writer: PartialWriter;
@@ -462,6 +508,7 @@ class DurableFileSink implements Sink {
   private readonly startBlocks: number;
   private written = 0;
   private closed = false;
+  private pendingDigestState: Uint8Array | null = null;
 
   constructor(options: DurableFileSinkOptions) {
     this.destination = options.destination;
@@ -470,6 +517,17 @@ class DurableFileSink implements Sink {
     this.sync = options.sync;
     this.blocks = options.blocks;
     this.startBlocks = options.startBlocks;
+  }
+
+  /**
+   * Implements DigestStateSink (V13-PR05): remembers the serialized digest state covering
+   * exactly the blocks the next write (or close, on the async path) checkpoints, so it is
+   * persisted atomically with the checkpoint. A null state clears it. The receiver calls
+   * this before each write, so a stale state is impossible: every commit consumes the
+   * state that was set for exactly its blocks.
+   */
+  setDigestState(state: Uint8Array | null): void {
+    this.pendingDigestState = state;
   }
 
   async write(offset: number, bytes: Uint8Array): Promise<void> {
@@ -482,9 +540,12 @@ class DurableFileSink implements Sink {
     this.written++;
     if (this.sync) {
       // Sync path: the data is flushed; advance the checkpoint before the wire ack.
-      await this.destination.commitBlocks(this.fileIdx, this.startBlocks + this.written);
+      const state = this.pendingDigestState;
+      this.pendingDigestState = null;
+      await this.destination.commitBlocks(this.fileIdx, this.startBlocks + this.written, state);
     }
-    // Async path: the stream only flushes at close, so the checkpoint advances there.
+    // Async path: the stream only flushes at close, so the checkpoint advances there; the
+    // latest pending state covers the whole file by then (the digest accumulates).
   }
 
   async close(): Promise<void> {
@@ -497,7 +558,9 @@ class DurableFileSink implements Sink {
     this.closed = true;
     if (!this.sync) {
       // The stream closed (flush barrier); the whole file is now durable and checkpoints.
-      await this.destination.commitBlocks(this.fileIdx, this.blocks);
+      const state = this.pendingDigestState;
+      this.pendingDigestState = null;
+      await this.destination.commitBlocks(this.fileIdx, this.blocks, state);
     }
   }
 

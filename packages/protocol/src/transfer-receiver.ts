@@ -18,6 +18,8 @@ import {
   singleSinkDestination,
   type Destination,
   type Digest,
+  type DigestState,
+  type DigestStateSink,
   type Sink,
 } from './transfer-ports.js';
 import { decodeControl, encodeControl } from './transfer-messages.js';
@@ -426,14 +428,21 @@ export class TransferReceiver {
     }
 
     const offset = this.nextBlock * file.blockSize;
+    // The digest must cover the block before the sink checkpoints it: sink.write advances
+    // the durable checkpoint, and the digest state for that exact prefix is carried into
+    // the same atomic journal update through the optional DigestStateSink seam. Advancing
+    // the in-memory digest before the durable write is safe because any later sink failure
+    // terminates this receive attempt while the persisted journal stays at its previous
+    // valid checkpoint (ADR 0004).
+    digest.update(block);
     try {
+      await this.attachDigestState(sink, digest);
       await sink.write(offset, block);
     } catch (e) {
       throw e instanceof TransferError
         ? e
         : new TransferError('sink_error', e instanceof Error ? e.message : String(e));
     }
-    digest.update(block);
     this.nextBlock++;
     this.nackOutstanding = undefined;
     this.acknowledged += block.length;
@@ -447,6 +456,21 @@ export class TransferReceiver {
     } else if (this.seenAhead.delete(this.nextBlock)) {
       await this.requestMissing();
     }
+  }
+
+  /**
+   * Hand the sink the digest state covering exactly the block the following `sink.write`
+   * will checkpoint, so a durable sink can persist committedBlocks and the matching digest
+   * checkpoint in one atomic journal update (V13-PR05). Sinks without the optional
+   * DigestStateSink capability journal a checkpoint without digest state, and digests
+   * without DigestState support contribute null — the storage layer then omits the
+   * checkpoint and resume re-hashes the persisted prefix.
+   */
+  private async attachDigestState(sink: Sink, digest: Digest): Promise<void> {
+    const stateSink = sink as Sink & Partial<DigestStateSink>;
+    if (typeof stateSink.setDigestState !== 'function') return;
+    const state = (digest as Digest & Partial<DigestState>).saveState?.() ?? null;
+    await stateSink.setDigestState(state);
   }
 
   private async sendAck(fileIdx: number, blockIdx: number): Promise<void> {

@@ -194,6 +194,158 @@ func TestReceiverAbortsIntegrityOnCorruptFrame(t *testing.T) {
 	}
 }
 
+func TestReceiverDigestStateSeam(t *testing.T) {
+	// Two 8-byte blocks; the receiver must feed the digest BEFORE the sink checkpoints and
+	// hand the sink a state covering exactly the prefix fed so far (V13-PR05).
+	keys, err := DeriveTransferKeys(senderMaster())
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := seq(16)
+	sf := newSenderFrames(t, keys)
+	sf.ctrl(NewManifest([]FileEntry{{
+		Idx: 0, Name: "f", Size: 16, BlockSize: 8, Blocks: 2, FileDigest: hexSHA256(data),
+	}}, 16))
+	sf.blockData(data, 8, 8)
+	sf.ctrl(NewComplete(hexSHA256(data)))
+
+	var events []string
+	sink := &seamSink{events: &events}
+	digest := &seamDigest{d: NewSHA256Digest(), events: &events}
+	var back outbox
+	r := NewReceiver(ReceiverOptions{
+		Send: back.push, SendDir: keys.J2O, RecvDir: keys.O2J, Sink: sink,
+		CreateDigest: func() Digest { return digest },
+	})
+	for _, f := range sf.frames {
+		r.Handle(f)
+	}
+	if _, err := r.Wait(context.Background()); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	wantEvents := []string{
+		"update", "setState", "write",
+		"update", "setState", "write",
+	}
+	if len(events) != len(wantEvents) {
+		t.Fatalf("events = %v, want %v", events, wantEvents)
+	}
+	for i, e := range wantEvents {
+		if events[i] != e {
+			t.Fatalf("event %d = %q, want %q (digest must update before the sink write)", i, events[i], e)
+		}
+	}
+	// Each state handed to the sink must cover exactly the prefix fed so far: restoring it
+	// and continuing through the file yields the one-shot digest.
+	if len(sink.states) != 2 {
+		t.Fatalf("setDigestState called %d times, want 2", len(sink.states))
+	}
+	oneShot := NewSHA256Digest()
+	oneShot.Update(data)
+	for i, state := range sink.states {
+		restored, err := RestoreSHA256Digest(state)
+		if err != nil {
+			t.Fatalf("restore state %d: %v", i, err)
+		}
+		restored.Update(data[(i+1)*8:])
+		if got := restored.HexDigest(); got != oneShot.HexDigest() {
+			t.Fatalf("state %d does not cover exactly the prefix fed so far", i)
+		}
+	}
+	// The resumed whole-file digest equals the one-shot (finishCurrentFile verified it, and
+	// the complete hash matched, so the digest itself was consistent end-to-end).
+	if got := digest.d.HexDigest(); got != oneShot.HexDigest() {
+		t.Fatalf("receiver digest = %s, want %s", got, oneShot.HexDigest())
+	}
+}
+
+func TestReceiverDigestStateSeamFallsBack(t *testing.T) {
+	// A sink WITHOUT the optional capability and a digest WITHOUT state support must both
+	// fall back gracefully: the transfer completes and no state is demanded of anyone.
+	keys, err := DeriveTransferKeys(senderMaster())
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := seq(8)
+	sf := newSenderFrames(t, keys)
+	sf.ctrl(NewManifest([]FileEntry{{
+		Idx: 0, Name: "f", Size: 8, BlockSize: 8, Blocks: 1, FileDigest: hexSHA256(data),
+	}}, 8))
+	sf.push(FrameHeaderInput{Version: FrameVersion, Type: FrameBlockData, Flags: FrameFlagLastInBlock}, data)
+	sf.ctrl(NewBlockHash(0, 0, hexSHA256(data)))
+	sf.ctrl(NewComplete(hexSHA256(data)))
+
+	// Plain sink, plain digest: nothing implements the optional interfaces.
+	sink := &MemorySink{}
+	var back outbox
+	r := NewReceiver(ReceiverOptions{
+		Send: back.push, SendDir: keys.J2O, RecvDir: keys.O2J, Sink: sink,
+	})
+	for _, f := range sf.frames {
+		r.Handle(f)
+	}
+	if _, err := r.Wait(context.Background()); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if !bytes.Equal(sink.Bytes(), data) {
+		t.Fatalf("sink bytes mismatch")
+	}
+
+	// Sink with the capability, digest without: the sink receives a nil state.
+	var events []string
+	stateful := &seamSink{events: &events}
+	r2 := NewReceiver(ReceiverOptions{
+		Send: back.push, SendDir: keys.J2O, RecvDir: keys.O2J, Sink: stateful,
+		CreateDigest: func() Digest { return &plainDigest{d: NewSHA256Digest()} },
+	})
+	for _, f := range sf.frames {
+		r2.Handle(f)
+	}
+	if _, err := r2.Wait(context.Background()); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if len(stateful.states) != 1 || stateful.states[0] != nil {
+		t.Fatalf("digest without state support must hand the sink a nil state, got %v", stateful.states)
+	}
+}
+
+// seamSink records the write/setDigestState ordering and every state it was handed.
+type seamSink struct {
+	events *[]string
+	states [][]byte
+}
+
+func (s *seamSink) Write(int64, []byte) error { *s.events = append(*s.events, "write"); return nil }
+func (s *seamSink) Close() error              { return nil }
+func (s *seamSink) Abort(string) error        { return nil }
+func (s *seamSink) SetDigestState(state []byte) error {
+	*s.events = append(*s.events, "setState")
+	s.states = append(s.states, state)
+	return nil
+}
+
+// seamDigest wraps a sha256 digest and records update calls in the shared event log.
+type seamDigest struct {
+	d      Digest
+	events *[]string
+}
+
+func (d *seamDigest) Update(b []byte) {
+	*d.events = append(*d.events, "update")
+	d.d.Update(b)
+}
+func (d *seamDigest) HexDigest() string { return d.d.HexDigest() }
+func (d *seamDigest) MarshalState() ([]byte, error) {
+	return d.d.(DigestState).MarshalState()
+}
+
+// plainDigest is a Digest WITHOUT the optional DigestState capability, to prove the
+// receiver's seam falls back to a nil state.
+type plainDigest struct{ d Digest }
+
+func (d *plainDigest) Update(b []byte)   { d.d.Update(b) }
+func (d *plainDigest) HexDigest() string { return d.d.HexDigest() }
+
 // recordingSink records the order of its calls so a test can assert onManifest ran first.
 type recordingSink struct{ events *[]string }
 

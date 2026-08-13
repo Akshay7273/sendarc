@@ -2,6 +2,7 @@ package wire
 
 import (
 	"crypto/sha256"
+	"encoding"
 	"encoding/hex"
 	"errors"
 	"hash"
@@ -82,6 +83,30 @@ type Digest interface {
 	HexDigest() string
 }
 
+// DigestState is an optional Digest capability (V13-PR05): the digest's internal state can
+// be serialized to bytes that a compatible Digest can restore, so a durable receiver can
+// resume hashing from a checkpoint instead of re-hashing the persisted prefix. The bytes
+// are opaque to the wire layer — they are meaningful only to the implementation that
+// produced them and are version-tagged by the host when persisted.
+type DigestState interface {
+	// MarshalState returns a serialized snapshot of the digest's internal state covering
+	// exactly the bytes fed so far. The digest remains usable afterwards.
+	MarshalState() ([]byte, error)
+}
+
+// DigestStateSink is an optional Sink capability (V13-PR05): the sink can carry serialized
+// digest state into its next durable checkpoint. The receiver calls SetDigestState with the
+// state covering exactly the blocks the following Write/Close will checkpoint, so the
+// storage layer can persist committedBlocks and the matching digest checkpoint atomically
+// in one journal update. The state is an optimization only; a sink that rejects it (or a
+// digest without state support) simply journals a checkpoint without digest state and the
+// resume re-hashes.
+type DigestStateSink interface {
+	// SetDigestState remembers serialized digest state for the blocks the next Write or
+	// Close commits. A nil state clears it (the next checkpoint carries no digest state).
+	SetDigestState(state []byte) error
+}
+
 // sha256Digest is the default Digest, backed by the standard library.
 type sha256Digest struct{ h hash.Hash }
 
@@ -91,6 +116,28 @@ func NewSHA256Digest() Digest { return &sha256Digest{h: sha256.New()} }
 func (d *sha256Digest) Update(b []byte) { d.h.Write(b) }
 
 func (d *sha256Digest) HexDigest() string { return hex.EncodeToString(d.h.Sum(nil)) }
+
+// MarshalState serializes the digest state through the standard library's documented
+// encoding.BinaryMarshaler (a fixed 108-byte state for SHA-256). The digest remains usable
+// afterwards, exactly like Sum.
+func (d *sha256Digest) MarshalState() ([]byte, error) {
+	if m, ok := d.h.(encoding.BinaryMarshaler); ok {
+		return m.MarshalBinary()
+	}
+	return nil, errors.New("sha256 digest does not support state marshaling on this platform")
+}
+
+// RestoreSHA256Digest rebuilds a SHA-256 Digest from a serialized state produced by
+// MarshalState, using the standard library's documented encoding.BinaryUnmarshaler, which
+// fails closed on an invalid state identifier or size. State from another implementation
+// (or another format) is rejected — never guessed.
+func RestoreSHA256Digest(state []byte) (Digest, error) {
+	h := sha256.New()
+	if err := h.(encoding.BinaryUnmarshaler).UnmarshalBinary(state); err != nil {
+		return nil, err
+	}
+	return &sha256Digest{h: h}, nil
+}
 
 // FailReason is the machine-readable tag for a transfer failure, sent on the wire in a fail
 // message. The set mirrors the TypeScript Fail['reason'] union exactly.

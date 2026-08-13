@@ -72,6 +72,59 @@ type JournalIdentity struct {
 	Value   string `json:"value"`
 }
 
+// Digest checkpoint format identifiers (V13-PR05). The identifier tags the serialized
+// digest state so only a compatible runtime restores it: the bytes are opaque,
+// implementation-specific state, never decoded by another implementation. A journal whose
+// checkpoint format this runtime cannot restore falls back to re-hashing the persisted
+// prefix — the checkpoint is an optimization, never a source of truth.
+const (
+	// DigestCheckpointFormatGoStdlib tags serialized state produced by the Go standard
+	// library's sha256 hash (encoding.BinaryMarshaler/UnmarshalBinary format v1).
+	DigestCheckpointFormatGoStdlib = "sha256-go-v1"
+	// DigestCheckpointFormatHashWasm tags serialized state produced by hash-wasm's sha256
+	// IHasher.save() (state format v1; load() rejects state from incompatible builds).
+	DigestCheckpointFormatHashWasm = "sha256-wasm-v1"
+)
+
+// journalDigestCheckpointFormatPattern bounds the format identifier shape: lowercase
+// alphanumeric start, then lowercase alphanumeric, '.', '_' or '-' (e.g. "sha256-go-v1").
+var journalDigestCheckpointFormatPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+
+// maxDigestCheckpointStateHex bounds the serialized digest state (lowercase hex) a journal
+// may carry. Go's sha256 state is 108 bytes (216 hex chars); hash-wasm's is 116 bytes (232
+// hex chars). The generous-but-bounded ceiling keeps decode/restore allocations tiny for
+// any attacker-controlled or corrupted state length.
+const maxDigestCheckpointStateHex = 4096
+
+// JournalDigestCheckpoint is the optional serialized whole-file digest state that exactly
+// matches one file's committed checkpoint (V13-PR05). It lets a resuming runtime restore
+// the SHA-256 state instead of re-hashing the persisted prefix — an optimization only.
+//
+// The checkpoint describes EXACTLY the bytes the journal's committed checkpoint claims:
+// CommittedBlocks must equal the file's committedBlocks and CommittedBytes must equal the
+// committed byte count, or the journal is structurally corrupt and fails closed. The
+// serialized state bytes are opaque and implementation-specific; Format identifies which
+// runtime produced them so only a compatible implementation may restore them. A valid
+// journal carrying an unusable optional checkpoint (unknown format, undecodable or
+// unrestorable state) still resumes through correctness-first prefix re-hash.
+//
+// Never a source of truth: final whole-file digest verification remains mandatory, and a
+// checkpoint can never advance the journal — CommitBlocks is still the only progress API.
+type JournalDigestCheckpoint struct {
+	// Format identifies the digest algorithm + implementation + state-format version
+	// (see the DigestCheckpointFormat* constants). Journal validation checks the shape
+	// only; whether this runtime can restore the state is a resume-time decision.
+	Format string `json:"format"`
+	// CommittedBlocks is the exact committed block count the state covers; must equal the
+	// file's committedBlocks or the journal fails closed as structurally corrupt.
+	CommittedBlocks int `json:"committedBlocks"`
+	// CommittedBytes is the exact committed byte count the state covers; must equal
+	// min(committedBlocks*blockSize, size) or the journal fails closed.
+	CommittedBytes int64 `json:"committedBytes"`
+	// State is the serialized digest state, lowercase hex, size-bounded.
+	State string `json:"state"`
+}
+
 // JournalFileState is one file's durable checkpoint within a journal. The wire FileEntry
 // geometry (idx, name, size, mime, lastModified, blockSize, blocks, fileDigest) is stored
 // so the journal alone can re-validate the resumed transfer and reproduce the canonical
@@ -90,6 +143,11 @@ type JournalFileState struct {
 	// checkpoints are whole-block granularity, never byte offsets. Invariant:
 	// 0 <= CommittedBlocks <= Blocks.
 	CommittedBlocks int `json:"committedBlocks"`
+	// DigestCheckpoint is the optional serialized digest state covering exactly this
+	// file's committed checkpoint (V13-PR05). Omitted when the digest state is not
+	// serializable or the transfer predates digest checkpointing; resume then re-hashes
+	// the persisted prefix.
+	DigestCheckpoint *JournalDigestCheckpoint `json:"digestCheckpoint,omitempty"`
 }
 
 // JournalResumeSecret is the opaque, versioned envelope for the minimum resume-secret
@@ -308,6 +366,9 @@ func ValidateJournal(j DurableJournal) error {
 			return Errorf(CodeStorage, "journal: committedBlocks %d out of range for file %d (blocks %d)",
 				f.CommittedBlocks, f.Idx, f.Blocks)
 		}
+		if err := validateDigestCheckpoint(f); err != nil {
+			return err
+		}
 		name, err := NormalizeTransferPath(f.Name)
 		if err != nil {
 			return Errorf(CodeStorage, "journal: %v", err)
@@ -318,6 +379,61 @@ func ValidateJournal(j DurableJournal) error {
 		}
 		seen[key] = struct{}{}
 	}
+	return nil
+}
+
+// validateDigestCheckpoint enforces the structural claims of an optional digest
+// checkpoint. Any violation is a corrupt journal and fails closed — an impossible
+// checkpoint claim must never be trusted. The format identifier and state bytes are
+// opaque claims (an unsupported format or unrestorable state falls back to re-hash at
+// resume time, which is a different, safe case).
+func validateDigestCheckpoint(f JournalFileState) error {
+	cp := f.DigestCheckpoint
+	if cp == nil {
+		return nil
+	}
+	if !journalDigestCheckpointFormatPattern.MatchString(cp.Format) {
+		return Errorf(CodeStorage, "journal: file %d digestCheckpoint has an invalid format identifier", f.Idx)
+	}
+	if cp.CommittedBlocks != f.CommittedBlocks {
+		return Errorf(CodeStorage,
+			"journal: file %d digestCheckpoint block count %d does not match committedBlocks %d",
+			f.Idx, cp.CommittedBlocks, f.CommittedBlocks)
+	}
+	wantBytes := int64(cp.CommittedBlocks) * int64(f.BlockSize)
+	if wantBytes > f.Size {
+		wantBytes = f.Size
+	}
+	if cp.CommittedBytes != wantBytes {
+		return Errorf(CodeStorage,
+			"journal: file %d digestCheckpoint byte count %d does not match its committed blocks (%d)",
+			f.Idx, cp.CommittedBytes, wantBytes)
+	}
+	if len(cp.State)%2 != 0 || !isLowerHex(cp.State, len(cp.State)) {
+		return Errorf(CodeStorage, "journal: file %d digestCheckpoint state must be lowercase hex", f.Idx)
+	}
+	if len(cp.State) == 0 || len(cp.State) > maxDigestCheckpointStateHex {
+		return Errorf(CodeStorage, "journal: file %d digestCheckpoint state is out of bounds", f.Idx)
+	}
+	return nil
+}
+
+// SetDigestCheckpoint attaches (or, with a nil cp, clears) one file's optional digest
+// checkpoint. It runs after CommitBlocks for the same file, so it can enforce the
+// checkpoint's block count against the just-committed high-water mark; the storage layer
+// must then persist the journal atomically, exactly as it does for CommitBlocks. The
+// checkpoint is validated structurally on every encode/decode.
+func (j *DurableJournal) SetDigestCheckpoint(fileIdx int, cp *JournalDigestCheckpoint) error {
+	if fileIdx < 0 || fileIdx >= len(j.Files) {
+		return Errorf(CodeStorage, "journal: no file %d in journal", fileIdx)
+	}
+	f := &j.Files[fileIdx]
+	if cp != nil && cp.CommittedBlocks != f.CommittedBlocks {
+		return Errorf(CodeStorage,
+			"journal: digestCheckpoint block count %d does not match file %d committedBlocks %d",
+			cp.CommittedBlocks, fileIdx, f.CommittedBlocks)
+	}
+	f.DigestCheckpoint = cp
 	return nil
 }
 
@@ -483,7 +599,10 @@ func unmarshalStrict(data []byte, v any) error {
 // committed progress may be recorded, and its documented precondition is the durability
 // contract: every block in [0, committedBlocks) has been verified, written, and made
 // durable (flushed/fsynced) BEFORE this call. It refuses to regress committed progress and
-// refuses values beyond the file's block count; it stamps UpdatedAt. EncodeJournal
+// refuses values beyond the file's block count; it stamps UpdatedAt. Any existing digest
+// checkpoint for the file is cleared — it could not cover the new high-water mark — so the
+// journal can never hold a checkpoint inconsistent with its committedBlocks; the storage
+// layer re-attaches the matching state through SetDigestCheckpoint. EncodeJournal
 // recomputes the checksum afterwards.
 func (j *DurableJournal) CommitBlocks(fileIdx, committedBlocks int, now time.Time) error {
 	if fileIdx < 0 || fileIdx >= len(j.Files) {
@@ -499,6 +618,7 @@ func (j *DurableJournal) CommitBlocks(fileIdx, committedBlocks int, now time.Tim
 			fileIdx, f.CommittedBlocks, committedBlocks)
 	}
 	f.CommittedBlocks = committedBlocks
+	f.DigestCheckpoint = nil
 	j.UpdatedAt = now.UnixMilli()
 	return nil
 }
