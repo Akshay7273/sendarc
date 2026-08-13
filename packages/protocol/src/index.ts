@@ -25,3 +25,4 @@ export * from './safe-path.js';
 export * from './transfer-set.js';
 export * from './errors.js';
 export * from './ice-servers.js';
+export * from './journal.js';

@@ -260,3 +260,11 @@ above; relayed payloads are the same AEAD frames, never re-encrypted or inspecte
    of the committed high-water mark — and the sender restarts each file from that offset,
    ignoring any `resume_state` that does not match the manifest. A transfer with no prior
    state reports all-zero marks.
+
+Durable resumption across process/session boundaries additionally relies on a **local
+durable-transfer journal** — a versioned on-device persistence contract (schema, checksum,
+fingerprint, fail-closed loading) defined in `docs/adr/0004-durable-journal.md` and
+implemented by the Go `packages/wire/journal.go` and TypeScript
+`packages/protocol/src/journal.ts` twins. The journal is **not** wire state: it is never
+transmitted between peers, is not part of `sendbeam/1`, and carries no wire-version
+implication. The wire `resume_state` message is unchanged.
