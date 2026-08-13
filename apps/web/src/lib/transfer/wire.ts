@@ -6,6 +6,7 @@
  */
 
 import type { ControlOp, DirectionalKey, TransferRunState } from '@sendbeam/protocol';
+import type { SenderReattachment } from './sender-record.js';
 
 /** Session crypto state handed to the worker at start — counters continue, never reset. */
 export interface SessionCrypto {
@@ -18,6 +19,14 @@ export interface SessionCrypto {
 export interface StartSendMsg extends SessionCrypto {
   kind: 'start-send';
   files: File[];
+  /** Reuse a stable transfer id from an interrupted send (worker re-verifies the source). */
+  transferId?: string;
+  /**
+   * How this send's source can be reopened after an interruption. Persisted by the
+   * worker's `onManifest` hook with the sender record; the handle crosses postMessage
+   * via structured clone (Chromium supports serializing FileSystemHandles).
+   */
+  reattachment?: SenderReattachment;
   blockSize?: number;
   frameSize?: number;
   window?: number;

@@ -493,3 +493,141 @@ func TestDriverArmsReconnectableSignal(t *testing.T) {
 		}
 	}
 }
+
+// TestDriverSenderRestartResumesDurableReceive drives the full V13-PR04 restart loop
+// through the real driver and the real durable destination: the sender persists a record
+// before the manifest is advertised, the transfer is interrupted mid-file, and re-running
+// the same send reuses the recorded id and completes byte-identical against the receiver's
+// durable journal.
+func TestDriverSenderRestartResumesDurableReceive(t *testing.T) {
+	senderStore := testSenderStore(t)
+	outDir := t.TempDir()
+	srcDir := t.TempDir()
+	payload := make([]byte, 32<<20) // 32 MiB: plenty of headroom for a mid-file interrupt
+	for i := range payload {
+		payload[i] = byte(i*13 + 5)
+	}
+	srcPath := filepath.Join(srcDir, "payload.bin")
+	if err := os.WriteFile(srcPath, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{srcPath}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	type result struct {
+		out *Outcome
+		err error
+	}
+	runLeg := func(idempotent string, interrupt bool) (send, recv result, id string, reused bool) {
+		hub := newRelay()
+		sources, _, err := NewOSFileSources(args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hook func(wire.Manifest) error
+		id, hook, reused, err = PrepareSender(senderStore, args, sources)
+		if err != nil {
+			t.Fatal(err)
+		}
+		legCtx, legCancel := context.WithCancel(ctx)
+		defer legCancel()
+		firstProgress := make(chan struct{})
+		var once sync.Once
+		if interrupt {
+			go func() {
+				select {
+				case <-firstProgress:
+					legCancel()
+				case <-legCtx.Done():
+				}
+			}()
+		}
+		sendDone := make(chan result, 1)
+		recvDone := make(chan result, 1)
+		go func() {
+			out, err := Run(legCtx, hub.off, Spec{
+				Session:        rendezvous.Options{Role: rendezvous.RoleOfferer, Words: "alpha-bravo"},
+				Sources:        sources,
+				TransferID:     id,
+				OnSendManifest: hook,
+				ICEServers:     []webrtc.ICEServer{},
+			})
+			sendDone <- result{out, err}
+		}()
+		go func() {
+			out, err := Run(legCtx, hub.join, Spec{
+				Session:    rendezvous.Options{Role: rendezvous.RoleJoiner, Code: "7-alpha-bravo"},
+				DestDir:    outDir,
+				ICEServers: []webrtc.ICEServer{},
+				OnProgress: func(int64) {
+					if interrupt {
+						once.Do(func() { close(firstProgress) })
+					}
+				},
+			})
+			recvDone <- result{out, err}
+		}()
+		send = <-sendDone
+		recv = <-recvDone
+		_ = idempotent
+		return send, recv, id, reused
+	}
+
+	// Leg 1: interrupt the transfer after the first committed block.
+	send1, recv1, _, _ := runLeg("interrupt", true)
+	if send1.err == nil || recv1.err == nil {
+		t.Fatalf("interrupted leg unexpectedly succeeded: send=%v recv=%v", send1.err, recv1.err)
+	}
+	recvStore, err := OpenStore(outDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := recvStore.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].CommittedBytes <= 0 || entries[0].CommittedBytes >= int64(len(payload)) {
+		t.Fatalf("leg 1 journal: %#v, want a strictly-partial committed checkpoint", entries)
+	}
+	srec, ok, err := senderStore.Lookup(PathKey(args))
+	if err != nil || !ok {
+		t.Fatalf("sender record not persisted after interruption: ok=%v err=%v", ok, err)
+	}
+
+	// Leg 2: restart the same send — the id is reused and the source identity verified.
+	send2, recv2, id2, reused := runLeg("resume", false)
+	if send2.err != nil || recv2.err != nil {
+		t.Fatalf("restart leg: send=%v recv=%v", send2.err, recv2.err)
+	}
+	if !reused || id2 != srec.TransferID {
+		t.Fatalf("restart reused=%v id=%q, want reuse of %s", reused, id2, srec.TransferID)
+	}
+	if send2.out.Digest != recv2.out.Digest {
+		t.Fatalf("digests differ: %s vs %s", send2.out.Digest, recv2.out.Digest)
+	}
+	got, err := os.ReadFile(filepath.Join(outDir, "payload.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("resumed receive produced %d bytes, want byte-identical payload", len(got))
+	}
+	// The receiver finalized: its journal is gone.
+	entries, err = recvStore.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.TransferID == srec.TransferID && entry.JournalOK {
+			t.Fatalf("journal %s still present after a verified resume", srec.TransferID)
+		}
+	}
+	// Bounded cleanup: the completed send's record is discarded.
+	if err := senderStore.Discard(srec.TransferID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := senderStore.Lookup(PathKey(args)); err != nil || ok {
+		t.Fatalf("sender record still present after discard: ok=%v err=%v", ok, err)
+	}
+}

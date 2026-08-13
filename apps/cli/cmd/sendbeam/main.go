@@ -106,6 +106,29 @@ func runSend(args []string) int {
 		fmt.Fprintf(os.Stderr, "sendbeam send: %s\n", err)
 		return 1
 	}
+	// Sender restart state (V13-PR04): the stable transfer id and the canonical source
+	// identity are persisted strictly before the manifest frame is transmitted, so a
+	// crash can be resumed by re-running the same command. A missing, changed, or
+	// corrupt source state fails closed before anything is advertised.
+	senderDir, err := transfer.SenderStoreDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sendbeam send: %s\n", err)
+		return 1
+	}
+	senderStore, err := transfer.OpenSenderStore(senderDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sendbeam send: %s\n", err)
+		return 1
+	}
+	transferID, onSendManifest, reused, err := transfer.PrepareSender(senderStore, positionals, sources)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sendbeam send: %s\n", err)
+		return 1
+	}
+	if reused {
+		s := newStyle(os.Stderr)
+		fmt.Fprintln(os.Stderr, s.dim("Continuing interrupted transfer "+transferID+" — the source must be unchanged."))
+	}
 	progressFiles := make([]progressFile, len(sources))
 	for i, source := range sources {
 		meta := source.Meta()
@@ -137,6 +160,8 @@ func runSend(args []string) int {
 			OnPhase:   phasePrinter(rendezvous.RoleOfferer),
 		},
 		Sources:        sources,
+		TransferID:     transferID,
+		OnSendManifest: onSendManifest,
 		ForceRelay:     *relayOnly,
 		ICEServers:     ice,
 		OnTransport:    transportPrinter,
@@ -149,7 +174,20 @@ func runSend(args []string) int {
 	s := newStyle(os.Stderr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\n%s\n", s.cross("Failed: "+handshakeError(err)))
+		// The sender record was persisted before the manifest went out: keep it and tell
+		// the user how to resume. Lookup is bounded to this source set and idempotent.
+		if srec, ok, lookupErr := senderStore.Lookup(transfer.PathKey(positionals)); lookupErr == nil && ok {
+			fmt.Fprintf(os.Stderr, "%s\n", s.dim("Sender state for transfer "+srec.TransferID+" was kept; re-run this command to resume it with the same receiver."))
+		}
 		return 1
+	}
+	// Verified success: drop the sender record for this source set (bounded cleanup, never
+	// implicit for other transfers). A corrupt record can only have appeared after the
+	// transfer, so surface it for manual discard without failing the send.
+	if srec, ok, lookupErr := senderStore.Lookup(transfer.PathKey(positionals)); lookupErr == nil && ok {
+		if err := senderStore.Discard(srec.TransferID); err != nil {
+			fmt.Fprintf(os.Stderr, "sendbeam send: warning: could not discard sender record %s: %v\n", srec.TransferID, err)
+		}
 	}
 	fmt.Println()
 	if len(out.Files) == 1 {

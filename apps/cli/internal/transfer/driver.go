@@ -56,6 +56,15 @@ type Spec struct {
 	Sources []wire.FileSource
 	// DestDir is the directory the received file is written into; used by a joiner.
 	DestDir string
+	// TransferID, when set, is the stable id to advertise in the manifest (V13-PR04
+	// sender restart): the wire layer prefers it over its mint. Empty keeps the existing
+	// NewTransferID mint.
+	TransferID string
+	// OnSendManifest, when set, is wired into the wire sender's OnManifest hook: it runs
+	// with the validated manifest strictly before its frame is transmitted, so a sender can
+	// persist or verify its restart record before the id is advertised. An error aborts the
+	// send without transmitting the manifest.
+	OnSendManifest func(wire.Manifest) error
 	// ICEServers overrides rtc.DefaultICEServers. An explicit empty slice uses host candidates
 	// only (loopback tests); nil takes the default STUN server.
 	ICEServers []webrtc.ICEServer
@@ -548,8 +557,11 @@ func (d *driver) send(ctx context.Context, conn dataConn, sv *supervisor.Supervi
 		FrameSize:        negotiate(res.LocalCaps.MaxFrame, res.RemoteCaps.MaxFrame, wire.DefaultFrameBytes),
 		// Advertise a stable random id in the manifest so a receiver that crashes mid-file
 		// can journal its verified progress and resume it (V13-PR02); the wire layer mints
-		// and validates it without any protocol change.
+		// and validates it without any protocol change. A restart (V13-PR04) reuses the
+		// record's id, which the wire layer prefers over the mint.
+		TransferID:     d.spec.TransferID,
 		NewTransferID:  newTransferID,
+		OnManifest:     d.spec.OnSendManifest,
 		OnProgress:     d.spec.OnProgress,
 		OnFileProgress: d.spec.OnFileProgress,
 		OnStateChange:  d.spec.OnStateChange,
