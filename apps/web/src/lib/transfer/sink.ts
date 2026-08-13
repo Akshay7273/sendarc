@@ -1,12 +1,23 @@
 import {
   TransferError,
   normalizeTransferPath,
+  type Digest,
   type Destination,
   type FileEntry,
   type Manifest,
   type Sink,
 } from '@sendbeam/protocol';
 import { streamSink, type WritableFileLike } from './stream-sink.js';
+import { DurableDestination, type DurableMeta } from './durable-destination.js';
+import { durableOpfsFiles, indexedDbDurableStore } from './durable-store.js';
+import {
+  centralHeader,
+  crc32Update,
+  dataDescriptor,
+  endOfCentralDirectory,
+  localHeader,
+  type ZipEntry,
+} from './zip.js';
 import type { ReceiveDestinationSpec } from './wire.js';
 
 export type DestinationOutput =
@@ -14,10 +25,21 @@ export type DestinationOutput =
 
 export interface BrowserDestination extends Destination {
   result(): DestinationOutput | undefined;
+  /** Durable-receive metadata the host needs for lease release and Keep/Discard. */
+  durableMeta?(): DurableMeta | undefined;
+  /** Resume seed a reloaded receiver applies after the authenticated manifest arrives. */
+  resumeStateFor?(manifest: Manifest): import('@sendbeam/protocol').ReceiverResumeState | undefined;
 }
 
-/** Select a concrete destination only after the authenticated manifest is available. */
-export function createBrowserDestination(spec: ReceiveDestinationSpec): BrowserDestination {
+/**
+ * Select a concrete destination only after the authenticated manifest is available. `auto`
+ * destinations whose manifest opted into resumption (carries a transfer id) route to the
+ * durable receive store; everything else keeps the fresh-key download behavior.
+ */
+export function createBrowserDestination(
+  spec: ReceiveDestinationSpec,
+  createDigest?: () => Digest,
+): BrowserDestination {
   let inner: BrowserDestination | undefined;
   const get = (): BrowserDestination => {
     if (!inner) throw new TransferError('sink_error', 'destination used before manifest');
@@ -28,7 +50,16 @@ export function createBrowserDestination(spec: ReceiveDestinationSpec): BrowserD
       if (spec.kind === 'direct-file') inner = new DirectFileDestination(spec.handle);
       else if (spec.kind === 'direct-directory')
         inner = new DirectDirectoryDestination(spec.handle);
-      else if (manifest.files.length === 1 && !manifest.files[0]!.name.includes('/')) {
+      else if (manifest.transferId !== undefined) {
+        if (!createDigest) {
+          throw new TransferError('sink_error', 'durable receive requires a digest factory');
+        }
+        inner = new DurableDestination({
+          createDigest,
+          files: durableOpfsFiles(),
+          store: indexedDbDurableStore(),
+        });
+      } else if (manifest.files.length === 1 && !manifest.files[0]!.name.includes('/')) {
         inner = new OpfsFileDestination();
       } else {
         inner = new ArchiveDestination();
@@ -39,6 +70,7 @@ export function createBrowserDestination(spec: ReceiveDestinationSpec): BrowserD
     close: () => get().close(),
     abort: (reason) => get().abort(reason),
     result: () => inner?.result(),
+    durableMeta: () => inner?.durableMeta?.(),
   };
 }
 
@@ -142,13 +174,6 @@ class OpfsFileDestination implements BrowserDestination {
   }
 }
 
-interface ZipEntry {
-  name: Uint8Array;
-  crc: number;
-  size: number;
-  offset: number;
-}
-
 /** Streaming, store-only ZIP destination used when direct directory access is unavailable. */
 export class ArchiveDestination implements BrowserDestination {
   private root: FileSystemDirectoryHandle | undefined;
@@ -249,7 +274,7 @@ class ArchiveEntrySink implements Sink {
   }
 }
 
-async function ensureQuota(required: number): Promise<void> {
+export async function ensureQuota(required: number): Promise<void> {
   const storage = navigator.storage as StorageManager | undefined;
   if (!storage) throw new TransferError('sink_error', 'browser storage is unavailable');
   const estimate = await storage.estimate();
@@ -266,13 +291,31 @@ function uniqueKey(name: string): string {
 }
 
 /**
+ * Resolve a '/'-separated key under the OPFS root to a file handle, walking directory
+ * components so durable-receive keys (`sendbeam/durable/<id>/<rel>.part`) resolve too.
+ */
+export async function opfsFileHandle(
+  root: FileSystemDirectoryHandle,
+  key: string,
+  create: boolean,
+): Promise<FileSystemFileHandle> {
+  const parts = key.split('/');
+  const leaf = parts.at(-1)!;
+  let directory = root;
+  for (const part of parts.slice(0, -1)) {
+    directory = await directory.getDirectoryHandle(part, { create });
+  }
+  return directory.getFileHandle(leaf, { create });
+}
+
+/**
  * Open a completed OPFS output without truncating or removing its backing entry.
  * Chromium-backed File snapshots become unreadable when that entry is removed, so the UI owns
  * cleanup and keeps it alive for as long as the download link is visible.
  */
 export async function readOpfsOutput(key: string, name: string, mime: string): Promise<File> {
   const root = await opfsRoot();
-  const handle = await root.getFileHandle(key, { create: false });
+  const handle = await opfsFileHandle(root, key, false);
   const file = await handle.getFile();
   return new File([file], name, {
     type: mime || file.type,
@@ -283,84 +326,23 @@ export async function readOpfsOutput(key: string, name: string, mime: string): P
 /** Remove an OPFS result once its download link is no longer exposed. */
 export async function removeOpfsOutput(key: string): Promise<void> {
   const root = await opfsRoot();
-  await root.removeEntry(key).catch(() => {});
+  const parts = key.split('/');
+  const leaf = parts.at(-1)!;
+  let directory = root;
+  for (const part of parts.slice(0, -1)) {
+    try {
+      directory = await directory.getDirectoryHandle(part, { create: false });
+    } catch {
+      return; // nothing to remove
+    }
+  }
+  await directory.removeEntry(leaf).catch(() => {});
 }
 
-async function opfsRoot(): Promise<FileSystemDirectoryHandle> {
+export async function opfsRoot(): Promise<FileSystemDirectoryHandle> {
   const storage = navigator.storage as StorageManager | undefined;
   if (!storage || typeof storage.getDirectory !== 'function') {
     throw new TransferError('sink_error', 'Origin Private File System is unavailable');
   }
   return storage.getDirectory();
-}
-
-const crcTable = Array.from({ length: 256 }, (_, value) => {
-  let crc = value;
-  for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
-  return crc >>> 0;
-});
-
-function crc32Update(crc: number, bytes: Uint8Array): number {
-  for (const byte of bytes) crc = (crc >>> 8) ^ crcTable[(crc ^ byte) & 0xff]!;
-  return crc >>> 0;
-}
-
-function record(size: number, write: (view: DataView) => void): Uint8Array {
-  const out = new Uint8Array(size);
-  write(new DataView(out.buffer));
-  return out;
-}
-
-function localHeader(name: Uint8Array): Uint8Array {
-  const header = record(30, (v) => {
-    v.setUint32(0, 0x04034b50, true);
-    v.setUint16(4, 20, true);
-    v.setUint16(6, 0x0808, true);
-    v.setUint16(26, name.length, true);
-  });
-  return join(header, name);
-}
-
-function dataDescriptor(crc: number, size: number): Uint8Array {
-  return record(16, (v) => {
-    v.setUint32(0, 0x08074b50, true);
-    v.setUint32(4, crc, true);
-    v.setUint32(8, size, true);
-    v.setUint32(12, size, true);
-  });
-}
-
-function centralHeader(entry: ZipEntry): Uint8Array {
-  const header = record(46, (v) => {
-    v.setUint32(0, 0x02014b50, true);
-    v.setUint16(4, 20, true);
-    v.setUint16(6, 20, true);
-    v.setUint16(8, 0x0808, true);
-    v.setUint32(16, entry.crc, true);
-    v.setUint32(20, entry.size, true);
-    v.setUint32(24, entry.size, true);
-    v.setUint16(28, entry.name.length, true);
-    v.setUint32(42, entry.offset, true);
-  });
-  return join(header, entry.name);
-}
-
-function endOfCentralDirectory(count: number, size: number, offset: number): Uint8Array {
-  return record(22, (v) => {
-    v.setUint32(0, 0x06054b50, true);
-    v.setUint16(8, count, true);
-    v.setUint16(10, count, true);
-    v.setUint32(12, size, true);
-    v.setUint32(16, offset, true);
-  });
-}
-
-function join(...parts: Uint8Array[]): Uint8Array {
-  const out = new Uint8Array(parts.reduce((size, part) => size + part.length, 0));
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.length;
-  }
-  return out;
 }

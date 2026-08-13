@@ -78,6 +78,16 @@ export interface StateMsg {
   kind: 'state';
   state: TransferRunState;
 }
+/** Worker → host, once a durable receive journal is prepared: lease + resumable progress. */
+export interface DurableInfoMsg {
+  kind: 'durable';
+  transferId: string;
+  /** Lease owner id so the main thread can release the lease (pagehide, discard). */
+  ownerId: string;
+  resumed: boolean;
+  committedBytes: number;
+  totalBytes: number;
+}
 export interface DoneMsg {
   kind: 'done';
   files: Array<{ name: string; size: number; digest: string }>;
@@ -97,6 +107,7 @@ export type WorkerToHost =
   | ManifestMsg
   | ProgressMsg
   | StateMsg
+  | DurableInfoMsg
   | DoneMsg
   | ErrorMsg;
 
