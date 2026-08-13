@@ -6,6 +6,7 @@
   import type { SignalChannel } from './lib/signaling/client.js';
   import type { ReceiveDestinationSpec } from './lib/transfer/wire.js';
   import { baseUrl, iceServers, loadConfig } from './lib/config.js';
+  import { toJSON } from './lib/transfer/diagnostics.js';
   import QrCode from './lib/QrCode.svelte';
 
   loadConfig();
@@ -40,6 +41,8 @@
   let fingerprint = $state('');
   let peerCaps = $state<CapsPayload | undefined>(undefined);
   let errorText = $state('');
+  // Sanitized failure diagnostics (V12-PR06 / ADR 0003) shown on the failure screen.
+  let failureDiag = $state('');
 
   // Transfer state, live once the handshake settles and the socket is adopted.
   let role = $state<Role | undefined>(undefined);
@@ -232,6 +235,11 @@
       (err: unknown) => {
         if (transfer !== ctrl) return;
         clearInterval(progressTimer);
+        try {
+          failureDiag = toJSON(ctrl.diagnostics());
+        } catch {
+          failureDiag = '';
+        }
         errorText = describeError(asErrorLike(err));
         screen = 'failed';
       },
@@ -279,6 +287,7 @@
     fingerprint = '';
     peerCaps = undefined;
     errorText = '';
+    failureDiag = '';
   }
 
   function backHome() {
@@ -585,6 +594,14 @@
         </span>
         <h2>Connection failed</h2>
         <p class="muted">{errorText}</p>
+        {#if failureDiag}
+          <div class="diag-block">
+            <button class="link-btn" onclick={() => copy(failureDiag)}>
+              {copied ? 'Copied' : 'Copy diagnostics'}
+            </button>
+            <pre class="diag-json">{failureDiag}</pre>
+          </div>
+        {/if}
       </div>
       <button class="primary" onclick={backHome}>Try again</button>
     </section>
@@ -1174,6 +1191,32 @@
   }
   .result.bad h2 {
     color: #fca5a5;
+  }
+  .diag-block {
+    margin-top: 0.75rem;
+    text-align: left;
+  }
+  .link-btn {
+    background: none;
+    border: none;
+    color: #7aa2f7;
+    cursor: pointer;
+    padding: 0;
+    font: inherit;
+    text-decoration: underline;
+  }
+  .diag-json {
+    margin-top: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid rgba(147, 160, 184, 0.25);
+    border-radius: 0.5rem;
+    font-size: 0.72rem;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 12rem;
+    overflow: auto;
   }
 
   @media (prefers-reduced-motion: reduce) {

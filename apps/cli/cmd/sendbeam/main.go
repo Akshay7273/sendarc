@@ -40,6 +40,8 @@ func main() {
 		os.Exit(runSend(os.Args[2:]))
 	case "receive", "recv":
 		os.Exit(runReceive(os.Args[2:]))
+	case "diagnose":
+		os.Exit(runDiagnose(os.Args[2:]))
 	case "-h", "--help", "help":
 		usage(os.Stdout)
 		os.Exit(0)
@@ -57,6 +59,7 @@ func usage(w *os.File) {
 	_, _ = fmt.Fprintln(w, "Usage:")
 	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam send")+" <file-or-folder>... [flags]")
 	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam receive")+" <code|link> [flags]")
+	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam diagnose")+" [flags]")
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, s.dim("Common flags:"))
 	_, _ = fmt.Fprintln(w, "  --server URL             signaling server (default "+defaultServer+")")
