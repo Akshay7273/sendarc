@@ -82,10 +82,10 @@ type Peer struct {
 	connCh chan *DataConn // buffered(1): the channel once open
 	errCh  chan error     // buffered(1): first fatal negotiation error
 
-	onICEState     func(ICEState)
-	onRecovering   func(recovering bool)
+	onICEState      func(ICEState)
+	onRecovering    func(recovering bool)
 	onRecoverFailed func()
-	recoverWindow  time.Duration
+	recoverWindow   time.Duration
 
 	// telemetry holds ICE setup instrumentation. It is guarded by mu and is safe to read once
 	// the peer settles.
@@ -157,16 +157,16 @@ func NewPeer(opts PeerOptions) (*Peer, error) {
 	}
 
 	p := &Peer{
-		pc:             pc,
-		role:           opts.Role,
-		auth:           opts.Auth,
-		send:           opts.Send,
-		connCh:         make(chan *DataConn, 1),
-		errCh:          make(chan error, 1),
-		onICEState:     opts.OnICEState,
-		onRecovering:   opts.OnRecovering,
+		pc:              pc,
+		role:            opts.Role,
+		auth:            opts.Auth,
+		send:            opts.Send,
+		connCh:          make(chan *DataConn, 1),
+		errCh:           make(chan error, 1),
+		onICEState:      opts.OnICEState,
+		onRecovering:    opts.OnRecovering,
 		onRecoverFailed: opts.OnRecoverFailed,
-		recoverWindow:  recoverWindow,
+		recoverWindow:   recoverWindow,
 		telemetry: telemetry{
 			StartAt:    time.Now(),
 			Gathering:  []webrtc.ICEGatheringState{pc.ICEGatheringState()},
