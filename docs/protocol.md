@@ -84,6 +84,24 @@ The signaling socket itself is independently resumable: a post-establishment dro
 room is re-dialed and re-attached with `resume` (bounded retries), so ICE-restart
 renegotiation can still exchange SDP/ICE even if signaling dropped earlier.
 
+### Direct path and optional TURN
+
+The "direct" path is an authenticated WebRTC DataChannel. When the operator publishes TURN
+servers (see `HOSTING.md`), the ICE agent may also gather a **TURN relayed candidate**; such a
+candidate is still a _direct-path_ candidate, raced against host/srflx/prflx candidates and
+handled by the supervisor as the same path — never as the encrypted-relay fallback. When no
+TURN is configured, behavior is unchanged from direct-only. Application-layer AES-GCM frames
+are identical on every candidate, so TURN never weakens the protocol (see
+`docs/adr/0003-path-selection.md`).
+
+### Diagnostics
+
+Both clients can emit a **sanitized** snapshot of path/ICE/timing/failure state for
+troubleshooting (`sendbeam diagnose`; the web failure screen's "Copy diagnostics"). The
+snapshot intentionally excludes invite codes, full IP addresses, filenames, SDP, credentials,
+and payload metadata — it reports only candidate _types_ ("host"/"srflx"/"prflx"/"relay"),
+transport, timing, and error classes (see `docs/adr/0002-error-taxonomy.md`).
+
 ### Flow
 
 ```

@@ -5,6 +5,12 @@
 // CLI transfer and reports whether the file moved over the direct WebRTC path or fell
 // back to the encrypted relay, then verifies the received bytes.
 //
+// Hostile-network coverage (V12-PR06): any NAT policy pair, including `udp-blocked`
+// (drops all outbound UDP so WebRTC cannot establish and the client must fall back to the
+// relay), `netem` profiles for loss/delay/jitter/rate (with a `shift` bandwidth-upgrade
+// profile), and `-cycles N` for repeated reconnect cycles. `-measure` collects per-transfer
+// wall time, receiver peak RSS, and relay usage as JSON.
+//
 // The whole lab runs unprivileged: launch it with
 //
 //	unshare -Urnm natlab [flags]
@@ -15,6 +21,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -47,10 +54,12 @@ func main() {
 	fileSize := flag.Int("file-size", 4*1024*1024, "payload size in bytes")
 	serverBin := flag.String("server-bin", "", "path to the built sendbeamd binary (required)")
 	combos := flag.String("combos",
-		"full-cone/full-cone,restricted/restricted,port-restricted/port-restricted,symmetric/symmetric,full-cone/symmetric",
-		"comma-separated NAT policy pairs (A/B)")
+		"full-cone/full-cone,restricted/restricted,port-restricted/port-restricted,symmetric/symmetric,full-cone/symmetric,udp-blocked/udp-blocked",
+		"comma-separated NAT policy pairs (A/B); udp-blocked simulates a UDP-blocked network")
 	noproxy := flag.Bool("noproxy", false, "skip NAT boxes: both peers run in the public segment over forced relay (control)")
-	netem := flag.String("netem", "", "degraded-network profile applied to both bridge legs: 'loss 3%', 'delay 50ms', or 'rate 10mbit'")
+	netem := flag.String("netem", "", "degraded-network profile applied to both bridge legs: 'loss 3%', 'delay 50ms', 'jitter 20ms', 'rate 10mbit', or 'shift 1mbit-10mbit'")
+	cycles := flag.Int("cycles", 1, "repeated reconnect cycles per combo (back-to-back transfers)")
+	measure := flag.Bool("measure", false, "collect per-transfer metrics (wall time, receiver peak RSS, relay usage)")
 	flag.Parse()
 
 	if os.Geteuid() != 0 {
@@ -94,13 +103,13 @@ func main() {
 
 	lab := &lab{
 		sendbeam: sendbeam,
-		natbox:  natbox,
-		stund:   stund,
-		server:  *serverBin,
-		src:     src,
-		dstDir:  dstDir,
-		expect:  sha256.Sum256(payload),
-		noproxy: *noproxy,
+		natbox:   natbox,
+		stund:    stund,
+		server:   *serverBin,
+		src:      src,
+		dstDir:   dstDir,
+		expect:   sha256.Sum256(payload),
+		noproxy:  *noproxy,
 	}
 	if err := lab.setup(); err != nil {
 		lab.cleanup()
@@ -124,18 +133,50 @@ func main() {
 	}
 
 	failed := false
+	// A measurement is one completed transfer under a combo+cycle.
+	type cycleMetric struct {
+		Combo       string `json:"combo"`
+		Cycle       int    `json:"cycle"`
+		Transport   string `json:"transport"`
+		DigestOK    bool   `json:"digestOk"`
+		WallMS      int64  `json:"wallMs"`
+		ReceiverRSS int64  `json:"receiverRSSKiB,omitempty"`
+		RelayUsed   bool   `json:"relayUsed"`
+	}
+	var metrics []cycleMetric
 	for _, pair := range pairs {
-		start := time.Now()
-		ok, transport, err := lab.runTransfer(pair[0], pair[1])
-		if err != nil {
-			log.Printf("combo %s/%s: ERROR after %v: %v", pair[0], pair[1], time.Since(start).Round(time.Millisecond), err)
-			failed = true
-			continue
+		for c := 1; c <= *cycles; c++ {
+			start := time.Now()
+			ok, transport, err := lab.runTransfer(pair[0], pair[1])
+			recvRSS := lab.lastRecvRSS
+			wall := time.Since(start).Round(time.Millisecond)
+			if err != nil {
+				log.Printf("combo %s/%s cycle %d: ERROR after %v: %v", pair[0], pair[1], c, wall, err)
+				failed = true
+				continue
+			}
+			log.Printf("combo %s/%s cycle %d: %s, digest %t, %v", pair[0], pair[1], c, transport, ok, wall)
+			if !ok {
+				failed = true
+			}
+			if *measure {
+				metrics = append(metrics, cycleMetric{
+					Combo:       pair[0] + "/" + pair[1],
+					Cycle:       c,
+					Transport:   transport,
+					DigestOK:    ok,
+					WallMS:      wall.Milliseconds(),
+					ReceiverRSS: recvRSS,
+					RelayUsed:   transport == "relay",
+				})
+			}
 		}
-		log.Printf("combo %s/%s: %s, digest %t, %v", pair[0], pair[1], transport, ok, time.Since(start).Round(time.Millisecond))
-		if !ok {
-			failed = true
-		}
+	}
+	if *measure && len(metrics) > 0 {
+		b, _ := json.MarshalIndent(metrics, "", "  ")
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "=== measurements ===")
+		fmt.Fprintln(os.Stderr, string(b))
 	}
 	if failed {
 		os.Exit(1)
@@ -144,9 +185,13 @@ func main() {
 
 type lab struct {
 	sendbeam, natbox, stund, server string
-	src, dstDir                    string
-	expect                         [32]byte
-	noproxy                        bool
+	src, dstDir                     string
+	expect                          [32]byte
+	noproxy                         bool
+
+	// lastRecvRSS records the receiver process's peak RSS (KiB) after the most recent
+	// transfer, for -measure memory instrumentation.
+	lastRecvRSS int64
 
 	mu    sync.Mutex
 	nses  []*netns
@@ -350,16 +395,32 @@ func (l *lab) setup() error {
 // the server→receiver relay leg. One qdisc per profile; loss and delay use netem,
 // rate limits use netem's own rate control (it segments like the real bottleneck).
 func (l *lab) applyNetem(spec string) error {
-	var qdisc string
+	var qdiscs []string
 	switch {
 	case strings.HasPrefix(spec, "loss "):
-		qdisc = "netem loss " + strings.TrimPrefix(spec, "loss ")
+		qdiscs = []string{"netem loss " + strings.TrimPrefix(spec, "loss ")}
 	case strings.HasPrefix(spec, "delay "):
-		qdisc = "netem delay " + strings.TrimPrefix(spec, "delay ")
+		qdiscs = []string{"netem delay " + strings.TrimPrefix(spec, "delay ")}
+	case strings.HasPrefix(spec, "jitter "):
+		// Fixed delay plus variation, approximating a jittery/loaded link.
+		qdiscs = []string{"netem delay " + strings.TrimPrefix(spec, "jitter ") + " " + strings.TrimPrefix(spec, "jitter ") + " distribution normal"}
 	case strings.HasPrefix(spec, "rate "):
-		qdisc = "netem rate " + strings.TrimPrefix(spec, "rate ")
+		qdiscs = []string{"netem rate " + strings.TrimPrefix(spec, "rate ")}
+	case strings.HasPrefix(spec, "shift "):
+		// Bandwidth shift: start at the slower rate, then re-apply the faster one shortly
+		// after the transfer begins (approximates a bandwidth upgrade mid-transfer).
+		parts := strings.SplitN(strings.TrimPrefix(spec, "shift "), "-", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("bad shift profile %q (want 'shift slow-fast')", spec)
+		}
+		qdiscs = []string{"netem rate " + parts[0]}
+		time.AfterFunc(4*time.Second, func() {
+			for _, leg := range []string{"pa1", "pb1"} {
+				_ = exec.Command("nsenter", "-t", fmt.Sprint(l.nsPID("pub")), "-n", "tc", "qdisc", "replace", "dev", leg, "root", "netem", "rate", parts[1]).Run()
+			}
+		})
 	default:
-		return fmt.Errorf("unsupported netem profile %q (want 'loss 3%%', 'delay 50ms', or 'rate 10mbit')", spec)
+		return fmt.Errorf("unsupported netem profile %q (want 'loss 3%%', 'delay 50ms', 'jitter 20ms', 'rate 10mbit', or 'shift 1mbit-10mbit')", spec)
 	}
 	l.mu.Lock()
 	var pub *netns
@@ -370,13 +431,27 @@ func (l *lab) applyNetem(spec string) error {
 	}
 	l.mu.Unlock()
 	for _, ifname := range []string{"pa1", "pb1"} {
-		args := append([]string{"qdisc", "add", "dev", ifname, "root"}, strings.Split(qdisc, " ")...)
-		if err := l.nsRun(pub, append([]string{"tc"}, args...)...); err != nil {
-			return fmt.Errorf("tc on %s: %w", ifname, err)
+		for _, q := range qdiscs {
+			args := append([]string{"qdisc", "add", "dev", ifname, "root"}, strings.Split(q, " ")...)
+			if err := l.nsRun(pub, append([]string{"tc"}, args...)...); err != nil {
+				return fmt.Errorf("tc on %s: %w", ifname, err)
+			}
 		}
 	}
-	log.Printf("netem: %q applied on pa1+pb1", qdisc)
+	log.Printf("netem: %q applied on pa1+pb1", spec)
 	return nil
+}
+
+// nsPID returns the PID of a named netns, or 0.
+func (l *lab) nsPID(name string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, n := range l.nses {
+		if n.name == name {
+			return n.pid
+		}
+	}
+	return 0
 }
 
 // runTransfer runs one CLI transfer with the given NAT policies and reports the
@@ -496,6 +571,7 @@ func (l *lab) runTransfer(polA, polB string) (bool, string, error) {
 		return false, "", fmt.Errorf("transfer timed out\n--- receiver ---\n%s\n--- sender ---\n%s", recvErr.String(), senderErr.String())
 	}
 	_ = sender.Wait()
+	l.lastRecvRSS = peakRSS(receiver.Process.Pid)
 
 	transport := "?"
 	joined := recvErr.String() + "\n" + senderErr.String()
@@ -593,11 +669,37 @@ func (l *lab) runPlainRelay(dst string) (bool, string, error) {
 		return false, "", fmt.Errorf("plain relay timed out")
 	}
 	_ = sender.Wait()
+	l.lastRecvRSS = peakRSS(receiver.Process.Pid)
 	got, err := os.ReadFile(filepath.Join(dst, filepath.Base(l.src)))
 	if err != nil {
 		return false, "relay", fmt.Errorf("read received file: %w\n--- receiver ---\n%s\n--- sender ---\n%s", err, recvErr.String(), senderErr.String())
 	}
 	return sha256.Sum256(got) == l.expect, "relay", nil
+}
+
+// peakRSS reads a process's VmRSS (KiB) from /proc. Returns 0 if the process or its stat
+// is unavailable (it may already be reaped). Used by -measure memory instrumentation.
+func peakRSS(pid int) int64 {
+	if pid <= 0 {
+		return 0
+	}
+	b, err := os.ReadFile(filepath.Join("/proc", fmt.Sprint(pid), "status"))
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(line, "VmRSS:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				var v int64
+				if _, err := fmt.Sscanf(fields[1], "%d", &v); err == nil {
+					return v
+				}
+			}
+			return 0
+		}
+	}
+	return 0
 }
 
 func moduleRoot() (string, error) {

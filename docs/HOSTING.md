@@ -103,12 +103,18 @@ allowlist. Any WebSocket-aware reverse proxy works.
   config is configurable at runtime: the server publishes an operator-chosen
   STUN list via `/config.json` (from `SENDBEAM_ICE_SERVERS`), which the web
   app fetches on load, validates, and passes to `RTCPeerConnection`.
-- **TURN** — SendBeam does not speak TURN. When a direct peer-to-peer path
-  is impossible (symmetric NATs on both ends), clients fall back to the
-  app-layer **encrypted relay** through this same server, which is exactly
-  the TURN role without needing a second service. The relay never sees
-  plaintext: payloads are end-to-end encrypted and framed inside WebSocket
-  messages.
+- **TURN** — optional. Operators who need better restrictive-network
+  reachability publish TURN URLs (alongside STUN) in `SENDBEAM_ICE_SERVERS`;
+  clients then gather a TURN relayed candidate and race it against direct
+  candidates. TURN credentials are served with `Cache-Control: no-cache` and
+  clients never reuse a fetched config past the 15-minute credential TTL, so
+  operators may serve short-lived credentials without embedding them in the
+  web bundle. **Default self-hosting requires no TURN service**: when no TURN is
+  configured, restricted pairs fall back to the app-layer **encrypted relay**
+  through this same server, which fills the TURN role without a second service.
+  The relay (and a TURN server, when used) never sees plaintext: payloads are
+  end-to-end encrypted and framed inside WebSocket messages, and a TURN server
+  observes only encrypted WebRTC datagrams. See `docs/adr/0003-path-selection.md`.
 
 For pairings behind symmetric NATs, make sure this server is reachable on
 the public port (it is the fallback path), and budget its bandwidth with
