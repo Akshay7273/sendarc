@@ -27,6 +27,11 @@ const (
 	// sending Complete before failing with retry exhaustion (a dead peer otherwise
 	// stalls Run forever).
 	DefaultDoneTimeout = 30 * time.Second
+	// DefaultCompleteInterval is how often the sender retransmits the terminal Complete
+	// while it is waiting for the receiver's Done. A single shot can be lost in a path
+	// cutover (the exchange that gives settlement is not block-acked), so retransmitting
+	// lets settlement converge once the new path is stable instead of stalling to DoneTimeout.
+	DefaultCompleteInterval = 500 * time.Millisecond
 )
 
 // SenderOptions configures a Sender. Zero-valued sizing and retry fields select defaults.
@@ -54,6 +59,9 @@ type SenderOptions struct {
 	// DoneTimeout bounds the wait for the receiver's Done after Complete; zero selects
 	// DefaultDoneTimeout.
 	DoneTimeout time.Duration
+	// CompleteInterval is how often the terminal Complete is retransmitted while waiting
+	// for Done; zero selects DefaultCompleteInterval.
+	CompleteInterval time.Duration
 	// OnProgress reports bytes acknowledged after verify-and-sink.
 	OnProgress     func(acknowledgedBytes int64)
 	OnFileProgress func(fileIdx int, fileBytes, acknowledgedBytes int64)
@@ -131,6 +139,9 @@ func NewSender(opts SenderOptions) *Sender {
 	}
 	if opts.DoneTimeout == 0 {
 		opts.DoneTimeout = DefaultDoneTimeout
+	}
+	if opts.CompleteInterval == 0 {
+		opts.CompleteInterval = DefaultCompleteInterval
 	}
 	if opts.CreateDigest == nil {
 		opts.CreateDigest = NewSHA256Digest
@@ -759,10 +770,41 @@ func (s *Sender) waitDone() error {
 			"transfer: receiver did not send Done within the deadline"))
 	})
 	defer timer.Stop()
+	// A single Complete can be lost in a path cutover (it is not block-acked), and a
+	// settled receiver that re-answered Done in that window would otherwise leave the
+	// sender stalled until DoneTimeout. Retransmit Complete on an interval so the
+	// Complete/Done exchange converges once the new path is stable.
+	retransmit := time.NewTicker(s.o.CompleteInterval)
+	defer retransmit.Stop()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case <-retransmit.C:
+				s.retransmitComplete()
+			}
+		}
+	}()
 	for !s.settled {
 		s.cond.Wait()
 	}
 	return s.err
+}
+
+// retransmitComplete re-seals and re-sends the terminal Complete while the sender is
+// waiting for Done. It is a no-op once settled or before Complete was first attempted.
+func (s *Sender) retransmitComplete() {
+	s.mu.Lock()
+	if s.settled || !s.completeSent || s.complete == nil {
+		s.mu.Unlock()
+		return
+	}
+	complete := s.complete
+	s.mu.Unlock()
+	_ = s.sendControl(complete)
 }
 
 func (s *Sender) settle() {

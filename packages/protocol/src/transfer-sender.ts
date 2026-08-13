@@ -62,6 +62,12 @@ export interface TransferSenderOptions {
    * retry exhaustion. A dead peer otherwise stalls `run` forever.
    */
   doneTimeoutMs?: number;
+  /**
+   * How often to retransmit the terminal Complete while awaiting Done. A single shot can
+   * be lost in a path cutover, so retransmitting lets settlement converge once the new
+   * path is stable instead of stalling to doneTimeoutMs.
+   */
+  completeIntervalMs?: number;
   /** Reports bytes acknowledged after verify-and-sink. */
   onProgress?(acknowledgedBytes: number): void;
   /** Reports verified progress for the active file plus aggregate acknowledged bytes. */
@@ -79,6 +85,7 @@ interface InflightBlock {
 const DEFAULT_ACK_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_DONE_TIMEOUT_MS = 30_000;
+const DEFAULT_COMPLETE_INTERVAL_MS = 500;
 
 export class TransferSender {
   private readonly o: TransferSenderOptions;
@@ -306,19 +313,33 @@ export class TransferSender {
 
   private async waitForDone(): Promise<void> {
     const timeoutMs = this.o.doneTimeoutMs ?? DEFAULT_DONE_TIMEOUT_MS;
+    // A single Complete can be lost in a path cutover (it is not block-acked); retransmit
+    // it on an interval so the Complete/Done exchange converges once the new path is stable
+    // instead of stalling to doneTimeoutMs.
+    const intervalMs = this.o.completeIntervalMs ?? DEFAULT_COMPLETE_INTERVAL_MS;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let interval: ReturnType<typeof setInterval> | undefined;
     try {
-      await Promise.race([
-        this.done,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => {
-            reject(new TransferError('retry_exhausted', 'receiver did not send done in time'));
-          }, timeoutMs);
-        }),
-      ]);
+      await new Promise<void>((resolve, reject) => {
+        interval = setInterval(() => void this.retransmitComplete(), intervalMs);
+        timer = setTimeout(() => {
+          reject(new TransferError('retry_exhausted', 'receiver did not send done in time'));
+        }, timeoutMs);
+        this.done.then(resolve, reject);
+      });
     } finally {
       if (timer !== undefined) clearTimeout(timer);
+      if (interval !== undefined) clearInterval(interval);
     }
+  }
+
+  /** Re-seal and re-send the terminal Complete while awaiting Done; a no-op once settled. */
+  private retransmitComplete(): void {
+    if (this.settled || !this.completeSent || this.completeDigest === undefined) return;
+    this.sendControl(FrameType.Complete, {
+      type: FrameType.Complete,
+      fileDigest: this.completeDigest,
+    }).catch((e: unknown) => this.fail(e instanceof Error ? e : new Error(String(e))));
   }
 
   private async processInbound(frame: Uint8Array): Promise<void> {
