@@ -51,6 +51,19 @@ the master key that the two humans can compare out of band.
 Sees ciphertext, message sizes, and timing only. No plaintext, no filenames, no keys. This
 is documented, not hidden — see accepted limitations below.
 
+### TURN server
+
+TURN is **optional** (`docs/adr/0003-path-selection.md`). When an operator configures a TURN
+server, it acts as a third-party relay for WebRTC datagrams: it sees only encrypted
+AEAD/DTLS datagrams, never plaintext file contents, filenames, or keys (the application-layer
+AES-GCM frame is the end-to-end confidentiality guarantee on every candidate). Like the relay,
+the TURN server observes connectivity metadata (source/destination addresses and ports,
+timing) that a passive network observer would see anyway. Because the authenticated SDP/ICE
+exchange binds the DTLS fingerprint and negotiating a second MITM SDP is impossible, a TURN
+server that dropped or tampered with datagrams would only cause a connectivity failure, not a
+confidentiality or integrity break. Operators may use short-lived TURN credentials, which
+clients honour via the 15-minute runtime-ICE-config TTL (`HOSTING.md`).
+
 ### Replay / reordering / tampering
 
 AES-256-GCM with a per-direction monotonic nonce counter; the frame header is the GCM AAD,

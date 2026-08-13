@@ -40,6 +40,9 @@ const (
 	policyRestricted
 	policyPortRestricted
 	policySymmetric
+	// policyUDPBlocked drops all outbound UDP, so WebRTC direct cannot establish and the
+	// client must fall back to the encrypted WS relay (a UDP-blocked/restrictive network).
+	policyUDPBlocked
 )
 
 func parsePolicy(s string) (policy, error) {
@@ -52,6 +55,8 @@ func parsePolicy(s string) (policy, error) {
 		return policyPortRestricted, nil
 	case "symmetric":
 		return policySymmetric, nil
+	case "udp-blocked":
+		return policyUDPBlocked, nil
 	}
 	return 0, fmt.Errorf("unknown policy %q", s)
 }
@@ -147,6 +152,11 @@ func (n *natbox) handleFrame(frame []byte) {
 	}
 	ip := frame[14:]
 	if ip[0]>>4 != 4 || ip[9] != 17 { // UDP only; TCP rides the proxy
+		return
+	}
+	// UDP-blocked policy drops all outbound UDP, simulating a firewall that blocks WebRTC
+	// (forcing the encrypted WS relay fallback).
+	if n.policy == policyUDPBlocked {
 		return
 	}
 	ihl := int(ip[0]&0x0f) * 4
