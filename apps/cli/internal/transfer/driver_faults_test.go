@@ -326,6 +326,84 @@ func TestDriverCutoverAfterAllDataAcked(t *testing.T) {
 	}
 }
 
+// TestDriverCutoverMidData pins cutover phase "middle": the direct channel dies while bytes are
+// still mid-flight — some blocks committed, others in the unacknowledged window, and possibly a
+// block partially assembled — so the cutover must discard only the uncommitted work, retransmit
+// the inflight window over the relay, and still produce a byte-identical file. This is the phase
+// the before-data and after-all-data tests do not exercise.
+func TestDriverCutoverMidData(t *testing.T) {
+	hub := newRelay()
+	payload := faultPayload(4*1024*1024 + 67)
+	meta := wire.FileMeta{Name: "cutover-mid.bin", Size: int64(len(payload)), Mime: "application/octet-stream"}
+	dir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	trigger := make(chan struct{})
+	var triggerOnce sync.Once
+	half := int64(len(payload)) / 2
+	sendPaths, recvPaths := &pathLog{}, &pathLog{}
+	type result struct {
+		out *Outcome
+		err error
+	}
+	done := make(chan result, 2)
+	go func() {
+		out, err := Run(ctx, hub.off, Spec{
+			Session:     rendezvous.Options{Role: rendezvous.RoleOfferer, Words: "alpha-bravo"},
+			Source:      wire.BytesSource(payload, meta, 64*1024),
+			ICEServers:  []webrtc.ICEServer{},
+			OnTransport: appendPath(sendPaths),
+			breakDirect: trigger,
+			OnProgress: func(bytes int64) {
+				// Cut over partway through the file, before the terminal phase.
+				if bytes >= half {
+					triggerOnce.Do(func() { close(trigger) })
+				}
+			},
+		})
+		done <- result{out: out, err: err}
+	}()
+	go func() {
+		out, err := Run(ctx, hub.join, Spec{
+			Session:     rendezvous.Options{Role: rendezvous.RoleJoiner, Code: "7-alpha-bravo"},
+			DestDir:     dir,
+			ICEServers:  []webrtc.ICEServer{},
+			OnTransport: appendPath(recvPaths),
+		})
+		done <- result{out: out, err: err}
+	}()
+
+	a, b := <-done, <-done
+	if a.err != nil || b.err != nil {
+		t.Fatalf("mid-data cutover results: %v / %v", a.err, b.err)
+	}
+	var recv *Outcome
+	if a.out.Path != "" {
+		recv = a.out
+	} else {
+		recv = b.out
+	}
+	got, err := os.ReadFile(recv.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("output differs from source after mid-data cutover")
+	}
+	for name, log := range map[string]*pathLog{"sender": sendPaths, "receiver": recvPaths} {
+		log.mu.Lock()
+		paths := append([]string(nil), log.paths...)
+		log.mu.Unlock()
+		if len(paths) < 1 || paths[0] != "direct" {
+			t.Fatalf("%s paths = %v; want direct first", name, paths)
+		}
+		if len(paths) > 1 && paths[len(paths)-1] != "relay" {
+			t.Fatalf("%s paths = %v; want to settle on relay after mid-data cutover", name, paths)
+		}
+	}
+}
+
 // TestDriverFallsBackOnFailedDirectRecovery pins the V12-PR04 recovery wiring: when the direct
 // path's recovery window fails over (the peer's OnRecoverFailed hook firing), the driver falls
 // back to the relay without restarting transfer progress — the transfer still completes with a
