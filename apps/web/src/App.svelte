@@ -27,6 +27,7 @@
     progressPercent,
     rateLabel,
     etaLabel,
+    humanBytes,
     sasFingerprint,
     type ErrorLike,
   } from './lib/session/present.js';
@@ -44,6 +45,9 @@
   let errorText = $state('');
   // Sanitized failure diagnostics (V12-PR06 / ADR 0003) shown on the failure screen.
   let failureDiag = $state('');
+  // Durable-receive Keep/Discard surface (V13-PR03): an interrupted resumable receive keeps
+  // its journal + partials until the user explicitly discards them.
+  let durableDiscarded = $state(false);
 
   // Transfer state, live once the handshake settles and the socket is adopted.
   let role = $state<Role | undefined>(undefined);
@@ -289,6 +293,16 @@
     peerCaps = undefined;
     errorText = '';
     failureDiag = '';
+    durableDiscarded = false;
+  }
+
+  async function discardDurable() {
+    try {
+      await transfer?.discardDurable();
+      durableDiscarded = true;
+    } catch {
+      // Keep the block visible if the discard itself failed; the data is still kept.
+    }
   }
 
   function backHome() {
@@ -592,6 +606,20 @@
               {copied ? 'Copied' : 'Copy diagnostics'}
             </button>
             <pre class="diag-json">{failureDiag}</pre>
+          </div>
+        {/if}
+        {#if !durableDiscarded && transfer?.durable()}
+          <div class="durable-block">
+            <p class="muted">
+              {#if transfer.durable()!.resumed}
+                Resuming — partial data kept so retrying with the same code continues where it
+                stopped.
+              {:else}
+                Partial data kept ({humanBytes(transfer.durable()!.committedBytes)} of
+                {humanBytes(transfer.durable()!.totalBytes)}) — retry with the same code to resume.
+              {/if}
+            </p>
+            <button class="danger" onclick={discardDurable}>Discard partial data</button>
           </div>
         {/if}
       </div>
@@ -1210,6 +1238,20 @@
     word-break: break-all;
     max-height: 12rem;
     overflow: auto;
+  }
+
+  /* ————— durable keep/discard ————— */
+  .durable-block {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    align-items: flex-start;
+    margin-top: 0.75rem;
+    padding: 0.9rem 1rem;
+    border-radius: 0.85rem;
+    background: rgba(52, 211, 153, 0.07);
+    border: 1px solid rgba(52, 211, 153, 0.28);
+    text-align: left;
   }
 
   @media (prefers-reduced-motion: reduce) {

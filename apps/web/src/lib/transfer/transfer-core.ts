@@ -12,6 +12,7 @@ import {
   TransferSender,
   TransferReceiver,
   TransferError,
+  bytesToHex,
   type Digest,
   type Destination,
   type FileEntry,
@@ -149,6 +150,9 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
           sendCounterStart: msg.sendCounter,
           recvCounterStart: msg.recvCounter,
           createDigest: deps.createDigest,
+          // Mint a stable transfer id so the manifest opts into resumption and a crashed
+          // receiver can journal and resume this exact transfer (V13-PR03).
+          newTransferId: () => mintTransferId(),
           onProgress: (bytes) => post({ kind: 'progress', bytes }),
           onManifest: (manifest) => {
             manifestFiles = manifest.files;
@@ -181,7 +185,10 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
         const destination = deps.createDestination
           ? deps.createDestination(_msg.destination)
           : sinkFactoryDestination(deps.createSink);
-        const receiver = new TransferReceiver({
+        // The resume seam mirrors the CLI driver (durable.go): a shared, mutable resume
+        // seed is filled from onManifestSet — after the destination prepares against the
+        // authenticated manifest — and the wire receiver applies it before streaming.
+        const receiverOpts: ConstructorParameters<typeof TransferReceiver>[0] = {
           send,
           sendDir: _msg.sendDir,
           recvDir: _msg.recvDir,
@@ -191,7 +198,7 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
           destination,
           onProgress: (bytes) => post({ kind: 'progress', bytes }),
           onStateChange: (state) => post({ kind: 'state', state }),
-          onManifestSet: (manifest) => {
+          onManifestSet: async (manifest) => {
             post({
               kind: 'manifest',
               files: manifest.files.map((file) => ({
@@ -201,8 +208,24 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
               })),
               totalSize: manifest.totalSize,
             });
+            if (isBrowserDestination(destination) && destination.durableMeta) {
+              const meta = destination.durableMeta();
+              if (meta) {
+                post({
+                  kind: 'durable',
+                  transferId: meta.transferId,
+                  ownerId: meta.ownerId,
+                  resumed: meta.resumed,
+                  committedBytes: meta.committedBytes,
+                  totalBytes: meta.totalBytes,
+                });
+                const state = destination.resumeStateFor?.(manifest);
+                if (state) receiverOpts.resume = state;
+              }
+            }
           },
-        });
+        };
+        const receiver = new TransferReceiver(receiverOpts);
         bind(receiver);
         const result = await receiver.done;
         const output = isBrowserDestination(destination) ? destination.result() : undefined;
@@ -257,4 +280,11 @@ function transferable(frame: Uint8Array): ArrayBuffer {
     return frame.buffer as ArrayBuffer;
   }
   return frame.slice().buffer;
+}
+
+/** Mint a stable 128-bit lowercase-hex transfer id so the manifest opts into resumption. */
+function mintTransferId(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return bytesToHex(bytes);
 }
