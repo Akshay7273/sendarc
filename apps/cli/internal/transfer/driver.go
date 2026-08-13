@@ -7,6 +7,8 @@ package transfer
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"sync"
@@ -544,9 +546,13 @@ func (d *driver) send(ctx context.Context, conn dataConn, sv *supervisor.Supervi
 		RecvCounterStart: res.RecvCounter,
 		BlockSize:        negotiate(res.LocalCaps.BlockSize, res.RemoteCaps.BlockSize, wire.DefaultBlockBytes),
 		FrameSize:        negotiate(res.LocalCaps.MaxFrame, res.RemoteCaps.MaxFrame, wire.DefaultFrameBytes),
-		OnProgress:       d.spec.OnProgress,
-		OnFileProgress:   d.spec.OnFileProgress,
-		OnStateChange:    d.spec.OnStateChange,
+		// Advertise a stable random id in the manifest so a receiver that crashes mid-file
+		// can journal its verified progress and resume it (V13-PR02); the wire layer mints
+		// and validates it without any protocol change.
+		NewTransferID:  newTransferID,
+		OnProgress:     d.spec.OnProgress,
+		OnFileProgress: d.spec.OnFileProgress,
+		OnStateChange:  d.spec.OnStateChange,
 	})
 	if sv != nil {
 		sv.SetOnSwitch(sender.TransportChanged)
@@ -581,10 +587,16 @@ func containsString(values []string, want string) bool {
 }
 
 func (d *driver) receive(ctx context.Context, conn dataConn, sv *supervisor.Supervisor, res *rendezvous.Result, sendDir, recvDir wire.DirectionalKey) (*Outcome, error) {
-	destination, err := NewOSDestination(d.spec.DestDir)
+	destination, err := NewDurableDestination(d.spec.DestDir)
 	if err != nil {
 		return nil, wire.NewTransferError(wire.FailSinkError, err.Error())
 	}
+	// sharedResume is filled from OnManifestSet, before the wire layer applies the resume
+	// seed: when the authenticated manifest matches a durable journal, the driver rebuilds
+	// per-file high-water marks and digest prefixes from the persisted partials. A zero
+	// value (or a TransferID mismatch) means a fresh receive, exactly as the wire layer
+	// documents for ReceiverResume.
+	var sharedResume wire.ReceiverResume
 	receiver := wire.NewReceiver(wire.ReceiverOptions{
 		Send:             conn.Send,
 		SendDir:          sendDir,
@@ -592,12 +604,22 @@ func (d *driver) receive(ctx context.Context, conn dataConn, sv *supervisor.Supe
 		SendCounterStart: res.SendCounter,
 		RecvCounterStart: res.RecvCounter,
 		Destination:      destination,
+		Resume:           &sharedResume,
 		OnProgress:       d.spec.OnProgress,
 		OnFileProgress:   d.spec.OnFileProgress,
 		OnStateChange:    d.spec.OnStateChange,
 		OnManifestSet: func(manifest wire.Manifest) error {
 			if d.spec.OnManifestSet != nil {
 				d.spec.OnManifestSet(manifest)
+			}
+			// Fail closed when the journal's claims cannot be backed by durable partial
+			// data; nothing is deleted and the transfer stops with guidance.
+			resume, err := destination.ResumeStateFor(manifest)
+			if err != nil {
+				return err
+			}
+			if resume != nil {
+				sharedResume = *resume
 			}
 			return nil
 		},
@@ -629,6 +651,18 @@ func (d *driver) receive(ctx context.Context, conn dataConn, sv *supervisor.Supe
 		Name: result.File.Name, Size: result.TotalSize, Digest: result.Digest,
 		Path: destination.Path(result.File.Idx), Files: files,
 	}, nil
+}
+
+// newTransferID mints a random 128-bit lowercase hex id so the manifest opts into
+// resumption (a manifest without one never has a durable journal). crypto/rand failure is
+// catastrophic but effectively impossible; returning empty would silently disable
+// resumption, so it is preferred over panicking the transfer.
+func newTransferID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(b)
 }
 
 // directionalKeys selects the seal/open keys for this peer's role, mirroring the session's

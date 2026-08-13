@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -179,12 +180,28 @@ func TestDriverSignalingLossOnRelayIsFatal(t *testing.T) {
 	if code := wire.CodeOf(b.err); code != wire.CodeRelay {
 		t.Fatalf("receiver error code = %s (%v); want RELAY", code, b.err)
 	}
+	// A failed transfer must never leave a final-looking file; the only thing in the out
+	// directory is the hidden .sendbeam durable store, which deliberately keeps the
+	// resumable journal and partials (they are the user's only resumable data).
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 0 {
-		t.Fatalf("destination contains %d files after a failed transfer; want none", len(entries))
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), ".") {
+			t.Fatalf("destination contains a final-looking file %s after a failed transfer", entry.Name())
+		}
+	}
+	store, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || !listed[0].JournalOK || listed[0].CommittedBytes == 0 {
+		t.Fatalf("durable store must keep the resumable checkpoint after a relay loss, got %+v", listed)
 	}
 }
 
@@ -426,10 +443,10 @@ func TestDriverFallsBackOnFailedDirectRecovery(t *testing.T) {
 	done := make(chan result, 2)
 	go func() {
 		out, err := Run(ctx, hub.off, Spec{
-			Session:     rendezvous.Options{Role: rendezvous.RoleOfferer, Words: "alpha-bravo"},
-			Source:      wire.BytesSource(payload, meta, 64*1024),
-			ICEServers:  []webrtc.ICEServer{},
-			OnTransport: appendPath(sendPaths),
+			Session:             rendezvous.Options{Role: rendezvous.RoleOfferer, Words: "alpha-bravo"},
+			Source:              wire.BytesSource(payload, meta, 64*1024),
+			ICEServers:          []webrtc.ICEServer{},
+			OnTransport:         appendPath(sendPaths),
 			breakDirectRecovery: trigger,
 			OnProgress: func(bytes int64) {
 				if bytes >= 1024*1024 {

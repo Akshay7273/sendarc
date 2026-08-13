@@ -92,6 +92,11 @@ sendbeam receive 4-brave-otter --out ./downloads
 Both clients produce the same invite code and link, so browser and CLI peers can mix freely.
 Run `sendbeam help` for all options.
 
+CLI receives are crash-resilient: verified progress is journaled under `<out>/.sendbeam`
+and resumes automatically when you rejoin the same room, and
+`sendbeam transfers list|inspect|resume|discard` manages that state (see
+[docs/durable-receive.md](docs/durable-receive.md)).
+
 ## Self-hosting
 
 Prefer your own infrastructure? The single container runs the web app, the signaling
