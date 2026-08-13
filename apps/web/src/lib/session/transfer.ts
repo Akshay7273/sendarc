@@ -24,6 +24,7 @@ import {
 } from '../transfer/adaptive.js';
 import { ProgressTracker, type TransferSnapshot } from '../transfer/progress.js';
 import { readOpfsOutput, removeOpfsOutput } from '../transfer/sink.js';
+import { indexedDbDurableStore } from '../transfer/durable-store.js';
 import type {
   HostToWorker,
   ReceiveDestinationSpec,
@@ -66,6 +67,19 @@ export interface TransferController {
   resume(): void;
   /** Abort the transfer and tear down the worker, peer, and socket. Idempotent. */
   cancel(reason?: string): void;
+  /** Durable-receive metadata (journal + lease) once a resumable receive is prepared. */
+  durable(): DurableInfo | undefined;
+  /** Explicitly discard the kept journal + partials for this transfer (idempotent). */
+  discardDurable(): Promise<void>;
+}
+
+/** Resumable receive state the host surfaces for Keep/Discard. */
+export interface DurableInfo {
+  transferId: string;
+  ownerId: string;
+  resumed: boolean;
+  committedBytes: number;
+  totalBytes: number;
 }
 
 export interface SendOptions {
@@ -131,6 +145,18 @@ function run(
   let recovering = false;
   let switchPromise: Promise<void> | undefined;
   let cancelTimer: ReturnType<typeof setTimeout> | undefined;
+  // Durable-receive state reported by the worker (journal + lease). The lease must be
+  // released when the tab goes away (pagehide) so a retry is not blocked by the TTL.
+  let durableInfo: DurableInfo | undefined;
+  let releaseLeaseOnPageHide: (() => void) | undefined;
+  const armPageHideRelease = (info: DurableInfo): void => {
+    if (releaseLeaseOnPageHide) return;
+    const onPageHide = (): void => {
+      void indexedDbDurableStore().releaseLease(info.transferId, info.ownerId);
+    };
+    addEventListener('pagehide', onPageHide);
+    releaseLeaseOnPageHide = () => removeEventListener('pagehide', onPageHide);
+  };
 
   // Sanitized diagnostics (V12-PR06 / ADR 0003): setup timing, transport/path, ICE state, and
   // failure events — all redacted so the snapshot is safe to surface on a failure report.
@@ -159,6 +185,8 @@ function run(
   const cleanup = (): void => {
     generation.bump();
     clearTimeout(cancelTimer);
+    releaseLeaseOnPageHide?.();
+    releaseLeaseOnPageHide = undefined;
     wakeLock.setActive(false);
     worker?.terminate();
     peer?.close();
@@ -353,6 +381,10 @@ function run(
             total = msg.totalSize;
             progress.setTotal(msg.totalSize);
             return;
+          case 'durable':
+            durableInfo = { ...msg };
+            armPageHideRelease(durableInfo);
+            return;
           case 'state':
             progress.setState(msg.state);
             return;
@@ -481,6 +513,11 @@ function run(
       }
       worker.postMessage({ kind: 'control', op: 'cancel' } satisfies HostToWorker);
       cancelTimer = setTimeout(() => fail(new Error(reason)), 1000);
+    },
+    durable: () => durableInfo,
+    discardDurable: async () => {
+      if (!durableInfo) return;
+      await indexedDbDurableStore().discard(durableInfo.transferId);
     },
   };
 }

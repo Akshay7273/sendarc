@@ -38,7 +38,7 @@ async function main(): Promise<void> {
     createSink: () => {
       throw new Error('browser worker uses a destination factory');
     },
-    createDestination: (spec) => createBrowserDestination(spec),
+    createDestination: (spec) => createBrowserDestination(spec, createDigest),
     fileSource: (file) => blobFileSource(file),
   });
 }
