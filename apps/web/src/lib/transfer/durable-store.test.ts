@@ -2,12 +2,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FrameType, type Manifest } from '@sendbeam/protocol';
 import {
   DURABLE_LEASE_TTL_MS,
+  discardDurableTransfer,
   durableOpfsFiles,
   indexedDbDurableStore,
   type DurableJournalStore,
   type DurableFiles,
 } from './durable-store.js';
 import type { WritableFileLike } from './stream-sink.js';
+import { DurableDestination } from './durable-destination.js';
+import { createSha256DigestFactory } from './digest.js';
 
 // ---------------------------------------------------------------------------
 // Minimal but faithful in-memory IndexedDB for the browser-backend tests. Requests
@@ -316,47 +319,70 @@ describe('indexedDbDurableStore', () => {
 // ---------------------------------------------------------------------------
 
 /** In-memory OPFS handle tree with optional sync-access-handle availability. */
-function fakeStorage(opts: { sync?: boolean; quota?: number } = {}) {
-  const syncAvailable = opts.sync ?? true;
-  const files = new Map<string, Uint8Array>();
-  const writableStreams = new Map<string, FakeWritable>();
+function fakeStorage(
+  opts: {
+    sync?: boolean;
+    quota?: number;
+    /** Per write() call return counts for the sync handle; empty queue means full writes. */
+    syncWriteResults?: number[];
+    /** Make removeEntry throw (surfaces removeData failures). */
+    failRemoveData?: boolean;
+  } = {},
+) {
+  const state = {
+    syncAvailable: opts.sync ?? true,
+    quota: opts.quota,
+    files: new Map<string, Uint8Array>(),
+    writableStreams: new Map<string, FakeWritable>(),
+    syncWriteResults: opts.syncWriteResults ? [...opts.syncWriteResults] : undefined,
+    syncEvents: [] as string[],
+    failRemoveData: opts.failRemoveData ?? false,
+  };
 
   class FakeSyncHandle {
     private size: number;
     constructor(private readonly key: string) {
-      this.size = files.get(key)?.length ?? 0;
+      this.size = state.files.get(key)?.length ?? 0;
     }
     write(buffer: Uint8Array, options: { at?: number }): number {
       const at = options.at ?? 0;
-      const cur = files.get(this.key) ?? new Uint8Array();
-      const end = at + buffer.length;
+      const requested = buffer.length;
+      const count =
+        state.syncWriteResults !== undefined && state.syncWriteResults.length > 0
+          ? state.syncWriteResults.shift()!
+          : requested;
+      const n = Math.min(count, requested);
+      const cur = state.files.get(this.key) ?? new Uint8Array();
+      const end = at + n;
       const grown = new Uint8Array(Math.max(end, cur.length));
       grown.set(cur);
-      grown.set(buffer, at);
-      files.set(this.key, grown);
+      grown.set(buffer.subarray(0, n), at);
+      state.files.set(this.key, grown);
       this.size = grown.length;
-      return buffer.length;
+      state.syncEvents.push(`write:${count}`);
+      return count;
     }
     flush(): void {
-      // No-op for this test layer; flush-before-commit ordering is asserted at the
-      // destination layer where the store and files share an event log.
+      state.syncEvents.push('flush');
     }
     getSize(): number {
       return this.size;
     }
     truncate(size: number): void {
-      const cur = files.get(this.key) ?? new Uint8Array();
-      files.set(this.key, cur.slice(0, size));
+      const cur = state.files.get(this.key) ?? new Uint8Array();
+      state.files.set(this.key, cur.slice(0, size));
       this.size = size;
     }
-    close(): void {}
+    close(): void {
+      state.syncEvents.push('close');
+    }
   }
 
   const makeFileHandle = (key: string): FileSystemHandle =>
     ({
       kind: 'file',
       getFile: async () => {
-        const blob = files.get(key) ?? new Uint8Array();
+        const blob = state.files.get(key) ?? new Uint8Array();
         return new File(
           [blob.buffer.slice(blob.byteOffset, blob.byteOffset + blob.byteLength) as ArrayBuffer],
           key,
@@ -364,11 +390,11 @@ function fakeStorage(opts: { sync?: boolean; quota?: number } = {}) {
       },
       createWritable: async () => {
         const writable = new FakeWritable();
-        writableStreams.set(key, writable);
+        state.writableStreams.set(key, writable);
         return writable;
       },
       createSyncAccessHandle: async () => {
-        if (!syncAvailable) throw new TypeError('sync access handles unavailable');
+        if (!state.syncAvailable) throw new TypeError('sync access handles unavailable');
         return new FakeSyncHandle(key);
       },
     }) as unknown as FileSystemHandle;
@@ -384,23 +410,25 @@ function fakeStorage(opts: { sync?: boolean; quota?: number } = {}) {
       },
       getFileHandle: (name: string, options: { create?: boolean }) => {
         const key = join(prefix, name);
-        if (!options.create && !files.has(key)) throw new DOMException('missing', 'NotFoundError');
-        if (options.create && !files.has(key)) files.set(key, new Uint8Array()); // create-on-open
+        if (!options.create && !state.files.has(key))
+          throw new DOMException('missing', 'NotFoundError');
+        if (options.create && !state.files.has(key)) state.files.set(key, new Uint8Array()); // create-on-open
         return Promise.resolve(makeFileHandle(key));
       },
       removeEntry: (name: string, options: { recursive?: boolean } = {}) => {
+        if (state.failRemoveData) throw new DOMException('removal failed', 'OperationError');
         const key = join(prefix, name);
         if (options.recursive) {
-          for (const existing of [...files.keys()]) {
-            if (existing.startsWith(`${key}/`)) files.delete(existing);
+          for (const existing of [...state.files.keys()]) {
+            if (existing.startsWith(`${key}/`)) state.files.delete(existing);
           }
         }
-        files.delete(key);
+        state.files.delete(key);
         return Promise.resolve();
       },
       entries: () => {
         const children = new Map<string, { kind: 'directory' | 'file' }>();
-        for (const key of files.keys()) {
+        for (const key of state.files.keys()) {
           if (prefix !== '' && !key.startsWith(`${prefix}/`)) continue;
           const rest = prefix === '' ? key : key.slice(prefix.length + 1);
           const slash = rest.indexOf('/');
@@ -425,15 +453,19 @@ function fakeStorage(opts: { sync?: boolean; quota?: number } = {}) {
   vi.stubGlobal('navigator', {
     storage: {
       getDirectory: async () => makeDir(''),
-      ...(opts.quota !== undefined
+      ...(state.quota !== undefined
         ? {
-            estimate: async () => ({ quota: opts.quota, usage: 0 }),
+            estimate: async () => ({ quota: state.quota, usage: 0 }),
           }
         : {}),
     },
   });
 
-  return { files, writableStreams };
+  return {
+    files: state.files,
+    writableStreams: state.writableStreams,
+    syncEvents: state.syncEvents,
+  };
 }
 
 class FakeWritable implements WritableFileLike {
@@ -532,5 +564,242 @@ describe('durableOpfsFiles', () => {
     await f.removeData(TRANSFER_ID);
     await f.removeData(TRANSFER_ID); // idempotent
     expect(await f.partialSize(TRANSFER_ID, 'folder/a.bin')).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sync writer short-write handling
+// ---------------------------------------------------------------------------
+
+describe('sync partial writer short writes', () => {
+  it('loops on one short write, persists the whole block, and flushes only at the end', async () => {
+    const { files, syncEvents } = fakeStorage({ sync: true, syncWriteResults: [2] });
+    const f: DurableFiles = durableOpfsFiles();
+    const writer = await f.openWriter(TRANSFER_ID, 'a.bin', 0, true);
+    await writer.write(0, new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]));
+    await writer.close();
+    expect(files.get(partKey('a.bin'))).toEqual(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]));
+    const writes = syncEvents.filter((e) => e.startsWith('write:'));
+    expect(writes).toEqual(['write:2', 'write:6']);
+    // The durability barrier (flush) runs only after the complete block was written.
+    expect(syncEvents.indexOf('flush')).toBeGreaterThan(syncEvents.indexOf('write:6'));
+  });
+
+  it('handles several partial writes for one block', async () => {
+    const { files, syncEvents } = fakeStorage({ sync: true, syncWriteResults: [1, 2, 3] });
+    const f: DurableFiles = durableOpfsFiles();
+    const writer = await f.openWriter(TRANSFER_ID, 'a.bin', 0, true);
+    await writer.write(0, new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]));
+    await writer.close();
+    expect(files.get(partKey('a.bin'))).toEqual(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]));
+    expect(syncEvents.filter((e) => e.startsWith('write:'))).toEqual([
+      'write:1',
+      'write:2',
+      'write:3',
+      'write:2',
+    ]);
+    expect(syncEvents.indexOf('flush')).toBeGreaterThan(syncEvents.indexOf('write:2'));
+  });
+
+  it('fails closed on a zero/no-progress write instead of looping forever', async () => {
+    const { files, syncEvents } = fakeStorage({ sync: true, syncWriteResults: [0] });
+    const f: DurableFiles = durableOpfsFiles();
+    const writer = await f.openWriter(TRANSFER_ID, 'a.bin', 0, true);
+    await expect(writer.write(0, new Uint8Array(8))).rejects.toThrow(/no progress/);
+    // Nothing was persisted and no durability barrier ran.
+    expect(files.get(partKey('a.bin'))?.length ?? 0).toBe(0);
+    expect(syncEvents).not.toContain('flush');
+  });
+
+  it('fails closed when the API reports an impossible oversized count', async () => {
+    const { syncEvents } = fakeStorage({ sync: true, syncWriteResults: [9] });
+    const f: DurableFiles = durableOpfsFiles();
+    const writer = await f.openWriter(TRANSFER_ID, 'a.bin', 0, true);
+    await expect(writer.write(0, new Uint8Array(8))).rejects.toThrow(/impossible/);
+    expect(syncEvents).not.toContain('flush');
+  });
+
+  it('a failed short write never advances the journal checkpoint', async () => {
+    fakeStorage({ sync: true, syncWriteResults: [0] });
+    const idb = makeFakeIndexedDB();
+    vi.stubGlobal('indexedDB', idb);
+    const store = indexedDbDurableStore();
+    const digestFactory = await createSha256DigestFactory();
+    const d = new DurableDestination({
+      createDigest: () => digestFactory(),
+      files: durableOpfsFiles(),
+      store,
+      now: () => 1_000,
+      renewMs: 0,
+      ensureSpace: async () => {},
+    });
+    const m = manifest([['a.bin', 8]]);
+    await d.prepare(m);
+    const sink = await d.open(m.files[0]!);
+    await expect(sink.write(0, new Uint8Array(8))).rejects.toThrow(/no progress/);
+    const loaded = await store.loadJournal(TRANSFER_ID);
+    expect(loaded.kind).toBe('ok');
+    if (loaded.kind !== 'ok') return;
+    // The checkpoint never advanced for an incompletely-written block.
+    expect(loaded.journal.files[0]!.committedBlocks).toBe(0);
+    await d.abort();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Explicit discard: lease-guarded durable receive cleanup
+// ---------------------------------------------------------------------------
+
+describe('discardDurableTransfer', () => {
+  function setup(): {
+    files: DurableFiles;
+    store: DurableJournalStore;
+    idb: FakeIndexedDB;
+  } {
+    fakeStorage({ sync: true });
+    const idb = makeFakeIndexedDB();
+    vi.stubGlobal('indexedDB', idb);
+    return { files: durableOpfsFiles(), store: indexedDbDurableStore(), idb };
+  }
+
+  async function seed(
+    store: DurableJournalStore,
+    files: DurableFiles,
+    ownerId: string,
+    nowMs: number,
+  ): Promise<void> {
+    await store.createJournal(
+      TRANSFER_ID,
+      manifest([['a.bin', 8]]),
+      { version: 1, value: '0'.repeat(64) },
+      { version: 1, value: '1'.repeat(64) },
+      nowMs,
+    );
+    await store.acquireLease(TRANSFER_ID, ownerId, nowMs);
+    const writer = await files.openWriter(TRANSFER_ID, 'a.bin', 0, true);
+    await writer.write(0, new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]));
+    await writer.close();
+  }
+
+  it('removes the journal, lease, and OPFS partials for exactly that transfer, idempotently', async () => {
+    const { files, store, idb } = setup();
+    await seed(store, files, OWNER_A, 1_000);
+
+    await discardDurableTransfer(TRANSFER_ID, OWNER_A, { files, store, now: () => 2_000 });
+
+    expect((await store.loadJournal(TRANSFER_ID)).kind).toBe('none');
+    expect(await files.partialSize(TRANSFER_ID, 'a.bin')).toBeUndefined();
+    expect(await readLease(idb, TRANSFER_ID)).toBeUndefined();
+
+    // Repeated discard remains safe.
+    await discardDurableTransfer(TRANSFER_ID, OWNER_A, { files, store, now: () => 2_000 });
+    expect((await store.loadJournal(TRANSFER_ID)).kind).toBe('none');
+  });
+
+  it('never touches another transfer', async () => {
+    const { files, store } = setup();
+    await seed(store, files, OWNER_A, 1_000);
+    const otherId = 'b'.repeat(32);
+    await store.createJournal(
+      otherId,
+      { ...manifest([['x.bin', 8]]), transferId: otherId },
+      { version: 1, value: '0'.repeat(64) },
+      { version: 1, value: '1'.repeat(64) },
+      1_000,
+    );
+    await store.acquireLease(otherId, OWNER_B, 1_000);
+    const otherWriter = await files.openWriter(otherId, 'x.bin', 0, true);
+    await otherWriter.write(0, new Uint8Array(8));
+    await otherWriter.close();
+
+    await discardDurableTransfer(TRANSFER_ID, OWNER_A, { files, store, now: () => 2_000 });
+
+    expect((await store.loadJournal(TRANSFER_ID)).kind).toBe('none');
+    expect(await files.partialSize(TRANSFER_ID, 'a.bin')).toBeUndefined();
+    // The other transfer's journal, lease, and partials are untouched.
+    expect((await store.loadJournal(otherId)).kind).toBe('ok');
+    expect(await files.partialSize(otherId, 'x.bin')).toBe(8);
+  });
+
+  it('refuses to discard while a live foreign lease owns the transfer', async () => {
+    const { files, store, idb } = setup();
+    await seed(store, files, OWNER_A, 1_000);
+
+    await expect(
+      discardDurableTransfer(TRANSFER_ID, OWNER_B, { files, store, now: () => 1_100 }),
+    ).rejects.toThrow(/actively using/);
+
+    // Nothing was deleted: journal, lease, and partials are untouched.
+    expect((await store.loadJournal(TRANSFER_ID)).kind).toBe('ok');
+    expect((await readLease(idb, TRANSFER_ID))?.ownerId).toBe(OWNER_A);
+    expect(await files.partialSize(TRANSFER_ID, 'a.bin')).toBe(8);
+  });
+
+  it('takes over a stale lease and discards', async () => {
+    const { files, store, idb } = setup();
+    await seed(store, files, OWNER_A, 1_000);
+
+    await discardDurableTransfer(TRANSFER_ID, OWNER_B, {
+      files,
+      store,
+      now: () => 1_000 + DURABLE_LEASE_TTL_MS + 1,
+    });
+
+    expect((await store.loadJournal(TRANSFER_ID)).kind).toBe('none');
+    expect(await files.partialSize(TRANSFER_ID, 'a.bin')).toBeUndefined();
+    expect(await readLease(idb, TRANSFER_ID)).toBeUndefined();
+  });
+
+  it('fails closed when OPFS removal fails: nothing deleted, lease released for retry', async () => {
+    fakeStorage({ sync: true, failRemoveData: true });
+    const idb = makeFakeIndexedDB();
+    vi.stubGlobal('indexedDB', idb);
+    const store = indexedDbDurableStore();
+    const files: DurableFiles = durableOpfsFiles();
+    await seed(store, files, OWNER_A, 1_000);
+
+    await expect(
+      discardDurableTransfer(TRANSFER_ID, OWNER_A, { files, store, now: () => 2_000 }),
+    ).rejects.toThrow(/removal failed/);
+
+    // Fail-closed: journal + partials stay fully intact and resumable.
+    expect((await store.loadJournal(TRANSFER_ID)).kind).toBe('ok');
+    expect(await files.partialSize(TRANSFER_ID, 'a.bin')).toBe(8);
+    // The lease taken for the discard was released so a retry acquires immediately.
+    expect(await readLease(idb, TRANSFER_ID)).toBeUndefined();
+
+    // With healthy storage the retry succeeds.
+    fakeStorage({ sync: true });
+    await discardDurableTransfer(TRANSFER_ID, OWNER_A, { files, store, now: () => 3_000 });
+    expect((await store.loadJournal(TRANSFER_ID)).kind).toBe('none');
+    expect(await files.partialSize(TRANSFER_ID, 'a.bin')).toBeUndefined();
+  });
+
+  it('removes OPFS data before journal + lease metadata (fail-closed ordering)', async () => {
+    const { files, store, idb } = setup();
+    await seed(store, files, OWNER_A, 1_000);
+    // Metadata removal fails after the data layer succeeded (IDB + OPFS are not atomic).
+    const failingStore = Object.create(store) as DurableJournalStore;
+    failingStore.discard = async () => {
+      throw new Error('idb discard failed');
+    };
+
+    await expect(
+      discardDurableTransfer(TRANSFER_ID, OWNER_A, {
+        files,
+        store: failingStore,
+        now: () => 2_000,
+      }),
+    ).rejects.toThrow(/idb discard failed/);
+
+    // Data-first: the partials are already gone, so the leftover journal is provably
+    // unusable (a resume fails closed, never silent), and the lease was released for retry.
+    expect(await files.partialSize(TRANSFER_ID, 'a.bin')).toBeUndefined();
+    expect((await store.loadJournal(TRANSFER_ID)).kind).toBe('ok');
+    expect(await readLease(idb, TRANSFER_ID)).toBeUndefined();
+
+    // The retry completes the cleanup.
+    await discardDurableTransfer(TRANSFER_ID, OWNER_A, { files, store, now: () => 3_000 });
+    expect((await store.loadJournal(TRANSFER_ID)).kind).toBe('none');
   });
 });
