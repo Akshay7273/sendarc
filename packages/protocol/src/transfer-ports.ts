@@ -69,6 +69,35 @@ export interface Digest {
   hexDigest(): string | Promise<string>;
 }
 
+/**
+ * Optional Digest capability (V13-PR05): the digest's internal state can be serialized to
+ * bytes that a compatible Digest can restore, so a durable receiver resumes hashing from a
+ * checkpoint instead of re-hashing the persisted prefix. The bytes are opaque to the
+ * engine — meaningful only to the implementation that produced them and version-tagged by
+ * the host when persisted. A digest without this capability simply never contributes state.
+ */
+export interface DigestState {
+  /** Snapshot of the digest's internal state covering exactly the bytes fed so far. The digest remains usable afterwards. */
+  saveState(): Uint8Array;
+}
+
+/**
+ * Optional Sink capability (V13-PR05): the sink can carry serialized digest state into its
+ * next durable checkpoint. The engine calls `setDigestState` with state covering exactly
+ * the blocks the following `write` (or `close`, for hosts that commit on close) will
+ * checkpoint, so the storage layer persists committedBlocks and the matching digest
+ * checkpoint atomically in one journal update. The state is an optimization only; a sink
+ * that rejects it (or a digest without state support) journals a checkpoint without digest
+ * state and resume re-hashes.
+ */
+export interface DigestStateSink {
+  /**
+   * Remember serialized digest state for the blocks the next `write`/`close` commits. A
+   * null state clears it (the next checkpoint carries no digest state).
+   */
+  setDigestState(state: Uint8Array | null): void | Promise<void>;
+}
+
 /** Map a wire `fail` reason onto its taxonomy class (ADR 0002). */
 const codeForReason: Record<Fail['reason'], ErrorCodeType> = {
   digest_mismatch: ErrorCode.Protocol,

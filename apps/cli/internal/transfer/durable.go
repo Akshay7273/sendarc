@@ -684,7 +684,10 @@ func (d *DurableDestination) Open(file wire.FileEntry) (wire.Sink, error) {
 // commitBlocks advances one file's checkpoint after its block data is durable, enforcing
 // the disk budget at the same point. It is the only place the journal's committed
 // progress may move forward (wire.CommitBlocks refuses regression and out-of-bounds).
-func (d *DurableDestination) commitBlocks(fileIdx, blocks int) error {
+// The optional digest state (V13-PR05), when non-empty, is persisted atomically with the
+// checkpoint as a JournalDigestCheckpoint covering exactly these blocks; when empty, any
+// stale checkpoint for the file is cleared (it could not cover the new high-water mark).
+func (d *DurableDestination) commitBlocks(fileIdx, blocks int, digestState []byte) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.closed || d.aborted {
@@ -694,6 +697,22 @@ func (d *DurableDestination) commitBlocks(fileIdx, blocks int) error {
 		return nil // non-resumable transfer: nothing to checkpoint
 	}
 	if err := d.journal.CommitBlocks(fileIdx, blocks, d.hooks.now()); err != nil {
+		return err
+	}
+	var cp *wire.JournalDigestCheckpoint
+	if len(digestState) > 0 {
+		committed, err := d.journal.CommittedBytes(fileIdx)
+		if err != nil {
+			return err
+		}
+		cp = &wire.JournalDigestCheckpoint{
+			Format:          wire.DigestCheckpointFormatGoStdlib,
+			CommittedBlocks: blocks,
+			CommittedBytes:  committed,
+			State:           hex.EncodeToString(digestState),
+		}
+	}
+	if err := d.journal.SetDigestCheckpoint(fileIdx, cp); err != nil {
 		return err
 	}
 	committed, err := d.store.committedBytesTotal(d.journal)
@@ -744,9 +763,24 @@ func (d *DurableDestination) ResumeStateFor(manifest wire.Manifest) (*wire.Recei
 				"transfer: journal %s file %q: %v — refusing to resume; run \"sendbeam transfers inspect %s\"",
 				journal.TransferID, f.Name, err, journal.TransferID)
 		}
-		digest := wire.NewSHA256Digest()
-		if err := hashPrefix(part, committed, digest); err != nil {
-			return nil, err
+		// V13-PR05: restore the digest from the checkpointed state when this runtime
+		// produced it and it decodes; otherwise correctness-first, re-hash the persisted
+		// prefix. Final whole-file verification is mandatory in every path, so an
+		// unrestorable or wrong state can never corrupt — it would fail verification.
+		var digest wire.Digest
+		restored := false
+		if cp := f.DigestCheckpoint; cp != nil && cp.Format == wire.DigestCheckpointFormatGoStdlib {
+			if state, err := hex.DecodeString(cp.State); err == nil {
+				if digest, err = wire.RestoreSHA256Digest(state); err == nil {
+					restored = true
+				}
+			}
+		}
+		if !restored {
+			digest = wire.NewSHA256Digest()
+			if err := hashPrefix(part, committed, digest); err != nil {
+				return nil, err
+			}
 		}
 		resume.Files[i] = wire.ResumeFileProgress{HaveBlocks: f.CommittedBlocks, SeedDigest: digest}
 	}
@@ -961,16 +995,33 @@ type DurableFileSink struct {
 	blockSize int
 	syncFile  func(f *os.File) error
 
-	mu     sync.Mutex
-	closed bool
+	mu                 sync.Mutex
+	closed             bool
+	pendingDigestState []byte
 }
 
 // Path returns the .part path (never a final name).
 func (s *DurableFileSink) Path() string { return s.path }
 
+// SetDigestState implements wire.DigestStateSink (V13-PR05): the serialized digest state
+// covering exactly the blocks the next Write checkpoints is carried into the same atomic
+// journal update. A nil state clears it (the next checkpoint carries no digest state and
+// resume re-hashes). The receiver calls this before each Write, so a stale state is
+// impossible: every commit consumes the state that was set for exactly its blocks.
+func (s *DurableFileSink) SetDigestState(state []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errSinkClosed
+	}
+	s.pendingDigestState = state
+	return nil
+}
+
 // Write places one verified block at offset and, only after fsyncing it, advances the
 // journal checkpoint for the completed block. The block must be block-aligned (the wire
-// layer guarantees this), so the checkpoint is offset/blockSize + 1 whole blocks.
+// layer guarantees this), so the checkpoint is offset/blockSize + 1 whole blocks. The
+// pending digest state set before this call is persisted atomically with the checkpoint.
 func (s *DurableFileSink) Write(offset int64, bytes []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -986,7 +1037,9 @@ func (s *DurableFileSink) Write(offset int64, bytes []byte) error {
 		return err
 	}
 	blocks := int(offset/int64(s.blockSize)) + 1
-	return s.dest.commitBlocks(s.fileIdx, blocks)
+	state := s.pendingDigestState
+	s.pendingDigestState = nil
+	return s.dest.commitBlocks(s.fileIdx, blocks, state)
 }
 
 // Close flushes and closes the .part descriptor. It is idempotent. The final rename is

@@ -2,8 +2,11 @@ package wire
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -35,7 +38,8 @@ func journalTestTimes() (time.Time, time.Time) {
 }
 
 // journalVectorSample builds the exact journal pinned by docs/test-vectors/durable-journal.json:
-// zero checkpoints at creation, then file 0 committed through its first block.
+// zero checkpoints at creation, then file 0 committed through its first block with a digest
+// checkpoint (V13-PR05) so the pinned schema also carries the optional field.
 func journalVectorSample(t *testing.T) DurableJournal {
 	t.Helper()
 	created, updated := journalTestTimes()
@@ -47,7 +51,41 @@ func journalVectorSample(t *testing.T) DurableJournal {
 	if err := j.CommitBlocks(0, 1, updated); err != nil {
 		t.Fatalf("CommitBlocks: %v", err)
 	}
+	// A real Go sha256 state covering the committed prefix (1024 zero bytes, the sample
+	// file's first block): the state bytes are opaque but the envelope must round-trip
+	// byte-identically in both languages.
+	state, err := sampleDigestState(t, 1024)
+	if err != nil {
+		t.Fatalf("sample digest state: %v", err)
+	}
+	if err := j.SetDigestCheckpoint(0, &JournalDigestCheckpoint{
+		Format:          DigestCheckpointFormatGoStdlib,
+		CommittedBlocks: 1,
+		CommittedBytes:  1024,
+		State:           hex.EncodeToString(state),
+	}); err != nil {
+		t.Fatalf("SetDigestCheckpoint: %v", err)
+	}
 	return j
+}
+
+// sampleDigestState serializes the Go sha256 state after feeding n zero bytes.
+func sampleDigestState(t *testing.T, n int64) ([]byte, error) {
+	t.Helper()
+	h := sha256.New()
+	if _, err := io.Copy(h, io.LimitReader(zeroReader{}, n)); err != nil {
+		return nil, err
+	}
+	return (&sha256Digest{h: h}).MarshalState()
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
 }
 
 func TestJournalRoundTrip(t *testing.T) {
@@ -253,7 +291,8 @@ func TestJournalTamperedRejected(t *testing.T) {
 		raw := rewriteJSON(t, encoded, func(m map[string]any) {
 			files := m["files"].([]any)
 			f0 := files[0].(map[string]any)
-			f0["committedBlocks"] = 2 // valid claim, but checksum was not recomputed
+			f0["committedBlocks"] = 2      // valid claim, but checksum was not recomputed
+			delete(f0, "digestCheckpoint") // drop it too: a checkpoint cannot cover the new high-water
 		})
 		if _, err := DecodeJournal(raw); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
 			t.Fatalf("stale-checksum checkpoint must fail closed, got %v", err)
@@ -575,6 +614,98 @@ func TestJournalResumeSecretOpaque(t *testing.T) {
 // journal from the vector's inputs must reproduce the recorded fingerprint and the
 // byte-exact canonical JSON (including its checksum). The TypeScript twin asserts the
 // same file, so any drift between the two implementations fails one of them.
+func TestJournalDigestCheckpointContract(t *testing.T) {
+	j := journalVectorSample(t)
+	now := time.UnixMilli(1723500120000)
+
+	// The vector sample carries a valid checkpoint on file 0; a round-trip preserves it.
+	decoded, err := DecodeJournal(mustEncode(t, j))
+	if err != nil {
+		t.Fatalf("round-trip: %v", err)
+	}
+	cp := decoded.Files[0].DigestCheckpoint
+	if cp == nil {
+		t.Fatal("digest checkpoint lost in round-trip")
+	}
+	if cp.Format != DigestCheckpointFormatGoStdlib || cp.CommittedBlocks != 1 || cp.CommittedBytes != 1024 {
+		t.Fatalf("round-trip checkpoint mismatch: %+v", cp)
+	}
+
+	// A checkpoint must describe exactly the file's committed blocks.
+	if err := j.SetDigestCheckpoint(0, &JournalDigestCheckpoint{
+		Format: DigestCheckpointFormatGoStdlib, CommittedBlocks: 2, CommittedBytes: 2048,
+		State: strings.Repeat("ab", 54),
+	}); err == nil {
+		t.Fatal("checkpoint block count diverging from committedBlocks must be refused")
+	}
+	if err := j.SetDigestCheckpoint(7, nil); err == nil {
+		t.Fatal("unknown file must be refused")
+	}
+
+	// CommitBlocks clears the stale checkpoint so the journal can never hold an
+	// inconsistent one; the storage layer re-attaches the matching state afterwards.
+	if err := j.CommitBlocks(0, 2, now); err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if j.Files[0].DigestCheckpoint != nil {
+		t.Fatal("commit must clear a checkpoint that cannot cover the new high-water mark")
+	}
+	if err := j.SetDigestCheckpoint(0, &JournalDigestCheckpoint{
+		Format: DigestCheckpointFormatGoStdlib, CommittedBlocks: 2, CommittedBytes: 2048,
+		State: strings.Repeat("ab", 54),
+	}); err != nil {
+		t.Fatalf("re-attach: %v", err)
+	}
+	if _, err := DecodeJournal(mustEncode(t, j)); err != nil {
+		t.Fatalf("re-attached checkpoint round-trip: %v", err)
+	}
+
+	// Structural violations fail closed, each on its own claim.
+	valid := func() DurableJournal { j, _ := DecodeJournal(mustEncode(t, journalVectorSample(t))); return j }
+	for name, mutate := range map[string]func(*JournalDigestCheckpoint){
+		"invalid format identifier": func(cp *JournalDigestCheckpoint) {
+			cp.Format = "Sha256-go-v1"
+		},
+		"block count mismatch": func(cp *JournalDigestCheckpoint) { cp.CommittedBlocks = 0 },
+		"byte count mismatch":  func(cp *JournalDigestCheckpoint) { cp.CommittedBytes = 512 },
+		"empty state":          func(cp *JournalDigestCheckpoint) { cp.State = "" },
+		"non-hex state":        func(cp *JournalDigestCheckpoint) { cp.State = "ZZ" },
+		"odd-length state":     func(cp *JournalDigestCheckpoint) { cp.State = "abc" },
+	} {
+		bad := valid()
+		cp := bad.Files[0].DigestCheckpoint
+		mutate(cp)
+		if _, err := EncodeJournal(bad); err == nil {
+			t.Fatalf("%s: must fail closed", name)
+		}
+	}
+
+	// An UNKNOWN format identifier is structurally fine — the journal is valid and merely
+	// falls back to prefix re-hash at resume time (the format is an opaque claim).
+	ok := valid()
+	ok.Files[0].DigestCheckpoint.Format = "some-future-impl-v9"
+	if _, err := EncodeJournal(ok); err != nil {
+		t.Fatalf("unknown format must stay decodable (resume re-hashes), got %v", err)
+	}
+
+	// Oversized state is bounded.
+	bad := valid()
+	bad.Files[0].DigestCheckpoint.State = strings.Repeat("ab", 2049) // 4098 hex chars
+	if _, err := EncodeJournal(bad); err == nil {
+		t.Fatal("oversized checkpoint state must fail closed")
+	}
+}
+
+// mustEncode encodes without failing the test, for tests that only care about decoding.
+func mustEncode(t *testing.T, j DurableJournal) []byte {
+	t.Helper()
+	encoded, err := EncodeJournal(j)
+	if err != nil {
+		t.Fatalf("EncodeJournal: %v", err)
+	}
+	return encoded
+}
+
 func TestJournalVector(t *testing.T) {
 	var doc journalVectorDoc
 	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "test-vectors", "durable-journal.json"))
@@ -600,6 +731,11 @@ func TestJournalVector(t *testing.T) {
 	for i, blocks := range doc.CommittedBlocks {
 		if err := j.CommitBlocks(i, blocks, time.UnixMilli(doc.UpdatedAt)); err != nil {
 			t.Fatalf("CommitBlocks(%d, %d): %v", i, blocks, err)
+		}
+		if cp := doc.DigestCheckpoints[i]; cp != nil {
+			if err := j.SetDigestCheckpoint(i, cp); err != nil {
+				t.Fatalf("SetDigestCheckpoint(%d): %v", i, err)
+			}
 		}
 	}
 	if j.ManifestFingerprint != doc.Fingerprint {

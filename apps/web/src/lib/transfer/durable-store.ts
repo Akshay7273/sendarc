@@ -27,6 +27,7 @@ import {
   utf8,
   type Digest,
   type DurableJournal,
+  type JournalDigestCheckpoint,
   type JournalIdentity,
   type Manifest,
 } from '@sendbeam/protocol';
@@ -131,7 +132,9 @@ export interface DurableJournalStore {
   /**
    * Advance one file's checkpoint in a single transaction that also renews the lease.
    * The caller must already hold the lease; a lost/foreign lease aborts the transaction and
-   * rejects, so two tabs can never both advance the same journal.
+   * rejects, so two tabs can never both advance the same journal. `digestCheckpoint`
+   * (V13-PR05), when given, is the serialized digest state covering exactly these blocks and
+   * is persisted atomically with the checkpoint.
    */
   commitBlocks(
     journal: DurableJournal,
@@ -139,6 +142,7 @@ export interface DurableJournalStore {
     blocks: number,
     nowMs: number,
     ownerId: string,
+    digestCheckpoint?: JournalDigestCheckpoint,
   ): Promise<DurableJournal>;
   /** Atomic test-and-set acquire with TTL; stale records are taken over. */
   acquireLease(transferId: string, ownerId: string, nowMs: number): Promise<LeaseOutcome>;
@@ -272,8 +276,9 @@ class IndexedDbDurableStore implements DurableJournalStore {
     blocks: number,
     nowMs: number,
     ownerId: string,
+    digestCheckpoint?: JournalDigestCheckpoint,
   ): Promise<DurableJournal> {
-    const next = advanceJournal(journal, fileIdx, blocks, nowMs);
+    const next = advanceJournal(journal, fileIdx, blocks, nowMs, digestCheckpoint);
     const encoded = await encodeJournal(next);
     const db = await this.db();
     await new Promise<void>((resolve, reject) => {

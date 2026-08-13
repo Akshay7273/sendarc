@@ -188,6 +188,256 @@ func runDurableLoopback(t *testing.T, dest *DurableDestination, blockSize int, c
 	return sendErr, recvErr
 }
 
+// TestDurableDigestCheckpointPersistsAndResumes pins V13-PR05: driving the sink exactly as
+// the wire receiver does (digest update first, then SetDigestState, then Write) persists the
+// serialized digest state atomically with the checkpoint, and a fresh process resumes the
+// digest from it — the resume seed equals the one-shot hash of the persisted prefix, and
+// the end-to-end whole-file verification still passes.
+func TestDurableDigestCheckpointPersistsAndResumes(t *testing.T) {
+	dir := t.TempDir()
+	dest, err := NewDurableDestination(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockSize := 1024
+	content := durableTestData(5 * blockSize)
+	manifest := durableTestManifest(t, durableTestID, blockSize, map[string][]byte{"f.bin": content})
+
+	if err := dest.Prepare(manifest); err != nil {
+		t.Fatal(err)
+	}
+	sink, err := dest.Open(manifest.Files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := wire.NewSHA256Digest()
+	for off := 0; off < 2*blockSize; off += blockSize {
+		digest.Update(content[off : off+blockSize])
+		state, err := digest.(wire.DigestState).MarshalState()
+		if err != nil {
+			t.Fatalf("MarshalState: %v", err)
+		}
+		if err := sink.(wire.DigestStateSink).SetDigestState(state); err != nil {
+			t.Fatalf("SetDigestState: %v", err)
+		}
+		if err := sink.Write(int64(off), content[off:off+blockSize]); err != nil {
+			t.Fatalf("sink.Write(%d): %v", off, err)
+		}
+	}
+	j := journalOnDisk(t, dest)
+	cp := j.Files[0].DigestCheckpoint
+	if cp == nil {
+		t.Fatal("digest checkpoint missing after commit")
+	}
+	if cp.Format != wire.DigestCheckpointFormatGoStdlib || cp.CommittedBlocks != 2 ||
+		cp.CommittedBytes != int64(2*blockSize) {
+		t.Fatalf("checkpoint envelope = %+v, want format=%s blocks=2 bytes=%d",
+			cp, wire.DigestCheckpointFormatGoStdlib, 2*blockSize)
+	}
+	if len(cp.State) != 2*108 {
+		t.Fatalf("checkpoint state hex = %d chars, want %d (a 108-byte sha256 state)", len(cp.State), 2*108)
+	}
+
+	// A fresh process restores the digest from the checkpointed state.
+	resumed, err := NewDurableDestination(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := resumed.Prepare(manifest); err != nil {
+		t.Fatal(err)
+	}
+	seed, err := resumed.ResumeStateFor(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oneShot := wire.NewSHA256Digest()
+	oneShot.Update(content[:2*blockSize])
+	if got := seed.Files[0].SeedDigest.HexDigest(); got != oneShot.HexDigest() {
+		t.Fatalf("resume seed = %s, want %s (restored state must hash the persisted prefix)",
+			got, oneShot.HexDigest())
+	}
+
+	// End-to-end: the restored digest continues over the missing blocks and the final
+	// whole-file verification passes.
+	final, err := NewDurableDestination(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sendErr, recvErr := runDurableLoopback(t, final, blockSize, map[string][]byte{"f.bin": content})
+	if sendErr != nil || recvErr != nil {
+		t.Fatalf("resume: send=%v receive=%v", sendErr, recvErr)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "f.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(content) {
+		t.Fatal("resumed file differs from source")
+	}
+}
+
+// TestDurableUnusableCheckpointFallsBackToRehash pins the safety valve: a checkpoint this
+// runtime cannot restore (unknown format, or a state that fails to decode) never breaks a
+// resume — ResumeStateFor re-hashes the persisted prefix, the correctness-first path.
+func TestDurableUnusableCheckpointFallsBackToRehash(t *testing.T) {
+	dir := t.TempDir()
+	blockSize := 1024
+	content := durableTestData(5 * blockSize)
+	manifest := durableTestManifest(t, durableTestID, blockSize, map[string][]byte{"f.bin": content})
+
+	// seedCheckpoint writes one committed block with a digest checkpoint, then mutates the
+	// checkpoint in the on-disk journal and re-saves it (recomputed checksum).
+	seedCheckpoint := func(t *testing.T, mutate func(cp *wire.JournalDigestCheckpoint)) {
+		t.Helper()
+		dest, err := NewDurableDestination(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := dest.Prepare(manifest); err != nil {
+			t.Fatal(err)
+		}
+		sink, err := dest.Open(manifest.Files[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := wire.NewSHA256Digest()
+		digest.Update(content[:blockSize])
+		state, err := digest.(wire.DigestState).MarshalState()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sink.(wire.DigestStateSink).SetDigestState(state); err != nil {
+			t.Fatal(err)
+		}
+		if err := sink.Write(0, content[:blockSize]); err != nil {
+			t.Fatal(err)
+		}
+		j := journalOnDisk(t, dest)
+		mutate(j.Files[0].DigestCheckpoint)
+		if err := dest.Store().SaveJournal(j); err != nil {
+			t.Fatalf("SaveJournal: %v", err)
+		}
+	}
+
+	oneShot := wire.NewSHA256Digest()
+	oneShot.Update(content[:blockSize])
+
+	t.Run("unknown format", func(t *testing.T) {
+		seedCheckpoint(t, func(cp *wire.JournalDigestCheckpoint) {
+			cp.Format = "some-future-impl-v9" // well-formed identifier, unknown runtime
+		})
+		resumed, err := NewDurableDestination(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := resumed.Prepare(manifest); err != nil {
+			t.Fatal(err)
+		}
+		seed, err := resumed.ResumeStateFor(manifest)
+		if err != nil {
+			t.Fatalf("unknown format must fall back to re-hash, got %v", err)
+		}
+		if got := seed.Files[0].SeedDigest.HexDigest(); got != oneShot.HexDigest() {
+			t.Fatalf("seed = %s, want %s", got, oneShot.HexDigest())
+		}
+	})
+
+	t.Run("undecodable state", func(t *testing.T) {
+		seedCheckpoint(t, func(cp *wire.JournalDigestCheckpoint) {
+			cp.State = cp.State[:len(cp.State)-4] // truncated: hex decodes, restore fails
+		})
+		resumed, err := NewDurableDestination(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := resumed.Prepare(manifest); err != nil {
+			t.Fatal(err)
+		}
+		seed, err := resumed.ResumeStateFor(manifest)
+		if err != nil {
+			t.Fatalf("undecodable state must fall back to re-hash, got %v", err)
+		}
+		if got := seed.Files[0].SeedDigest.HexDigest(); got != oneShot.HexDigest() {
+			t.Fatalf("seed = %s, want %s", got, oneShot.HexDigest())
+		}
+		// The resumed transfer still completes end-to-end.
+		final, err := NewDurableDestination(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sendErr, recvErr := runDurableLoopback(t, final, blockSize, map[string][]byte{"f.bin": content})
+		if sendErr != nil || recvErr != nil {
+			t.Fatalf("resume after fallback: send=%v receive=%v", sendErr, recvErr)
+		}
+	})
+}
+
+// TestDurableCheckpointNeverBypassesVerification pins the trust boundary: a VALID
+// checkpoint state covering bytes different from the persisted prefix is used to seed the
+// digest, so the resumed transfer completes writing and then FAILS the mandatory final
+// whole-file verification. The checkpoint is an optimization, never a source of truth.
+func TestDurableCheckpointNeverBypassesVerification(t *testing.T) {
+	dir := t.TempDir()
+	dest, err := NewDurableDestination(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockSize := 1024
+	content := durableTestData(5 * blockSize)
+	manifest := durableTestManifest(t, durableTestID, blockSize, map[string][]byte{"f.bin": content})
+
+	if err := dest.Prepare(manifest); err != nil {
+		t.Fatal(err)
+	}
+	sink, err := dest.Open(manifest.Files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := wire.NewSHA256Digest()
+	for off := 0; off < 2*blockSize; off += blockSize {
+		digest.Update(content[off : off+blockSize])
+		state, err := digest.(wire.DigestState).MarshalState()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sink.(wire.DigestStateSink).SetDigestState(state); err != nil {
+			t.Fatal(err)
+		}
+		if err := sink.Write(int64(off), content[off:off+blockSize]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Re-point the checkpoint at the digest of a DIFFERENT prefix; the journal checksum is
+	// recomputed by SaveJournal, so the journal itself is valid — only the state lies.
+	wrong := make([]byte, 2*blockSize)
+	copy(wrong, content[:2*blockSize])
+	wrong[0] ^= 0xff
+	other := wire.NewSHA256Digest()
+	other.Update(wrong)
+	wrongState, err := other.(wire.DigestState).MarshalState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := journalOnDisk(t, dest)
+	j.Files[0].DigestCheckpoint.State = hex.EncodeToString(wrongState)
+	if err := dest.Store().SaveJournal(j); err != nil {
+		t.Fatal(err)
+	}
+
+	resumed, err := NewDurableDestination(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sendErr, recvErr := runDurableLoopback(t, resumed, blockSize, map[string][]byte{"f.bin": content})
+	if sendErr == nil && recvErr == nil {
+		t.Fatal("a lying checkpoint must fail the final whole-file verification")
+	}
+	if recvErr == nil || !strings.Contains(recvErr.Error(), "digest") {
+		t.Fatalf("recvErr = %v, want a final digest failure", recvErr)
+	}
+}
+
 // TestDurableFreshTransferFinalizes pins the happy path: verified blocks land in .part
 // files, the journal tracks them, and after whole-transfer verification the finals appear,
 // the journal is removed, and no .part survives.

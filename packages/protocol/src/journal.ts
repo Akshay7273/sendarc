@@ -52,6 +52,54 @@ export const JOURNAL_SCHEMA_VERSION = 1;
 export const JOURNAL_RESUME_VERSION = 1;
 
 /**
+ * Digest checkpoint format identifiers (V13-PR05). The identifier tags the serialized
+ * digest state so only a compatible runtime restores it: the bytes are opaque,
+ * implementation-specific state, never decoded by another implementation. A journal whose
+ * checkpoint format this runtime cannot restore falls back to re-hashing the persisted
+ * prefix — the checkpoint is an optimization, never a source of truth.
+ */
+export const DIGEST_CHECKPOINT_FORMAT_HASH_WASM = 'sha256-wasm-v1';
+export const DIGEST_CHECKPOINT_FORMAT_GO_STDLIB = 'sha256-go-v1';
+
+/** Bounds the format identifier shape: lowercase alphanumeric start, then `[a-z0-9._-]`. */
+const DIGEST_CHECKPOINT_FORMAT_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+/**
+ * Bounds the serialized digest state (lowercase hex) a journal may carry. hash-wasm's
+ * sha256 state is 116 bytes (232 hex chars); the Go stdlib's is 108 bytes (216 hex chars).
+ * The generous-but-bounded ceiling keeps decode/restore allocations tiny for any
+ * attacker-controlled or corrupted state length.
+ */
+const MAX_DIGEST_CHECKPOINT_STATE_HEX = 4096;
+
+/**
+ * Optional serialized whole-file digest state that exactly matches one file's committed
+ * checkpoint (V13-PR05). Lets a resuming runtime restore the SHA-256 state instead of
+ * re-hashing the persisted prefix — an optimization only.
+ *
+ * Describes EXACTLY the bytes the journal's committed checkpoint claims: `committedBlocks`
+ * must equal the file's committedBlocks and `committedBytes` the committed byte count, or
+ * the journal is structurally corrupt and fails closed. The serialized state bytes are
+ * opaque and implementation-specific; `format` identifies which runtime produced them so
+ * only a compatible implementation may restore them. A valid journal carrying an unusable
+ * optional checkpoint (unknown format, undecodable or unrestorable state) still resumes
+ * through correctness-first prefix re-hash.
+ *
+ * Never a source of truth: final whole-file digest verification remains mandatory, and a
+ * checkpoint can never advance the journal — commitBlocks is still the only progress API.
+ */
+export interface JournalDigestCheckpoint {
+  /** Digest algorithm + implementation + state-format version (see DIGEST_CHECKPOINT_FORMAT_*). */
+  format: string;
+  /** Exact committed block count the state covers; must equal the file's committedBlocks. */
+  committedBlocks: number;
+  /** Exact committed byte count the state covers; must equal min(committedBlocks*blockSize, size). */
+  committedBytes: number;
+  /** Serialized digest state, lowercase hex, size-bounded. */
+  state: string;
+}
+
+/**
  * Opaque, versioned identity envelope. The value is deliberately opaque to the journal:
  * its content and derivation are defined by the durability implementation that writes it
  * (destination-location identity in PR02/PR03) or by the resume-authentication protocol
@@ -78,6 +126,12 @@ export interface JournalFileState {
    * Invariant: 0 <= committedBlocks <= blocks.
    */
   committedBlocks: number;
+  /**
+   * Optional serialized digest state covering exactly this file's committed checkpoint
+   * (V13-PR05). Omitted when the digest state is not serializable or the transfer predates
+   * digest checkpointing; resume then re-hashes the persisted prefix.
+   */
+  digestCheckpoint?: JournalDigestCheckpoint;
 }
 
 /**
@@ -312,10 +366,45 @@ export async function validateJournal(j: DurableJournal): Promise<void> {
         `journal: committedBlocks ${f.committedBlocks} out of range for file ${f.idx} (blocks ${f.blocks})`,
       );
     }
+    validateDigestCheckpoint(f);
     const name = normalizeTransferPath(f.name);
     const key = name.toLowerCase();
     if (seen.has(key)) throw new Error('journal: duplicate file path');
     seen.add(key);
+  }
+}
+
+/**
+ * Structural validation of an optional digest checkpoint. Any violation is a corrupt
+ * journal and fails closed — an impossible checkpoint claim must never be trusted. The
+ * format identifier and state bytes are opaque claims (an unsupported format or
+ * unrestorable state falls back to re-hash at resume time, which is a different, safe
+ * case).
+ */
+function validateDigestCheckpoint(f: JournalFileState): void {
+  const cp = f.digestCheckpoint;
+  if (cp === undefined) return;
+  if (!DIGEST_CHECKPOINT_FORMAT_PATTERN.test(cp.format)) {
+    throw new Error(`journal: file ${f.idx} digestCheckpoint has an invalid format identifier`);
+  }
+  if (cp.committedBlocks !== f.committedBlocks) {
+    throw new Error(
+      `journal: file ${f.idx} digestCheckpoint block count ${cp.committedBlocks} does not match committedBlocks ${f.committedBlocks}`,
+    );
+  }
+  const wantBytes = Math.min(cp.committedBlocks * f.blockSize, f.size);
+  if (cp.committedBytes !== wantBytes) {
+    throw new Error(
+      `journal: file ${f.idx} digestCheckpoint byte count ${cp.committedBytes} does not match its committed blocks (${wantBytes})`,
+    );
+  }
+  if (
+    cp.state.length % 2 !== 0 ||
+    !isLowerHex(cp.state, cp.state.length) ||
+    cp.state.length === 0 ||
+    cp.state.length > MAX_DIGEST_CHECKPOINT_STATE_HEX
+  ) {
+    throw new Error(`journal: file ${f.idx} digestCheckpoint state is out of bounds`);
   }
 }
 
@@ -348,6 +437,16 @@ function canonicalBody(j: DurableJournal): Record<string, unknown> {
       blocks: f.blocks,
       fileDigest: f.fileDigest,
       committedBlocks: f.committedBlocks,
+      ...(f.digestCheckpoint !== undefined
+        ? {
+            digestCheckpoint: {
+              format: f.digestCheckpoint.format,
+              committedBlocks: f.digestCheckpoint.committedBlocks,
+              committedBytes: f.digestCheckpoint.committedBytes,
+              state: f.digestCheckpoint.state,
+            },
+          }
+        : {}),
     })),
     ...(j.resumeSecret !== undefined
       ? { resumeSecret: { version: j.resumeSecret.version, value: j.resumeSecret.value } }
@@ -424,6 +523,7 @@ const FILE_V1_KEYS = [
   'blocks',
   'fileDigest',
   'committedBlocks',
+  'digestCheckpoint',
 ];
 
 const ENVELOPE_KEYS = ['version', 'value'];
@@ -458,13 +558,27 @@ function envelopeField(m: Record<string, unknown>, key: string): JournalIdentity
   return { version: intField(e, 'version'), value: strField(e, 'value') };
 }
 
+function digestCheckpointField(v: unknown): JournalDigestCheckpoint {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+    throw new Error('journal: digestCheckpoint is not an object');
+  }
+  const c = v as Record<string, unknown>;
+  assertKeys(c, ['format', 'committedBlocks', 'committedBytes', 'state'], 'digestCheckpoint');
+  return {
+    format: strField(c, 'format'),
+    committedBlocks: intField(c, 'committedBlocks'),
+    committedBytes: intField(c, 'committedBytes'),
+    state: strField(c, 'state'),
+  };
+}
+
 function fileField(v: unknown): JournalFileState {
   if (typeof v !== 'object' || v === null || Array.isArray(v)) {
     throw new Error('journal: file entry is not an object');
   }
   const f = v as Record<string, unknown>;
   assertKeys(f, FILE_V1_KEYS, 'file entry');
-  return {
+  const state: JournalFileState = {
     idx: intField(f, 'idx'),
     name: strField(f, 'name'),
     size: intField(f, 'size'),
@@ -475,6 +589,10 @@ function fileField(v: unknown): JournalFileState {
     fileDigest: strField(f, 'fileDigest'),
     committedBlocks: intField(f, 'committedBlocks'),
   };
+  if (f.digestCheckpoint !== undefined) {
+    state.digestCheckpoint = digestCheckpointField(f.digestCheckpoint);
+  }
+  return state;
 }
 
 function decodeJournalV1(m: Record<string, unknown>): DurableJournal {
@@ -526,14 +644,18 @@ async function decodeAndVerifyV1(m: Record<string, unknown>): Promise<DurableJou
  * Advance one file's durable high-water checkpoint — the ONLY way committed progress may
  * be recorded. Documented precondition: every block in [0, committedBlocks) has been
  * verified, written, and made durable BEFORE this call. Refuses regression and values
- * beyond the file's block count; stamps updatedAt. Returns a new journal (the checksum is
- * stale afterwards and recomputed by encodeJournal).
+ * beyond the file's block count; stamps updatedAt. The optional digestCheckpoint (V13-PR05)
+ * is persisted atomically with the checkpoint and MUST cover exactly these committed
+ * blocks (enforced); omitting it clears the file's checkpoint (it could not cover the new
+ * high-water mark). Returns a new journal (the checksum is stale afterwards and recomputed
+ * by encodeJournal).
  */
 export function commitBlocks(
   j: DurableJournal,
   fileIdx: number,
   committedBlocks: number,
   nowMs: number,
+  digestCheckpoint?: JournalDigestCheckpoint,
 ): DurableJournal {
   if (!Number.isInteger(fileIdx) || fileIdx < 0 || fileIdx >= j.files.length) {
     throw new Error(`journal: no file ${fileIdx} in journal`);
@@ -549,6 +671,11 @@ export function commitBlocks(
       `journal: committed progress may not regress (file ${fileIdx}: ${f.committedBlocks} -> ${committedBlocks})`,
     );
   }
+  if (digestCheckpoint !== undefined && digestCheckpoint.committedBlocks !== committedBlocks) {
+    throw new Error(
+      `journal: digestCheckpoint block count ${digestCheckpoint.committedBlocks} does not match committedBlocks ${committedBlocks}`,
+    );
+  }
   return {
     schemaVersion: j.schemaVersion,
     transferId: j.transferId,
@@ -560,7 +687,13 @@ export function commitBlocks(
     updatedAt: nowMs,
     sourceIdentity: j.sourceIdentity,
     destinationIdentity: j.destinationIdentity,
-    files: j.files.map((entry, i) => (i === fileIdx ? { ...entry, committedBlocks } : entry)),
+    files: j.files.map((entry, i) => {
+      if (i !== fileIdx) return entry;
+      const updated = { ...entry, committedBlocks };
+      delete updated.digestCheckpoint;
+      if (digestCheckpoint !== undefined) updated.digestCheckpoint = digestCheckpoint;
+      return updated;
+    }),
     ...(j.resumeSecret !== undefined ? { resumeSecret: j.resumeSecret } : {}),
   };
 }

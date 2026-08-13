@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DIGEST_CHECKPOINT_FORMAT_GO_STDLIB,
   JOURNAL_RESUME_VERSION,
   JOURNAL_SCHEMA_VERSION,
   commitBlocks,
@@ -10,6 +11,7 @@ import {
   newJournal,
   validateJournal,
   type DurableJournal,
+  type JournalDigestCheckpoint,
   type JournalIdentity,
 } from './journal.js';
 import { decodeControl } from './transfer-messages.js';
@@ -59,11 +61,22 @@ function testIdentities(): [JournalIdentity, JournalIdentity] {
   ];
 }
 
-// The exact journal pinned by docs/test-vectors/durable-journal.json.
+// The exact journal pinned by docs/test-vectors/durable-journal.json, including the
+// V13-PR05 digest checkpoint on file 0. The state hex is the Go implementation's serialized
+// sha256 state over 1024 zero bytes (a real but opaque state); the journal bytes must be
+// reproduced byte-for-byte regardless of which language produced it.
+const VECTOR_DIGEST_STATE =
+  '7368610393fa7a18cb52031408d29f5110e42be6fc4a07de4d0e65025156c97d72e04acf000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000400';
+
 async function vectorSample(): Promise<DurableJournal> {
   const [source, destination] = testIdentities();
   const j = await newJournal(TRANSFER_ID, testManifest(), source, destination, 1723500000000);
-  return commitBlocks(j, 0, 1, 1723500060000);
+  return commitBlocks(j, 0, 1, 1723500060000, {
+    format: DIGEST_CHECKPOINT_FORMAT_GO_STDLIB,
+    committedBlocks: 1,
+    committedBytes: 1024,
+    state: VECTOR_DIGEST_STATE,
+  });
 }
 function cloneDeep<T>(v: T): T {
   return JSON.parse(JSON.stringify(v)) as T;
@@ -199,6 +212,7 @@ describe('journal schema v1', () => {
     // Within-bounds checkpoint with a stale checksum is tamper-evident.
     const stale = cloneDeep(obj.files) as Array<Record<string, unknown>>;
     stale[0]!.committedBlocks = 2;
+    delete stale[0]!.digestCheckpoint; // a checkpoint cannot cover the new high-water
     await expect(decodeJsonObj({ ...obj, files: stale })).rejects.toThrow(/checksum mismatch/);
 
     // Tampered identity with a stale checksum.
@@ -311,6 +325,7 @@ describe('journal schema v1', () => {
       createdAt: number;
       updatedAt: number;
       committedBlocks: number[];
+      digestCheckpoints: Array<JournalDigestCheckpoint | null>;
       fingerprint: string;
       journal: string;
     };
@@ -324,7 +339,13 @@ describe('journal schema v1', () => {
     );
     let current = j;
     for (let i = 0; i < doc.committedBlocks.length; i++) {
-      current = commitBlocks(current, i, doc.committedBlocks[i]!, doc.updatedAt);
+      current = commitBlocks(
+        current,
+        i,
+        doc.committedBlocks[i]!,
+        doc.updatedAt,
+        doc.digestCheckpoints[i] ?? undefined,
+      );
     }
     expect(current.manifestFingerprint).toBe(doc.fingerprint);
     expect(new TextDecoder().decode(await encodeJournal(current))).toBe(doc.journal);

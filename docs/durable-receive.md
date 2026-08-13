@@ -64,9 +64,11 @@ IDB:   sendbeam-durable → journals, leases         # journal + lock/lease meta
   their persistence/reopen semantics (a user-selected handle) do not satisfy the
   contract, and the UI never claims otherwise.
 - **Resume**: same-session recovery. The sender stays in the room; the receiver re-joins
-  with the same code, re-hashes the persisted prefix per file (correctness-first;
-  digest-state checkpointing is V13-PR05), reports per-file high-water marks, and
-  streams only the missing blocks. Handshakes always derive fresh traffic keys.
+  with the same code, restores each file's whole-file digest from the journaled
+  checkpoint state when this runtime produced it (otherwise it re-hashes the persisted
+  prefix — correctness-first; the final whole-file digest still verifies), reports
+  per-file high-water marks, and streams only the missing blocks. Handshakes always
+  derive fresh traffic keys.
 - **Secrets**: the journal never persists invite codes, the session master key,
   directional traffic keys, or live AEAD counters.
 
@@ -160,9 +162,11 @@ and the authenticated manifest matches an existing journal, the receiver:
    never deleted automatically.
 2. Checks that each `.part` file backs its checkpoint (present and at least as long as
    `committedBytes`); missing or truncated partials fail the transfer closed with guidance.
-3. Rebuilds the wire resume seed: per-file high-water marks plus whole-file digests
-   re-hashed from the persisted prefix (the correctness-first restore; digest-state
-   checkpointing is V13-PR05).
+3. Rebuilds the wire resume seed: per-file high-water marks plus whole-file digests. Each
+   digest is restored from the journal's `digestCheckpoint` state when the format matches
+   this runtime and the state decodes; otherwise the persisted prefix is re-hashed
+   (correctness-first). A restored or re-hashed seed never bypasses the final whole-file
+   verification.
 4. Streams only the missing blocks from the sender.
 
 Resume is **same-session** recovery: the sender must still be connected in the room the
@@ -204,4 +208,3 @@ sendbeam transfers discard  <id>... [--out DIR] [--all] [--yes]
   PR07 (the `resumeSecret` envelope exists in the schema but is unused by PR02).
 - Resume validation against authenticated peer identity (beyond the manifest fingerprint
   and destination location) is PR06/PR07.
-- Digest-state checkpointing (avoid re-hashing the persisted prefix on resume) is PR05.

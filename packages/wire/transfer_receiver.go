@@ -466,10 +466,19 @@ func (r *Receiver) onBlockHash(payload []byte) error {
 	}
 
 	offset := int64(r.nextBlock) * int64(r.file.BlockSize)
+	// The digest must cover the block before the sink checkpoints it: sink.Write advances
+	// the durable checkpoint, and the digest state for that exact prefix is carried into
+	// the same atomic journal update through the optional DigestStateSink seam. Advancing
+	// the in-memory digest before the durable write is safe because any later sink failure
+	// terminates this receive attempt while the persisted journal stays at its previous
+	// valid checkpoint (ADR 0004).
+	r.digest.Update(block)
+	if err := r.attachDigestState(); err != nil {
+		return err
+	}
 	if err := r.sink.Write(offset, block); err != nil {
 		return asTransferError(err, FailSinkError)
 	}
-	r.digest.Update(block)
 	r.nextBlock++
 	r.nackOutstanding = -1
 	r.acknowledged += int64(len(block))
@@ -493,6 +502,28 @@ func (r *Receiver) onBlockHash(payload []byte) error {
 		return r.requestMissing()
 	}
 	return nil
+}
+
+// attachDigestState hands the sink the digest state covering exactly the block that the
+// following sink.Write will checkpoint, so a durable sink can persist committedBlocks and
+// the matching digest checkpoint in one atomic journal update (V13-PR05). Sinks without
+// the optional DigestStateSink capability journal a checkpoint without digest state, and
+// digests without DigestState support contribute nil — the storage layer then omits the
+// checkpoint and resume re-hashes the persisted prefix.
+func (r *Receiver) attachDigestState() error {
+	sink, ok := r.sink.(DigestStateSink)
+	if !ok {
+		return nil
+	}
+	var state []byte
+	if ds, ok := r.digest.(DigestState); ok {
+		var err error
+		state, err = ds.MarshalState()
+		if err != nil {
+			return asTransferError(err, FailSinkError)
+		}
+	}
+	return sink.SetDigestState(state)
 }
 
 func (r *Receiver) requestMissing() error {

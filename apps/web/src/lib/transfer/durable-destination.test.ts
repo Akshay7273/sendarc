@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  DIGEST_CHECKPOINT_FORMAT_HASH_WASM,
   FrameType,
   TransferError,
   bytesToHex,
@@ -13,7 +14,10 @@ import {
   newJournal,
   sha256,
   type Digest,
+  type DigestState,
+  type DigestStateSink,
   type DurableJournal,
+  type JournalDigestCheckpoint,
   type Manifest,
 } from '@sendbeam/protocol';
 import { createSha256DigestFactory } from './digest.js';
@@ -77,6 +81,7 @@ class MemoryStore implements DurableJournalStore {
     blocks: number,
     nowMs: number,
     ownerId: string,
+    digestCheckpoint?: JournalDigestCheckpoint,
   ): Promise<DurableJournal> {
     if (this.failCommit) throw new Error('journal commit failed');
     const lease = this.leases.get(journal.transferId);
@@ -86,7 +91,7 @@ class MemoryStore implements DurableJournalStore {
         'durable lease lost; another receiver owns this transfer',
       );
     }
-    const next = advanceJournal(journal, fileIdx, blocks, nowMs);
+    const next = advanceJournal(journal, fileIdx, blocks, nowMs, digestCheckpoint);
     this.journals.set(next.transferId, await encodeJournal(next));
     this.leases.set(next.transferId, {
       ...lease,
@@ -337,6 +342,13 @@ function committed(journal: DurableJournal | undefined, fileIdx: number): number
   return journal?.files[fileIdx]?.committedBlocks ?? -1;
 }
 
+/** Serialized digest state covering exactly `bytes` — what the receiver feeds before each write. */
+function digestStateFor(h: Harness, bytes: Uint8Array): Uint8Array {
+  const d = h.digest();
+  d.update(bytes);
+  return (d as unknown as DigestState).saveState();
+}
+
 /** Split a fresh transfer's verified data into a per-file partial map for a fake journal. */
 async function journalFor(
   store: MemoryStore,
@@ -372,6 +384,16 @@ async function journalFor(
     });
     return advanced;
   });
+}
+
+/** Attach a digest checkpoint to a fabricated journal and persist it. */
+async function journalWithCheckpoint(
+  store: MemoryStore,
+  journal: DurableJournal,
+  cp: JournalDigestCheckpoint,
+): Promise<void> {
+  const advanced = advanceJournal(journal, 0, cp.committedBlocks, 3_000, cp);
+  store.journals.set(TRANSFER_ID, await encodeJournal(advanced));
 }
 
 function hasSignature(bytes: Uint8Array, signature: number): boolean {
@@ -484,6 +506,117 @@ describe('DurableDestination', () => {
       new Uint8Array([
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
       ]),
+    );
+  });
+
+  it('commits a digest checkpoint per block and resumes by restoring it (V13-PR05)', async () => {
+    const h = await harness();
+    const first = h.makeDestination();
+    const m = manifest([['a.bin', 24]]);
+    await first.prepare(m);
+    const sink = await first.open(m.files[0]!);
+    // The receiver seam (V13-PR05): digest state is fed before each write and persisted
+    // atomically with the resulting checkpoint.
+    (sink as unknown as DigestStateSink).setDigestState(
+      digestStateFor(h, new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8])),
+    );
+    await sink.write(0, new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]));
+    (sink as unknown as DigestStateSink).setDigestState(
+      digestStateFor(h, new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])),
+    );
+    await sink.write(8, new Uint8Array([9, 10, 11, 12, 13, 14, 15, 16]));
+    // Tab crash: the first destination is abandoned without close.
+
+    const loaded = await h.store.loadJournal(TRANSFER_ID);
+    expect(loaded.kind).toBe('ok');
+    if (loaded.kind !== 'ok') return;
+    const cp = loaded.journal.files[0]!.digestCheckpoint;
+    expect(cp?.format).toBe(DIGEST_CHECKPOINT_FORMAT_HASH_WASM);
+    expect(cp?.committedBlocks).toBe(2);
+    expect(cp?.committedBytes).toBe(16);
+    expect(cp?.state).toMatch(/^[0-9a-f]{232}$/); // 116-byte hash-wasm state
+
+    h.advance(DURABLE_LEASE_TTL_MS + 1);
+    const second = h.makeDestination();
+    await second.prepare(m);
+    expect(second.durableMeta()?.resumed).toBe(true);
+
+    // The restored digest covers the bytes the state was saved from. Corrupting the
+    // persisted prefix on disk must NOT change the seed: restore skips the re-hash.
+    const persisted = h.files.data.get('a.bin')!;
+    persisted[0]! ^= 0xff;
+    const file = second.resumeStateFor()?.files.get(0);
+    expect(file?.haveBlocks).toBe(2);
+    const expected = await sha256(
+      new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
+    );
+    expect(await file?.seedDigest.hexDigest()).toBe(bytesToHex(expected));
+  });
+
+  it('falls back to rehashing the persisted prefix when the checkpoint cannot be restored (V13-PR05)', async () => {
+    const h = await harness();
+    const m = manifest([['a.bin', 24]]);
+    const j = await journalFor(h.store, h.files, [['a.bin', 24]], [2]);
+    // A checkpoint from a foreign runtime: well-formed, but not this runtime's format.
+    const foreign: JournalDigestCheckpoint = {
+      format: 'sha256-go-v1',
+      committedBlocks: 2,
+      committedBytes: 16,
+      state: '00'.repeat(108), // Go stdlib state size, plausible shape
+    };
+    await journalWithCheckpoint(h.store, j, foreign);
+
+    h.advance(DURABLE_LEASE_TTL_MS + 1);
+    const d = h.makeDestination();
+    await d.prepare(m);
+    const file = d.resumeStateFor()?.files.get(0);
+    expect(file?.haveBlocks).toBe(2);
+    // Re-hashed from the persisted partial: byte b*8+k+1 (journalFor's deterministic data).
+    const persisted = new Uint8Array(16).map((_, k) => (k + 1) & 0xff);
+    expect(await file?.seedDigest.hexDigest()).toBe(bytesToHex(await sha256(persisted)));
+
+    // Undecodable state (wrong length): restore throws, correctness-first re-hash takes over.
+    const undecodable: JournalDigestCheckpoint = {
+      format: DIGEST_CHECKPOINT_FORMAT_HASH_WASM,
+      committedBlocks: 2,
+      committedBytes: 16,
+      state: '00'.repeat(58), // 58 bytes, not the 116 the wasm expects
+    };
+    const j2 = await journalFor(h.store, h.files, [['b.bin', 24]], [2]);
+    await journalWithCheckpoint(h.store, j2, undecodable);
+    h.advance(DURABLE_LEASE_TTL_MS + 1);
+    const d2 = h.makeDestination();
+    await d2.prepare(manifest([['b.bin', 24]]));
+    const file2 = d2.resumeStateFor()?.files.get(0);
+    expect(await file2?.seedDigest.hexDigest()).toBe(bytesToHex(await sha256(persisted)));
+  });
+
+  it('a lying digest checkpoint seeds the digest but whole-file verification still guards the receive (V13-PR05)', async () => {
+    const h = await harness();
+    const j = await journalFor(h.store, h.files, [['a.bin', 24]], [2]);
+    // A real hash-wasm state that covers 16 zero bytes — not the persisted prefix.
+    const make = await createSha256DigestFactory();
+    const lying = make();
+    lying.update(new Uint8Array(16));
+    const state = (lying as unknown as DigestState).saveState();
+    const cp: JournalDigestCheckpoint = {
+      format: DIGEST_CHECKPOINT_FORMAT_HASH_WASM,
+      committedBlocks: 2,
+      committedBytes: 16,
+      state: bytesToHex(state),
+    };
+    await journalWithCheckpoint(h.store, j, cp);
+
+    h.advance(DURABLE_LEASE_TTL_MS + 1);
+    const d = h.makeDestination();
+    await d.prepare(manifest([['a.bin', 24]]));
+    const file = d.resumeStateFor()?.files.get(0);
+    // The seed covers the checkpointed state's bytes — trusted, never guessed. The
+    // receiver's mandatory final whole-file digest is what rejects a wrong state.
+    const seedHex = await file?.seedDigest.hexDigest();
+    expect(seedHex).toBe(bytesToHex(await sha256(new Uint8Array(16))));
+    expect(seedHex).not.toBe(
+      bytesToHex(await sha256(new Uint8Array(16).map((_, k) => (k + 1) & 0xff))),
     );
   });
 
