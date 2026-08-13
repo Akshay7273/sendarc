@@ -31,8 +31,10 @@ IDB:   sendbeam-durable → journals, leases         # journal + lock/lease meta
   CLI — decode fails closed on any deviation.
 - **Writer**: where sync access handles are supported (dedicated workers on
   Chromium/Firefox) the transfer worker writes each verified block with a
-  `FileSystemSyncAccessHandle`, then flushes it, then advances the journal checkpoint in
-  the same ordering as the CLI (`write → flush → commit → ack`). Browsers without sync
+  `FileSystemSyncAccessHandle`, looping on the returned byte counts until the whole block
+  is persisted (short writes are completed, zero-progress or impossible results fail
+  closed), then flushes it, then advances the journal checkpoint in the same ordering as
+  the CLI (`write → flush → commit → ack`). Browsers without sync
   access handles (Safari) fall back to async `createWritable` streams with an honest
   granularity: the stream can only be flushed at close, so a file's checkpoint advances
   only when its whole stream is closed — never block-by-block.
@@ -40,14 +42,17 @@ IDB:   sendbeam-durable → journals, leases         # journal + lock/lease meta
   serializes concurrent tabs and survives reloads and worker death. A second tab that
   joins the same transfer fails closed with guidance; a lease that outlives its TTL is
   taken over deterministically (bounded stale recovery). The lease is renewed by every
-  checkpoint commit plus a bounded timer, released best-effort on pagehide, and released
-  on abort so a retry acquires immediately. A lost/foreign lease makes the next
-  checkpoint commit abort — two receivers can never both advance one journal.
+  checkpoint commit plus a bounded timer, released best-effort on pagehide, released on
+  abort and on a failed finalization so a retry acquires immediately (never forcing the
+  120s stale TTL), and removed by a successful finalize. A lost/foreign lease makes the
+  next checkpoint commit abort — two receivers can never both advance one journal.
 - **Keep/Discard**: an interrupted receive deliberately keeps the journal and partials at
   their last durable checkpoint (they are the only resumable copy; never silently
   deleted). The failure screen shows a small "partial data kept" block with an explicit
-  **Discard partial data** button; discard is idempotent and removes exactly that
-  transfer's journal, lease, and partials.
+  **Discard partial data** button; discard is idempotent, removes that transfer's OPFS
+  partials first and its journal + lease only after the data is provably gone, and is
+  refused while another receiver's live lease owns the transfer (a stale failure page can
+  never destroy a live receive).
 - **Fail-closed loading**: on reload the receiver revalidates every journal claim against
   the authenticated manifest (checksum, manifest fingerprint, destination identity,
   checkpoint bounds) and cross-checks each partial against its checkpoint — corrupt,

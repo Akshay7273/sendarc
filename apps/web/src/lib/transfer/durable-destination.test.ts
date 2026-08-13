@@ -46,6 +46,7 @@ class MemoryStore implements DurableJournalStore {
   /** Fault hooks. */
   failCommit = false;
   failCreate = false;
+  failDiscard = false;
 
   async loadJournal(transferId: string): Promise<JournalLoad> {
     const bytes = this.journals.get(transferId);
@@ -126,6 +127,7 @@ class MemoryStore implements DurableJournalStore {
   }
 
   async discard(transferId: string): Promise<void> {
+    if (this.failDiscard) throw new Error('discard failed');
     this.journals.delete(transferId);
     this.leases.delete(transferId);
   }
@@ -139,6 +141,8 @@ class MemoryFiles implements DurableFiles {
   syncAvailable = true;
   /** Fault hook: writer.write throws a QuotaExceededError. */
   quotaOnWrite = false;
+  /** Fault hook: openOutput throws (ZIP finalization failure). */
+  failOutput = false;
   events: string[] = [];
 
   async dataDir(): Promise<FileSystemDirectoryHandle> {
@@ -198,6 +202,7 @@ class MemoryFiles implements DurableFiles {
     transferId: string,
     fileName: string,
   ): Promise<{ key: string; writable: WritableFileLike }> {
+    if (this.failOutput) throw new Error('output write failed');
     const key = `sendbeam/durable/${transferId}/${fileName}`;
     return {
       key,
@@ -746,5 +751,113 @@ describe('DurableDestination', () => {
       expect(text.toLowerCase()).not.toContain(secret);
     }
     await d.abort();
+  });
+
+  it('finalize failure keeps journal + partials and releases the lease for an immediate retry', async () => {
+    const h = await harness();
+    const d = h.makeDestination();
+    const m = manifest([
+      ['folder/a.bin', 10],
+      ['folder/b.bin', 10],
+    ]);
+    await d.prepare(m);
+    const a = await d.open(m.files[0]!);
+    await a.write(0, new Uint8Array(8));
+    await a.write(8, new Uint8Array([9, 10]));
+    await a.close();
+    const b = await d.open(m.files[1]!);
+    await b.write(0, new Uint8Array(8));
+    await b.write(8, new Uint8Array([9, 10]));
+    await b.close();
+
+    // ZIP assembly fails: finalize must fail closed.
+    h.files.failOutput = true;
+    await expect(d.close()).rejects.toThrow(/output write failed/);
+    h.files.failOutput = false;
+
+    // Journal + recoverable partials remain usable (no journal removed prematurely).
+    expect((await h.store.loadJournal(TRANSFER_ID)).kind).toBe('ok');
+    expect(h.files.data.size).toBe(2);
+    // The active lease was released promptly instead of lingering for the 120s stale TTL.
+    expect(h.store.leases.has(TRANSFER_ID)).toBe(false);
+
+    // A retry acquires immediately and finalizes successfully.
+    const retry = h.makeDestination();
+    await retry.prepare(m);
+    expect(retry.durableMeta()?.resumed).toBe(true);
+    const ra = await retry.open(m.files[0]!);
+    await ra.close();
+    const rb = await retry.open(m.files[1]!);
+    await rb.close();
+    await retry.close();
+    expect((await h.store.loadJournal(TRANSFER_ID)).kind).toBe('none');
+    expect(h.files.outputs.has(`sendbeam/durable/${TRANSFER_ID}/__receive.zip`)).toBe(true);
+  });
+
+  it('failed metadata cleanup after a successful ZIP keeps journal + partials and releases the lease', async () => {
+    const h = await harness();
+    const d = h.makeDestination();
+    const m = manifest([
+      ['folder/a.bin', 10],
+      ['folder/b.bin', 10],
+    ]);
+    await d.prepare(m);
+    const a = await d.open(m.files[0]!);
+    await a.write(0, new Uint8Array(8));
+    await a.write(8, new Uint8Array([9, 10]));
+    await a.close();
+    const b = await d.open(m.files[1]!);
+    await b.write(0, new Uint8Array(8));
+    await b.write(8, new Uint8Array([9, 10]));
+    await b.close();
+
+    h.store.failDiscard = true;
+    await expect(d.close()).rejects.toThrow(/discard failed/);
+    h.store.failDiscard = false;
+
+    // The journal was not removed, the partials were not consumed, and the lease is free.
+    expect((await h.store.loadJournal(TRANSFER_ID)).kind).toBe('ok');
+    expect(h.files.data.size).toBe(2);
+    expect(h.store.leases.has(TRANSFER_ID)).toBe(false);
+
+    // Immediate retry acquires and completes finalization idempotently.
+    const retry = h.makeDestination();
+    await retry.prepare(m);
+    expect(retry.durableMeta()?.resumed).toBe(true);
+    const ra = await retry.open(m.files[0]!);
+    await ra.close();
+    const rb = await retry.open(m.files[1]!);
+    await rb.close();
+    await retry.close();
+    expect((await h.store.loadJournal(TRANSFER_ID)).kind).toBe('none');
+  });
+
+  it('failed single-file finalize keeps the partial and releases the lease; success removes resume metadata', async () => {
+    const h = await harness();
+    const d = h.makeDestination();
+    const m = manifest([['a.bin', 8]]);
+    await d.prepare(m);
+    const sink = await d.open(m.files[0]!);
+    await sink.write(0, new Uint8Array(8));
+    await sink.close();
+
+    h.store.failDiscard = true;
+    await expect(d.close()).rejects.toThrow(/discard failed/);
+    h.store.failDiscard = false;
+
+    // Partial data remains recoverable and the journal is intact.
+    expect(h.files.data.get('a.bin')).toEqual(new Uint8Array(8));
+    expect((await h.store.loadJournal(TRANSFER_ID)).kind).toBe('ok');
+    expect(h.store.leases.has(TRANSFER_ID)).toBe(false);
+
+    // Immediate retry: acquire, finalize, and the resume metadata (journal + lease) is gone.
+    const retry = h.makeDestination();
+    await retry.prepare(m);
+    expect(retry.durableMeta()?.resumed).toBe(true);
+    const resumed = await retry.open(m.files[0]!);
+    await resumed.close();
+    await retry.close();
+    expect((await h.store.loadJournal(TRANSFER_ID)).kind).toBe('none');
+    expect(h.store.leases.has(TRANSFER_ID)).toBe(false);
   });
 });
