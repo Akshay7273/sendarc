@@ -8,6 +8,7 @@
   import { baseUrl, iceServers, loadConfig } from './lib/config.js';
   import { toJSON } from './lib/transfer/diagnostics.js';
   import QrCode from './lib/QrCode.svelte';
+  import markUrl from './lib/assets/sendbeam-mark.svg';
 
   loadConfig();
   import {
@@ -305,19 +306,7 @@
 <main>
   <header class="masthead">
     <div class="brand">
-      <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
-        <defs>
-          <linearGradient id="beam" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stop-color="#8b7cf6" />
-            <stop offset="1" stop-color="#4cc9f0" />
-          </linearGradient>
-        </defs>
-        <path
-          d="M12 1.8 4.6 13.2a1.4 1.4 0 0 0 1.18 2.18h4.3l-1.4 6.82 8.72-12.2a1.4 1.4 0 0 0-1.13-2.2h-4.9L13.3 1.9A1.3 1.3 0 0 0 12 1.8Z"
-          fill="url(#beam)"
-        />
-        <circle cx="12" cy="12" r="3" fill="rgba(255,255,255,0.9)" opacity="0.9" />
-      </svg>
+      <img class="mark" src={markUrl} alt="" />
       <h1>SendBeam</h1>
     </div>
     <p class="tagline">Secure, end-to-end-encrypted, peer-to-peer file transfer.</p>
@@ -329,7 +318,10 @@
         <div class="card-head">
           <span class="chip chip-send">Send</span>
           <h2>Beam a file</h2>
-          <p>Share a link or invite code. Your files never touch our servers.</p>
+          <p>
+            Share a link or invite code. Files transfer directly between peers; the relay fallback
+            only carries encrypted ciphertext.
+          </p>
         </div>
         <button class="primary big" onclick={startSend}>
           <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -337,7 +329,7 @@
           </svg>
           Send a file
         </button>
-        <p class="hint">Files are encrypted end-to-end and wiped after the transfer.</p>
+        <p class="hint">Files stay end-to-end encrypted with no server-side file storage.</p>
       </article>
 
       <article class="card receive-card">
@@ -696,7 +688,8 @@
   .mark {
     width: 2rem;
     height: 2rem;
-    filter: drop-shadow(0 0 12px rgba(139, 124, 246, 0.6));
+    flex: none;
+    filter: drop-shadow(0 0 12px rgba(76, 201, 240, 0.35));
   }
   h1 {
     margin: 0;

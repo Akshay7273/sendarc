@@ -1,15 +1,29 @@
-# SendBeam
+<p align="center">
+  <img src="apps/web/src/lib/assets/sendbeam-mark.svg" alt="SendBeam" width="110" height="110" />
+</p>
 
-**Encrypted peer-to-peer file transfer for the browser and the terminal. No accounts, no uploads, no server-side storage.**
+<h1 align="center">SendBeam</h1>
 
-**[Try SendBeam live →](https://omnitrix.space)** — a hosted instance of the same
-open-source application, ready in your browser without installing anything.
+<p align="center">
+  <strong>Encrypted peer-to-peer file transfer for the browser and the terminal. No accounts, no uploads, no server-side storage.</strong>
+</p>
 
-[![CI](https://github.com/Akshay7273/sendbeam/actions/workflows/ci.yml/badge.svg)](https://github.com/Akshay7273/sendbeam/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Akshay7273/sendbeam/blob/main/LICENSE)
-[![Image](https://img.shields.io/badge/image-ghcr.io%2Fakshay7273%2Fsendbeam-blue.svg)](https://github.com/Akshay7273/sendbeam/pkgs/container/sendbeam)
+<p align="center">
+  <a href="https://github.com/Akshay7273/sendbeam/actions/workflows/ci.yml"><img src="https://github.com/Akshay7273/sendbeam/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/Akshay7273/sendbeam/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
+  <a href="https://github.com/Akshay7273/sendbeam/pkgs/container/sendbeam"><img src="https://img.shields.io/badge/image-ghcr.io%2Fakshay7273%2Fsendbeam-blue.svg" alt="Container image" /></a>
+  <a href="https://omnitrix.space"><img src="https://img.shields.io/badge/live%20demo-omnitrix.space-8b7cf6.svg" alt="Live demo" /></a>
+</p>
 
-[Live demo](https://omnitrix.space) · [Quick start](#quick-start) · [CLI](#cli) · [Self-hosting](#self-hosting) · [Security](#security) · [Documentation](#documentation) · [Development](#development)
+<p align="center">
+  <a href="https://omnitrix.space"><strong>Live demo</strong></a>
+  · <a href="#quick-start">Quick start</a>
+  · <a href="#cli">CLI</a>
+  · <a href="#self-hosting">Self-hosting</a>
+  · <a href="#security">Security</a>
+  · <a href="#documentation">Documentation</a>
+  · <a href="#development">Development</a>
+</p>
 
 ## About
 
@@ -106,7 +120,7 @@ Full analysis, accepted limitations, and the trust boundary are in the
 [docs/test-vectors/](docs/test-vectors/), and dependency audits run in CI.
 
 > [!NOTE]
-> SendBeam is stable open-source software (v1.2). It has not had an independent
+> SendBeam is stable open-source software. It has not had an independent
 > security audit; review the [threat model](docs/threat-model.md) before using it
 > for irreplaceable or highly sensitive data.
 
