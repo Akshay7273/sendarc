@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -40,6 +41,8 @@ func main() {
 		os.Exit(runSend(os.Args[2:]))
 	case "receive", "recv":
 		os.Exit(runReceive(os.Args[2:]))
+	case "transfers":
+		os.Exit(runTransfers(os.Args[2:]))
 	case "diagnose":
 		os.Exit(runDiagnose(os.Args[2:]))
 	case "-h", "--help", "help":
@@ -59,6 +62,7 @@ func usage(w *os.File) {
 	_, _ = fmt.Fprintln(w, "Usage:")
 	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam send")+" <file-or-folder>... [flags]")
 	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam receive")+" <code|link> [flags]")
+	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam transfers")+" <list|inspect|resume|discard> [flags]")
 	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam diagnose")+" [flags]")
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, s.dim("Common flags:"))
@@ -73,6 +77,9 @@ func usage(w *os.File) {
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, s.dim("Receive flags:"))
 	_, _ = fmt.Fprintln(w, "  --out DIR                directory to write the received file into (default .)")
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, s.dim("Transfers flags:"))
+	_, _ = fmt.Fprintln(w, "  --out DIR                directory whose .sendbeam durable store to manage (default .)")
 }
 
 func runSend(args []string) int {
@@ -231,6 +238,9 @@ func runReceive(args []string) int {
 	progress.finish()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\n%s\n", s.cross("Failed: "+handshakeError(err)))
+		if _, statErr := os.Stat(filepath.Join(*outDir, ".sendbeam")); statErr == nil {
+			fmt.Fprintf(os.Stderr, "%s\n", s.dim("Verified partial data and checkpoints were kept in "+filepath.Join(*outDir, ".sendbeam")+"; run \"sendbeam transfers list --out "+*outDir+"\" to inspect or discard them."))
+		}
 		return 1
 	}
 	fmt.Println()
