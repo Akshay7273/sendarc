@@ -94,6 +94,9 @@ export class TransferSender {
   private acknowledged = 0;
   private paused = false;
   private completeSent = false;
+  /** The canonical digest carried by the one-shot Complete control, kept so a path change
+   *  before settlement can retransmit Complete (the receiver settles then ignores duplicates). */
+  private completeDigest: string | undefined;
   private activeFileIdx = -1;
   private activeFileAcknowledged = 0;
   /** The validated manifest, kept so a path change before any acknowledgment can retransmit it. */
@@ -186,6 +189,16 @@ export class TransferSender {
       void this.sendControl(FrameType.Manifest, this.manifest).catch((e: unknown) =>
         this.fail(e instanceof Error ? e : new Error(String(e))),
       );
+    }
+    if (this.completeSent && this.completeDigest !== undefined) {
+      // Complete is a one-shot frame: sending it does not wait for an ack, so a cutover that
+      // tears the old path down right after it was written can starve it from the receiver.
+      // The receiver settles on Complete (then ignores a duplicate) and sends Done, so
+      // retransmitting it on the new path preserves the v1.1 terminal-Complete recovery.
+      void this.sendControl(FrameType.Complete, {
+        type: FrameType.Complete,
+        fileDigest: this.completeDigest,
+      }).catch((e: unknown) => this.fail(e instanceof Error ? e : new Error(String(e))));
     }
   }
 
@@ -282,6 +295,7 @@ export class TransferSender {
     }
 
     this.completeSent = true;
+    this.completeDigest = transferDigest;
     await this.sendControl(FrameType.Complete, {
       type: FrameType.Complete,
       fileDigest: transferDigest,
