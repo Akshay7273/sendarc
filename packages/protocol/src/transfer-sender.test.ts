@@ -311,6 +311,68 @@ describe('TransferSender', () => {
     expect(outbound[1]).not.toEqual(outbound[3]);
   });
 
+  it('retransmits a sent-but-unsettled Complete after a transport change (terminal recovery)', async () => {
+    const keys = await deriveTransferKeys(master);
+    const data = new Uint8Array([1, 2, 3, 4]);
+    const outbound: Uint8Array[] = [];
+    const sender = new TransferSender({
+      file: bytesSource(data, { name: 'f', size: data.length, mime: '', lastModified: 0 }),
+      send: (frame) => void outbound.push(frame),
+      sendDir: keys.o2j,
+      recvDir: keys.j2o,
+      sendCounterStart: 0,
+      recvCounterStart: 0,
+      createDigest: nodeDigest,
+      blockSize: 8,
+      frameSize: 4,
+      window: 1,
+      ackTimeoutMs: 60_000,
+    });
+
+    const run = sender.run();
+    // With window=1 the sender blocks after its first (only) block until it is acknowledged;
+    // feed a verified ack so it proceeds to Complete, then cut over before Done arrives.
+    await waitFor(() => outbound.some((f) => f[9] === FrameType.BlockHash));
+    let ackCtr = 0;
+    const ackFrame = await seal(
+      keys.j2o,
+      ackCtr++,
+      {
+        version: FRAME_VERSION,
+        type: FrameType.Ack,
+        flags: 0,
+        fileIdx: 0,
+        blockIdx: 0,
+        frameOff: 0,
+      },
+      encodeControl({ type: FrameType.Ack, fileIdx: 0, blockIdx: 0 }),
+    );
+    sender.handle(ackFrame);
+    await waitFor(() => outbound.some((f) => f[9] === FrameType.Complete));
+    sender.transportChanged();
+    await waitFor(() => outbound.filter((f) => f[9] === FrameType.Complete).length >= 2);
+    sender.cancel('test complete');
+    await expect(run).rejects.toThrow(/test complete/);
+
+    // Two Complete frames, each sealed under a different nonce (fresh AEAD counter).
+    const completes = outbound.filter((f) => f[9] === FrameType.Complete);
+    expect(completes.length).toBeGreaterThanOrEqual(2);
+    const opened: Array<{ type: number; counter: number }> = [];
+    let counter = 0;
+    for (const f of outbound) {
+      const o = await open(keys.o2j, counter, f);
+      counter++;
+      opened.push({ type: o.header.type, counter });
+    }
+    const completeIndexes = opened
+      .map((item, i) => ({ ...item, i }))
+      .filter((item) => item.type === FrameType.Complete)
+      .map((item) => item.counter);
+    expect(completeIndexes.length).toBeGreaterThanOrEqual(2);
+    // Retransmitted Complete must carry a distinct AEAD counter from the original.
+    expect(new Set(completeIndexes).size).toBe(completeIndexes.length);
+  });
+
   it('halts new data while paused and resumes without losing the window', async () => {
     const keys = await deriveTransferKeys(master);
     const outbound: Uint8Array[] = [];
