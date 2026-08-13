@@ -12,6 +12,7 @@ function fakeChannel() {
     onMessage: vi.fn(),
     onBinary: vi.fn(),
     onClose: vi.fn(),
+    setResume: vi.fn(),
     close: vi.fn(),
   };
   return { channel, messages, binary };

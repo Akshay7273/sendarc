@@ -52,8 +52,8 @@ export interface TransferController {
   total(): number | undefined;
   /** A coherent acknowledged-byte, smoothed-rate, ETA, and run-state snapshot. */
   snapshot(): TransferSnapshot;
-  /** Active byte path, including automatic relay fallback. */
-  transport(): 'connecting' | 'direct' | 'relay';
+  /** Active byte path, including automatic relay fallback and transient recovery. */
+  transport(): 'connecting' | 'direct' | 'recovering' | 'relay';
   /** Resolves when the transfer completes and verifies; rejects on any failure. */
   readonly done: Promise<TransferOutcome>;
   /** Stop producing new data frames; already-buffered transport bytes may drain. */
@@ -124,6 +124,7 @@ function run(
   let writer: ChannelWriter | undefined;
   let relay: RelayTransport | undefined;
   let transport: 'connecting' | 'direct' | 'relay' = 'connecting';
+  let recovering = false;
   let switchPromise: Promise<void> | undefined;
   let cancelTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -193,6 +194,14 @@ function run(
             warmRelaySignal?.();
           }
         },
+        onRecovering: (rec) => {
+          if (!generation.isCurrent(gen)) return;
+          recovering = rec;
+        },
+        onRecoverFailed: () => {
+          if (!generation.isCurrent(gen)) return;
+          void switchToRelay().catch(() => {});
+        },
       });
       peer = p;
       const relayPath = new RelayTransport(signaling);
@@ -213,6 +222,11 @@ function run(
         if (!generation.isCurrent(gen)) return;
         relayPath.handleBinary(frame);
       });
+
+      // Arm post-establishment signaling reconnect with the persistent room/role, so a signaling
+      // drop on a healthy direct path re-attaches to the room and a later ICE-restart
+      // renegotiation can still exchange its SDP/ICE frames (V12-PR04 signaling recovery).
+      signaling.setResume(rendezvous.room, rendezvous.role);
 
       const w = new Worker(new URL('../transfer/transfer.worker.ts', import.meta.url), {
         type: 'module',
@@ -396,7 +410,7 @@ function run(
     progress: () => progress.snapshot().bytes,
     total: () => total,
     snapshot: () => progress.snapshot(),
-    transport: () => transport,
+    transport: () => (recovering && transport === 'direct' ? 'recovering' : transport),
     done: donePromise,
     pause: () => {
       if (settled || progress.snapshot().state === 'paused') return;
