@@ -31,6 +31,8 @@ import type {
   WorkerToHost,
 } from '../transfer/wire.js';
 import { GenerationGuard } from './generation.js';
+import { type Snapshot, sanitize } from '../transfer/diagnostics.js';
+import type { PathKind } from '../transfer/diagnostics.js';
 
 /** Terminal outcome of a transfer. `file` is present on the receive side (the downloadable result). */
 export interface TransferOutcome {
@@ -54,6 +56,8 @@ export interface TransferController {
   snapshot(): TransferSnapshot;
   /** Active byte path, including automatic relay fallback and transient recovery. */
   transport(): 'connecting' | 'direct' | 'recovering' | 'relay';
+  /** A sanitized diagnostics snapshot (setup timing, path/ICE state, failures). */
+  diagnostics(): Snapshot;
   /** Resolves when the transfer completes and verifies; rejects on any failure. */
   readonly done: Promise<TransferOutcome>;
   /** Stop producing new data frames; already-buffered transport bytes may drain. */
@@ -128,6 +132,15 @@ function run(
   let switchPromise: Promise<void> | undefined;
   let cancelTimer: ReturnType<typeof setTimeout> | undefined;
 
+  // Sanitized diagnostics (V12-PR06 / ADR 0003): setup timing, transport/path, ICE state, and
+  // failure events — all redacted so the snapshot is safe to surface on a failure report.
+  const diagStarted = performance.now();
+  let diagTransport: PathKind | undefined;
+  let diagSetupMs = 0;
+  let diagPairType = '';
+  const diagFailures: Snapshot['failures'] = [];
+  const diagIce = new Set<string>();
+
   // Adaptive direct/relay racing: the same ICE-progress policy as the CLI decides when to warm
   // the encrypted relay, replacing the former blind fixed-duration fallback.
   const adaptivePolicy = new AdaptivePolicy();
@@ -159,6 +172,12 @@ function run(
     resolveDone(o);
   };
   const fail = (err: Error): void => {
+    diagFailures.push({
+      code: 'INTERNAL',
+      atMs: Math.round(performance.now() - diagStarted),
+      ...(diagTransport !== undefined ? { path: diagTransport } : {}),
+      message: sanitize(err instanceof Error ? err.message : String(err)),
+    });
     if (settled) return;
     settled = true;
     cleanup();
@@ -183,6 +202,7 @@ function run(
         ...(spec.iceServers ? { iceServers: spec.iceServers } : {}),
         onIceState: (s) => {
           if (!generation.isCurrent(gen)) return;
+          diagIce.add(s.connection);
           if (
             adaptivePolicy.observe({
               gathering: s.gathering as AdaptiveGathering,
@@ -238,8 +258,11 @@ function run(
 
       const selected = await selectTransport(p, relayPath, warmRelayWhenDecided);
       transport = selected.kind;
+      diagSetupMs = Math.round(performance.now() - diagStarted);
+      diagTransport = selected.kind === 'direct' ? 'direct' : 'relay';
       if (selected.kind === 'direct') {
         writer = new ChannelWriter(selected.channel);
+        diagPairType = p.diagnostics().selectedPairType;
       } else {
         p.close();
       }
@@ -406,11 +429,36 @@ function run(
     }
   }
 
+  // Build a sanitized diagnostics snapshot (V12-PR06 / ADR 0003). Redacts everything the
+  // sanitizer would touch and reflects only path/ICE/timing/failure state, never secrets.
+  const diagSnapshot = (): Snapshot => ({
+    app: 'web',
+    role: rendezvous.role === 'offerer' ? 'offerer' : 'joiner',
+    setupMs: diagSetupMs,
+    totalMs: Math.round(performance.now() - diagStarted),
+    ...(diagTransport !== undefined ? { selectedPath: diagTransport } : {}),
+    ...(diagPairType !== '' ? { selectedPairType: diagPairType } : {}),
+    ...(diagIce.size > 0
+      ? {
+          paths: [
+            {
+              state: diagTransport ? 'active' : 'candidate',
+              kind: diagTransport ?? 'direct',
+              setupMs: diagSetupMs,
+              iceStates: [...diagIce],
+            },
+          ],
+        }
+      : {}),
+    ...(diagFailures.length > 0 ? { failures: diagFailures } : {}),
+  });
+
   return {
     progress: () => progress.snapshot().bytes,
     total: () => total,
     snapshot: () => progress.snapshot(),
     transport: () => (recovering && transport === 'direct' ? 'recovering' : transport),
+    diagnostics: diagSnapshot,
     done: donePromise,
     pause: () => {
       if (settled || progress.snapshot().state === 'paused') return;
