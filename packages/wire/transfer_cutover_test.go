@@ -21,9 +21,14 @@ import (
 // Harness contract (mirrors the production supervisor/adaptive boundary): the cutover is atomic
 // from the transfer engine's perspective. The receiver learns the path changed — Receiver.
 // TransportChanged — before the first frame from the new generation is delivered to
-// Receiver.Handle, and the old path's queued tail is dropped at the switch, exactly what a
-// closed transport does (DataConn's pump exits on Close without draining; the relay read loop
-// stops). A cutover that instead lets old-path tail frames re-enter the engine after the switch
+// Receiver.Handle. Production enforces this at the supervisor/path-generation boundary, not
+// inside the transports: when a new path activates, the old underlying path is closed, and stale
+// old-generation delivery is suppressed because the old entry is no longer eligible for delivery
+// (Supervisor.promoteOnData refuses frames from non-active entries), while the switch callback
+// (onSwitch → TransportChanged) runs synchronously to completion before the first new-generation
+// frame reaches Handle. Closing DataConn alone is not the rejection mechanism: pump selects
+// between its inbox and the done channel, so an already-buffered frame can still surface after
+// shutdown. A cutover that instead lets old-path tail frames re-enter the engine after the switch
 // (or delivers new-path frames before TransportChanged) produces the integrity failure
 // "new block before block_hash": a stale old-path block start grabs blockBuf, then the first
 // legitimate new-path retransmission hits the "new block before block_hash" guard. That
@@ -78,10 +83,11 @@ const (
 //
 // The cutover itself is serialized against receiver-bound delivery with recvMu, so the switch,
 // Receiver.TransportChanged, and Sender.TransportChanged are atomic with respect to every
-// receiver.Handle call. The old-path drain drops everything queued after the cut — the same
-// behavior as closing the old transport. Without this, the harness races the switch goroutine
-// against the delivery drains and intermittently delivers an old-path tail frame after
-// TransportChanged (or a new-path frame before it), which aborts the receiver with
+// receiver.Handle call. The old-path drain drops everything queued after the cut, modeling what
+// the transfer engine observes after production's supervisor filtering: once the switch happens,
+// stale old-generation frames are never delivered to the engine. Without this, the harness races
+// the switch goroutine against the delivery drains and intermittently delivers an old-path tail
+// frame after TransportChanged (or a new-path frame before it), which aborts the receiver with
 // "new block before block_hash" — an impossible ordering in production (reproduced under -race
 // on pristine main; see TestSenderReceiverMidTransferCutoverDeterministic for the deterministic
 // regression).
@@ -175,14 +181,15 @@ func TestSenderReceiverMidTransferCutover(t *testing.T) {
 		}
 	}
 
-	// Old-path side only delivers until the cut; afterwards its queued tail is dropped, exactly
-	// what a torn-down direct transport does. New-path drains run for the whole transfer.
+	// Old-path side only delivers until the cut; afterwards its queued tail is dropped, modeling
+	// the supervisor's filtering of stale old-generation frames (the old entry is closed and no
+	// longer eligible for delivery). New-path drains run for the whole transfer.
 	go drain(link.oldS2R, func(f []byte) {
 		recvMu.Lock()
 		defer recvMu.Unlock()
 		select {
 		case <-cutDone:
-			return // closed old path: its tail never reaches the engine
+			return // stale old-generation tail: filtered out, never reaches the engine
 		default:
 		}
 		if replayProbe.Load() == nil && len(f) > 0 && f[9] == FrameBlockData {
@@ -252,8 +259,8 @@ func TestSenderReceiverMidTransferCutover(t *testing.T) {
 //  1. Old path: manifest + block 0 complete → acked.
 //  2. Old path: block 1's first frame only — a partial block, no block_hash yet.
 //  3. Cutover, atomically: switch path, Receiver.TransportChanged, Sender.TransportChanged.
-//  4. The old-path tail (block 1 remainder + blocks 2-4, all still queued) is dropped — a closed
-//     transport never delivers it.
+//  4. The old-path tail (block 1 remainder + blocks 2-4, all still queued) is dropped, modeling
+//     the supervisor's filtering of stale old-generation frames after the switch.
 //  5. The first legitimate new-path retransmission (fresh AEAD counter) MUST be accepted — the
 //     receiver discards the old partial block and starts fresh, instead of aborting with
 //     "new block before block_hash".
@@ -389,7 +396,7 @@ func TestSenderReceiverMidTransferCutoverDeterministic(t *testing.T) {
 
 	// 3. Cutover, atomically: the path switches and both engines learn it BEFORE the first
 	//    new-generation frame is delivered — the production supervisor contract. The remaining
-	//    old-path queue is the torn-down transport's tail and is never fed.
+	//    old-path queue is the stale old-generation tail and is never fed.
 	path.Store(cutPathNew)
 	receiver.TransportChanged()
 	sender.TransportChanged()
