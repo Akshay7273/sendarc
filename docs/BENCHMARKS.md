@@ -108,12 +108,12 @@ The target prefix size is parameterized with `SENDBEAM_BENCH_PREFIX_GIB` (defaul
 is always streamed in 1 MiB chunks, so the working set stays small at any size. Every
 row below is a measured run — numbers are never extrapolated from another size.
 
-| Machine | Prefix | Rehash (fallback) | Restore (checkpointed) |
-| ------- | -----: | ----------------: | ---------------------: |
-| i5-6200U @ 2.30 GHz, Linux, go1.24 | 4 GiB | ~17.0 s @ ~253 MB/s | ~5.1 µs |
-| GitHub-hosted ubuntu-latest, 4 vCPU AMD EPYC 7763, go1.25 | 10 GiB | 6.77 s @ 1,586 MB/s | 5.13 µs |
-| GitHub-hosted ubuntu-latest, 4 vCPU AMD EPYC 7763, go1.25 | 100 GiB | 67.7 s @ 1,586 MB/s | 4.97 µs |
-| GitHub-hosted ubuntu-latest, 4 vCPU AMD EPYC 7763, go1.25 | 256 GiB | 173.2 s @ 1,587 MB/s | 6.58 µs |
+| Machine                                                   |  Prefix |    Rehash (fallback) | Restore (checkpointed) |
+| --------------------------------------------------------- | ------: | -------------------: | ---------------------: |
+| i5-6200U @ 2.30 GHz, Linux, go1.24                        |   4 GiB |  ~17.0 s @ ~253 MB/s |                ~5.1 µs |
+| GitHub-hosted ubuntu-latest, 4 vCPU AMD EPYC 7763, go1.25 |  10 GiB |  6.77 s @ 1,586 MB/s |                5.13 µs |
+| GitHub-hosted ubuntu-latest, 4 vCPU AMD EPYC 7763, go1.25 | 100 GiB |  67.7 s @ 1,586 MB/s |                4.97 µs |
+| GitHub-hosted ubuntu-latest, 4 vCPU AMD EPYC 7763, go1.25 | 256 GiB | 173.2 s @ 1,587 MB/s |                6.58 µs |
 
 Rehash cost is linear in the prefix (1,586 MB/s on the runner at every size — a
 consistent measurement, not an extrapolation); restore is a constant ~5 µs regardless
