@@ -100,8 +100,12 @@ type Sender struct {
 	// manifest is the validated manifest sent on the first path, kept so a
 	// TransportChanged before any acknowledgment can retransmit it (a cutover
 	// can lose it, and it is outside the block retransmit window).
-	manifest     *Manifest
-	manifestSent bool
+	manifest *Manifest
+	// manifestFingerprint is the canonical fingerprint of manifest (V13-PR06). It is
+	// computed before the manifest frame is transmitted so an early resume_state is
+	// never accepted without the binding available.
+	manifestFingerprint string
+	manifestSent        bool
 
 	mu                     sync.Mutex
 	cond                   *sync.Cond
@@ -122,6 +126,10 @@ type Sender struct {
 	handleMu sync.Mutex
 	// resumePlan maps file index to the receiver's high-water mark; each file restarts there.
 	resumePlan map[int]int
+	// appliedResume is the exact resume_state message that produced resumePlan, kept so a
+	// path cutover that duplicates it can be recognized as an idempotent re-answer while a
+	// conflicting duplicate fails closed.
+	appliedResume *ResumeState
 	// resumeReceived is set once a valid resume_state has been applied (resume mode only).
 	resumeReceived bool
 }
@@ -247,14 +255,24 @@ func (s *Sender) Run(ctx context.Context) (string, error) {
 			return "", err
 		}
 	}
-	if err := s.sendControl(&manifest); err != nil {
+	// The fingerprint binding is registered before the manifest frame is transmitted:
+	// the receiver can answer a resume_state the moment it authenticates the manifest,
+	// possibly before Run reaches the wait, and that answer must never be validated
+	// against an unset binding.
+	fingerprint, err := ManifestFingerprint(manifest)
+	if err != nil {
 		s.fail(err)
 		return "", err
 	}
 	s.mu.Lock()
 	s.manifest = &manifest
+	s.manifestFingerprint = fingerprint
 	s.manifestSent = true
 	s.mu.Unlock()
+	if err := s.sendControl(&manifest); err != nil {
+		s.fail(err)
+		return "", err
+	}
 
 	// A transfer id opts into resumption: wait for the receiver's resume_state (all zero on a
 	// first attempt) before streaming so blocks it already holds are never sent. Fresh transfers
@@ -268,10 +286,10 @@ func (s *Sender) Run(ctx context.Context) (string, error) {
 	for fileIdx, source := range s.files {
 		s.mu.Lock()
 		s.activeFileIdx = fileIdx
+		// resumePlan is only ever populated from a fully-validated resume_state whose
+		// claims were already bounded to the manifest geometry (see
+		// buildResumePlanLocked); a missing file here means fresh mode, restart at zero.
 		haveBlocks := s.resumePlan[fileIdx]
-		if haveBlocks > entries[fileIdx].Blocks {
-			haveBlocks = entries[fileIdx].Blocks
-		}
 		// Bytes the receiver already holds count as acknowledged up front so progress is continuous
 		// across a resume. Only a file's final block may be partial, so a full prefix is N blocks.
 		committed := int64(haveBlocks) * int64(s.blockSize)
@@ -545,11 +563,14 @@ func (s *Sender) waitResume() error {
 
 // onResumeState validates the receiver's resume_state against the manifest and records each
 // file's high-water mark, then unblocks the driver. Any inconsistency fails the transfer closed.
+// The plan is only committed once the entire message validates; an identical duplicate
+// (retransmitted after a path cutover lost the first answer) is idempotent.
 func (s *Sender) onResumeState(m *ResumeState) {
 	s.mu.Lock()
 	plan, failErr := s.buildResumePlanLocked(m)
 	if failErr == nil {
 		s.resumePlan = plan
+		s.appliedResume = m
 		s.resumeReceived = true
 		s.cond.Broadcast()
 	}
@@ -559,34 +580,71 @@ func (s *Sender) onResumeState(m *ResumeState) {
 	}
 }
 
+// buildResumePlanLocked fully validates one resume_state against the sender's own manifest and
+// returns the complete per-file plan, or fails the message closed. It never mutates sender
+// state: the caller commits the returned plan only after the entire message passed, so a bad
+// claim can never leave a partially-applied resume plan behind. Validation rules (V13-PR06):
+//
+//   - the message may only arrive after the manifest was validated (resume mode only);
+//   - transferId must equal the sender's;
+//   - manifestFingerprint, when present, must equal the sender's canonical manifest
+//     fingerprint (an absent field is a legacy peer that predates the binding and is
+//     accepted under the structural rules sendbeam/1 always applied);
+//   - exactly one entry per manifest file: unknown indexes, duplicates, and missing files
+//     are all rejected;
+//   - haveBlocks must be within [0, manifest blocks] using the sender's manifest geometry;
+//   - a duplicate message identical to the one already applied is an idempotent no-op (a
+//     cutover can deliver the receiver's answer twice); any different duplicate fails.
 func (s *Sender) buildResumePlanLocked(m *ResumeState) (map[int]int, *TransferError) {
-	if s.transferID == "" {
+	if s.transferID == "" || s.manifest == nil {
 		return nil, NewTransferError(FailIntegrity, "unexpected resume_state")
-	}
-	if s.resumeReceived {
-		return nil, NewTransferError(FailIntegrity, "duplicate resume_state")
 	}
 	if m.TransferID != s.transferID {
 		return nil, NewTransferError(FailIntegrity, "resume_state transfer id mismatch")
 	}
+	if m.ManifestFingerprint != "" {
+		if m.ManifestFingerprint != s.manifestFingerprint {
+			return nil, NewTransferError(FailIntegrity, "resume_state manifest fingerprint mismatch")
+		}
+	}
+	if s.resumeReceived {
+		if s.appliedResume != nil && resumeStatesEqual(m, s.appliedResume) {
+			return s.resumePlan, nil
+		}
+		return nil, NewTransferError(FailIntegrity, "conflicting duplicate resume_state")
+	}
 	plan := make(map[int]int, len(m.Files))
 	for _, f := range m.Files {
-		if f.Idx < 0 || f.Idx >= len(s.files) {
+		if f.Idx < 0 || f.Idx >= len(s.manifest.Files) {
 			return nil, NewTransferError(FailIntegrity, "resume_state references an unknown file")
 		}
 		if _, dup := plan[f.Idx]; dup {
-			return nil, NewTransferError(FailIntegrity, "resume_state references an unknown file")
+			return nil, NewTransferError(FailIntegrity, "resume_state references a file more than once")
 		}
-		blocks := 0
-		if size := s.files[f.Idx].Meta().Size; size > 0 {
-			blocks = int((size-1)/int64(s.blockSize) + 1)
-		}
+		blocks := s.manifest.Files[f.Idx].Blocks
 		if f.HaveBlocks < 0 || f.HaveBlocks > blocks {
 			return nil, NewTransferError(FailIntegrity, "resume_state haveBlocks out of range")
 		}
 		plan[f.Idx] = f.HaveBlocks
 	}
+	if len(plan) != len(s.manifest.Files) {
+		return nil, NewTransferError(FailIntegrity, "resume_state is missing a file entry")
+	}
 	return plan, nil
+}
+
+// resumeStatesEqual reports whether two resume_state messages carry the same claims.
+func resumeStatesEqual(a, b *ResumeState) bool {
+	if a == nil || b == nil || a.TransferID != b.TransferID ||
+		a.ManifestFingerprint != b.ManifestFingerprint || len(a.Files) != len(b.Files) {
+		return false
+	}
+	for i := range a.Files {
+		if a.Files[i] != b.Files[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Sender) applyRemoteControl(op ControlOp) {

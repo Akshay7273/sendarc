@@ -23,6 +23,7 @@ import {
   type Sink,
 } from './transfer-ports.js';
 import { decodeControl, encodeControl } from './transfer-messages.js';
+import { manifestFingerprint } from './journal.js';
 import type { TransferRunState } from './transfer-sender.js';
 import { validateManifest, MAX_MANIFEST_BLOCK_BYTES } from './safe-path.js';
 import { completionDigest } from './transfer-set.js';
@@ -55,6 +56,14 @@ export interface ReceiverResumeState {
    * file set, so the persisted offsets are ignored and a fresh receive starts.
    */
   transferId: string;
+  /**
+   * The canonical fingerprint of the exact manifest these checkpoints belong to (identical
+   * algorithm to the durable journal's `manifestFingerprint`). The receiver revalidates the
+   * whole seed against the authenticated manifest before advertising any of it: a claim that
+   * cannot be bound to the authenticated manifest fails closed rather than being clamped or
+   * silently dropped.
+   */
+  manifestFingerprint: string;
   files: ReadonlyMap<number, ReceiverResumeFile>;
 }
 
@@ -106,8 +115,20 @@ export class TransferReceiver {
   private readonly seenAhead = new Set<number>();
   private nackOutstanding: number | undefined;
   private paused = false;
-  /** The caller's resume seed, kept only once its transferId matches the arriving manifest. */
+  /** The caller's resume seed, kept only once its transferId matches the arriving manifest
+   *  and its claims validated against the authenticated manifest. */
   private activeResume: ReceiverResumeState | undefined;
+  /** The exact resume_state advertised on the first manifest, kept so an identical duplicate
+   *  manifest (a cutover retransmission) can re-answer with the same claims instead of the
+   *  sender waiting forever for a lost message. */
+  private resumeStateMessage:
+    | {
+        type: FrameType.ResumeState;
+        transferId: string;
+        manifestFingerprint: string;
+        files: Array<{ idx: number; haveBlocks: number }>;
+      }
+    | undefined;
 
   private resolveDone!: (r: ReceiveResult) => void;
   private rejectDone!: (e: Error) => void;
@@ -243,7 +264,17 @@ export class TransferReceiver {
       // A path cutover can retransmit the manifest while the original is still
       // being processed. An identical copy is harmless; a different one is a
       // protocol violation (mirrors the Go wire receiver).
-      if (manifestsEqual(manifest, this.manifest)) return;
+      if (manifestsEqual(manifest, this.manifest)) {
+        // The sender retransmits the manifest when a cutover lost its first copy —
+        // possibly before the receiver's resume_state ever reached it. Re-answer
+        // with the identical resume_state so the negotiation converges instead of
+        // the sender waiting forever for a lost message; the sender treats an
+        // identical duplicate as idempotent.
+        if (manifest.transferId !== undefined && this.resumeStateMessage !== undefined) {
+          await this.sendControl(FrameType.ResumeState, this.resumeStateMessage);
+        }
+        return;
+      }
       throw new TransferError('integrity', 'duplicate manifest');
     }
     try {
@@ -261,26 +292,91 @@ export class TransferReceiver {
     this.awaitingRestart = true;
     if (manifest.transferId !== undefined) {
       // The sender opted into resumption. Apply persisted offsets only when they belong to this
-      // exact transfer, then report each file's high-water mark so the sender skips held blocks.
-      this.activeResume =
-        this.o.resume && this.o.resume.transferId === manifest.transferId
-          ? this.o.resume
-          : undefined;
+      // exact transfer — and only after the seed validates against the authenticated manifest:
+      // a host-provided seed is a claim, not a trust anchor, and an impossible claim must fail
+      // closed before any of it is advertised (never clamped into range).
+      if (this.o.resume && this.o.resume.transferId === manifest.transferId) {
+        await this.validateResumeSeed(manifest, this.o.resume);
+        this.activeResume = this.o.resume;
+      }
       await this.sendResumeState(manifest);
     }
     await this.openNextFile();
   }
 
+  /**
+   * Bind a host-provided resume seed against the authenticated manifest (V13-PR06). Every check
+   * is reject, never repair: a seed that fails any rule is refused entirely so no claim without
+   * durable backing can ever be advertised to the sender. The seed's fingerprint already binds
+   * block geometry and the exact file set, so per-file bounds complete the validation.
+   */
+  private async validateResumeSeed(manifest: Manifest, resume: ReceiverResumeState): Promise<void> {
+    if (!/^[0-9a-f]{32}$/.test(resume.transferId)) {
+      throw new TransferError(
+        'sink_error',
+        'resume seed transferId must be 32 lowercase hex characters',
+      );
+    }
+    if (!/^[0-9a-f]{64}$/.test(resume.manifestFingerprint)) {
+      throw new TransferError(
+        'sink_error',
+        'resume seed manifestFingerprint must be 64 lowercase hex characters',
+      );
+    }
+    const fingerprint = await manifestFingerprint(manifest);
+    if (resume.manifestFingerprint !== fingerprint) {
+      throw new TransferError(
+        'sink_error',
+        'resume seed manifest fingerprint does not match the authenticated manifest',
+      );
+    }
+    if (resume.files.size !== manifest.files.length) {
+      throw new TransferError(
+        'sink_error',
+        `resume seed covers ${resume.files.size} files, manifest has ${manifest.files.length}`,
+      );
+    }
+    for (const file of manifest.files) {
+      const progress = resume.files.get(file.idx);
+      if (progress === undefined) {
+        throw new TransferError('sink_error', `resume seed is missing file ${file.idx}`);
+      }
+      if (
+        !Number.isSafeInteger(progress.haveBlocks) ||
+        progress.haveBlocks < 0 ||
+        progress.haveBlocks > file.blocks
+      ) {
+        throw new TransferError(
+          'sink_error',
+          `resume seed haveBlocks ${progress.haveBlocks} out of range for file ${file.idx} (blocks ${file.blocks})`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Advertise the receiver's durable high-water marks. The first call builds the message
+   * (bound to the authenticated manifest's canonical fingerprint) and snapshots it; later
+   * calls — a cutover's identical duplicate manifest — re-answer with that exact snapshot so
+   * the sender's idempotent duplicate handling converges the negotiation.
+   */
   private async sendResumeState(manifest: Manifest): Promise<void> {
+    if (this.resumeStateMessage !== undefined) {
+      await this.sendControl(FrameType.ResumeState, this.resumeStateMessage);
+      return;
+    }
     const files = manifest.files.map((file) => ({
       idx: file.idx,
-      haveBlocks: Math.min(this.activeResume?.files.get(file.idx)?.haveBlocks ?? 0, file.blocks),
+      haveBlocks: this.activeResume?.files.get(file.idx)?.haveBlocks ?? 0,
     }));
-    await this.sendControl(FrameType.ResumeState, {
+    const msg = {
       type: FrameType.ResumeState,
       transferId: manifest.transferId!,
+      manifestFingerprint: await manifestFingerprint(manifest),
       files,
-    });
+    } as const;
+    this.resumeStateMessage = msg;
+    await this.sendControl(FrameType.ResumeState, msg);
   }
 
   /** Open the next file and immediately verify/close consecutive empty files. */
@@ -291,7 +387,9 @@ export class TransferReceiver {
       const file = manifest.files[this.fileIdx]!;
       this.file = file;
       const rf = this.activeResume?.files.get(file.idx);
-      this.nextBlock = rf ? Math.min(rf.haveBlocks, file.blocks) : 0;
+      // The seed was validated against the authenticated manifest, so the high-water mark
+      // is already within [0, blocks]; it is never clamped.
+      this.nextBlock = rf ? rf.haveBlocks : 0;
       this.seenAhead.clear();
       this.nackOutstanding = undefined;
       // The seed digest already holds the persisted prefix; the streamed remainder appends to it.

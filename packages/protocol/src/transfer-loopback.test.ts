@@ -6,6 +6,7 @@ import { FrameType } from './transfer.js';
 import type { FileEntry, Manifest } from './transfer.js';
 import { TransferSender } from './transfer-sender.js';
 import { TransferReceiver } from './transfer-receiver.js';
+import { manifestFingerprint } from './journal.js';
 
 function nodeDigest(): Digest {
   const h = createHash('sha256');
@@ -246,6 +247,25 @@ describe('transfer loopback (no browser)', () => {
     sink.write(0, data.subarray(0, prefixLen));
     const seed = nodeDigest();
     seed.update(data.subarray(0, prefixLen));
+    // The seed must bind to the canonical fingerprint of the manifest the sender is about
+    // to stream (V13-PR06); recompute it from the same parameters.
+    const fingerprint = await manifestFingerprint({
+      type: FrameType.Manifest,
+      transferId,
+      files: [
+        {
+          idx: 0,
+          name: 'f',
+          size: data.length,
+          mime: '',
+          lastModified: 1,
+          blockSize,
+          blocks,
+          fileDigest: createHash('sha256').update(data).digest('hex'),
+        },
+      ],
+      totalSize: data.length,
+    });
 
     let commits = 0;
     const box: { receiver?: TransferReceiver } = {};
@@ -270,7 +290,11 @@ describe('transfer loopback (no browser)', () => {
       recvCounterStart: 0,
       createDigest: nodeDigest,
       sink,
-      resume: { transferId, files: new Map([[0, { haveBlocks: stop, seedDigest: seed }]]) },
+      resume: {
+        transferId,
+        manifestFingerprint: fingerprint,
+        files: new Map([[0, { haveBlocks: stop, seedDigest: seed }]]),
+      },
       onProgress: () => void commits++,
     });
     box.receiver = receiver;

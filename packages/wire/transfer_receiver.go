@@ -34,9 +34,15 @@ type ResumeFileProgress struct {
 // ReceiverResume is the state a reloaded receiver restores to resume a transfer in place. It is
 // applied only when TransferID equals the arriving manifest's; a mismatch means the room was
 // reused for a different file set, so the offsets are ignored and a fresh receive starts.
+//
+// ManifestFingerprint is the canonical fingerprint of the exact manifest these checkpoints
+// belong to (see ManifestFingerprint). The receiver revalidates the whole seed against the
+// authenticated manifest before advertising any of it: a claim that cannot be bound to the
+// authenticated manifest fails closed rather than being clamped or silently dropped.
 type ReceiverResume struct {
-	TransferID string
-	Files      map[int]ResumeFileProgress
+	TransferID          string
+	ManifestFingerprint string
+	Files               map[int]ResumeFileProgress
 }
 
 // ReceiverOptions configures a Receiver.
@@ -87,8 +93,13 @@ type Receiver struct {
 	awaitingRestart bool
 	seenAhead       map[int]bool
 	nackOutstanding int
-	// activeResume is the caller's seed, kept only once its TransferID matches the manifest.
+	// activeResume is the caller's seed, kept only once its TransferID matches the manifest
+	// and its claims validated against the authenticated manifest.
 	activeResume *ReceiverResume
+	// resumeState is the exact resume_state message advertised on the first manifest, kept
+	// so an identical duplicate manifest (a cutover retransmission) can re-answer with the
+	// same claims instead of the sender waiting forever for a lost message.
+	resumeState *ResumeState
 
 	mu      sync.Mutex
 	done    chan struct{}
@@ -242,6 +253,14 @@ func (r *Receiver) applyManifest(payload []byte) error {
 		// being processed. An identical copy is harmless; a different one is a
 		// protocol violation.
 		if manifestsEqual(&validated, r.manifest) {
+			// The sender retransmits the manifest when a cutover lost its first
+			// copy — possibly before the receiver's resume_state ever reached it.
+			// Re-answer with the identical resume_state so the negotiation
+			// converges instead of the sender waiting forever for a lost message;
+			// the sender treats an identical duplicate as idempotent.
+			if validated.TransferID != "" && r.resumeState != nil {
+				return r.sendControl(r.resumeState)
+			}
 			return nil
 		}
 		return NewTransferError(FailIntegrity, "duplicate manifest")
@@ -265,8 +284,13 @@ func (r *Receiver) applyManifest(payload []byte) error {
 	r.awaitingRestart = true
 	if validated.TransferID != "" {
 		// The sender opted into resumption. Apply persisted offsets only when they belong to this
-		// exact transfer, then report each file's high-water mark so the sender skips held blocks.
+		// exact transfer — and only after the seed validates against the authenticated manifest:
+		// a host-provided seed is a claim, not a trust anchor, and an impossible claim must fail
+		// closed before any of it is advertised (never clamped into range).
 		if r.o.Resume != nil && r.o.Resume.TransferID == validated.TransferID {
+			if err := validateResumeSeed(&validated, r.o.Resume); err != nil {
+				return NewTransferError(FailSinkError, err.Error())
+			}
 			r.activeResume = r.o.Resume
 		}
 		if err := r.sendResumeState(&validated); err != nil {
@@ -276,7 +300,50 @@ func (r *Receiver) applyManifest(payload []byte) error {
 	return r.openNextFile()
 }
 
+// validateResumeSeed binds a host-provided resume seed against the authenticated manifest
+// (V13-PR06). Every check is reject, never repair: a seed that fails any rule is refused
+// entirely so no claim without durable backing can ever be advertised to the sender. The
+// seed's fingerprint already binds block geometry and the exact file set, so per-file
+// bounds complete the validation.
+func validateResumeSeed(manifest *Manifest, resume *ReceiverResume) error {
+	if !isLowerHex(resume.TransferID, 32) {
+		return errors.New("resume seed transferId must be 32 lowercase hex characters")
+	}
+	if !isLowerHex(resume.ManifestFingerprint, 64) {
+		return errors.New("resume seed manifestFingerprint must be 64 lowercase hex characters")
+	}
+	fingerprint, err := ManifestFingerprint(*manifest)
+	if err != nil {
+		return err
+	}
+	if resume.ManifestFingerprint != fingerprint {
+		return errors.New("resume seed manifest fingerprint does not match the authenticated manifest")
+	}
+	if len(resume.Files) != len(manifest.Files) {
+		return fmt.Errorf("resume seed covers %d files, manifest has %d",
+			len(resume.Files), len(manifest.Files))
+	}
+	for _, file := range manifest.Files {
+		progress, ok := resume.Files[file.Idx]
+		if !ok {
+			return fmt.Errorf("resume seed is missing file %d", file.Idx)
+		}
+		if progress.HaveBlocks < 0 || progress.HaveBlocks > file.Blocks {
+			return fmt.Errorf("resume seed haveBlocks %d out of range for file %d (blocks %d)",
+				progress.HaveBlocks, file.Idx, file.Blocks)
+		}
+	}
+	return nil
+}
+
+// sendResumeState advertises the receiver's durable high-water marks. The first call builds
+// the message (bound to the authenticated manifest's canonical fingerprint) and snapshots it;
+// later calls — a cutover's identical duplicate manifest — re-answer with that exact snapshot
+// so the sender's idempotent duplicate handling converges the negotiation.
 func (r *Receiver) sendResumeState(manifest *Manifest) error {
+	if r.resumeState != nil {
+		return r.sendControl(r.resumeState)
+	}
 	files := make([]ResumeFileState, len(manifest.Files))
 	for i, file := range manifest.Files {
 		have := 0
@@ -285,12 +352,16 @@ func (r *Receiver) sendResumeState(manifest *Manifest) error {
 				have = p.HaveBlocks
 			}
 		}
-		if have > file.Blocks {
-			have = file.Blocks
-		}
 		files[i] = ResumeFileState{Idx: file.Idx, HaveBlocks: have}
 	}
-	return r.sendControl(NewResumeState(manifest.TransferID, files))
+	fingerprint, err := ManifestFingerprint(*manifest)
+	if err != nil {
+		return err
+	}
+	rs := NewResumeState(manifest.TransferID, files)
+	rs.ManifestFingerprint = fingerprint
+	r.resumeState = rs
+	return r.sendControl(rs)
 }
 
 func (r *Receiver) openNextFile() error {
@@ -304,10 +375,9 @@ func (r *Receiver) openNextFile() error {
 		r.digest = r.o.CreateDigest()
 		if r.activeResume != nil {
 			if p, ok := r.activeResume.Files[file.Idx]; ok {
+				// The seed was validated against the authenticated manifest, so the
+				// high-water mark is already within [0, Blocks]; it is never clamped.
 				r.nextBlock = p.HaveBlocks
-				if r.nextBlock > file.Blocks {
-					r.nextBlock = file.Blocks
-				}
 				if p.SeedDigest != nil {
 					// The seed digest already holds the persisted prefix; the remainder appends.
 					r.digest = p.SeedDigest
