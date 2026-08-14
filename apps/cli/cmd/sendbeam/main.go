@@ -151,8 +151,11 @@ func runSend(args []string) int {
 		if srec.ResumeSecret == nil {
 			// Legacy pre-PR07 record: no transfer-scoped credential, so authenticated
 			// cross-session resume is unavailable and the id must not be reused (the
-			// receiver would otherwise silently trust old progress).
-			fmt.Fprintf(os.Stderr, "sendbeam send: the sender record for transfer %s carries no resume credential (legacy pre-PR07 state); authenticated cross-session resume is unavailable and the transfer id cannot be reused — nothing was sent. Discard the record with %q and send fresh, or resume with a pre-PR07-compatible receiver.\n",
+			// receiver would otherwise silently trust old progress). No downgrade path is
+			// offered: an old receiver/binary/protocol is never recommended as a
+			// workaround. The only actions are discard/forget the record and start a
+			// fresh transfer.
+			fmt.Fprintf(os.Stderr, "sendbeam send: the sender record for transfer %s carries no resume credential (legacy pre-PR07 state); authenticated cross-session resume is unavailable and the transfer id cannot be reused — nothing was sent. Discard the record with %q and send fresh.\n",
 				srec.TransferID, "sendbeam transfers discard "+srec.TransferID)
 			return 1
 		}

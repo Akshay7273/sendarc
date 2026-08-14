@@ -249,3 +249,77 @@ func TestTransfersStorePathIsBoundedToOutDir(t *testing.T) {
 		t.Fatalf("storage escaped the out dir: %v", entries)
 	}
 }
+
+// TestSendLegacyRecordNeverRecommendsDowngrade pins the V13-PR08 security-UX rule: a
+// pre-PR07 sender record with NO resume credential must refuse with restart/discard
+// guidance only — never a suggestion to use an old receiver/binary/protocol as a
+// workaround. The refusal happens before dialing, so no server is needed.
+func TestSendLegacyRecordNeverRecommendsDowngrade(t *testing.T) {
+	t.Setenv("SENDBEAM_SENDER_STATE", t.TempDir())
+	srcDir := t.TempDir()
+	content := []byte("legacy source bytes")
+	srcPath := filepath.Join(srcDir, "legacy.bin")
+	if err := os.WriteFile(srcPath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := clitransfer.OpenSenderStore(os.Getenv("SENDBEAM_SENDER_STATE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp, err := wire.ManifestFingerprint(wire.Manifest{
+		TransferID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Files: []wire.FileEntry{{
+			Idx: 0, Name: filepath.Base(srcPath), Size: int64(len(content)),
+			Mime: "application/octet-stream", LastModified: info.ModTime().UnixMilli(),
+			BlockSize: 1024, Blocks: 1, FileDigest: strings.Repeat("0", 64),
+		}},
+		TotalSize: int64(len(content)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Legacy pre-PR07 record: schema v2 shape but NO resume secret (exactly what a
+	// pre-PR07 record decodes to).
+	if err := store.Save(clitransfer.SenderRecord{
+		SchemaVersion:       2,
+		TransferID:          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ManifestFingerprint: fp,
+		ProtocolVersion:     wire.ProtocolVersion,
+		CreatedAt:           1_700_000_000_000,
+		UpdatedAt:           1_700_000_000_000,
+		Paths:               []string{srcPath},
+		Files: []clitransfer.SenderFileState{{
+			Idx: 0, Name: filepath.Base(srcPath), Size: int64(len(content)),
+			Mime: "application/octet-stream", LastModified: info.ModTime().UnixMilli(),
+			BlockSize: 1024, Blocks: 1, FileDigest: strings.Repeat("0", 64),
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out := captureStderr(t, func() int { return runSend([]string{srcPath}) })
+	if code != 1 {
+		t.Fatalf("legacy send: code=%d out=%q", code, out)
+	}
+	if !strings.Contains(out, "no resume credential") {
+		t.Fatalf("legacy send must name the missing credential: %q", out)
+	}
+	if !strings.Contains(out, "cannot be reused") {
+		t.Fatalf("legacy send must refuse the old transfer id: %q", out)
+	}
+	// No downgrade guidance: an old receiver/binary/protocol must never be offered.
+	for _, banned := range []string{"pre-PR07-compatible", "old receiver", "old binary", "downgrade"} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("legacy send must not recommend downgrade %q: %q", banned, out)
+		}
+	}
+	// The record is preserved for explicit discard; nothing was deleted.
+	if _, ok, err := store.Lookup(clitransfer.PathKey([]string{srcPath})); err != nil || !ok {
+		t.Fatalf("legacy record must be preserved: ok=%v err=%v", ok, err)
+	}
+}

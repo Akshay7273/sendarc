@@ -209,20 +209,16 @@ export class DurableDestination implements BrowserDestination {
       );
     }
 
-    // V13-PR08: an interrupted journal's verified progress may be reused ONLY after
-    // successful resume-auth in this session. A fresh rendezvous authenticates the NEW
-    // session only; it does not prove continuity with the original transfer peer. Failing
-    // closed here is what makes a fresh session unable to skip old blocks merely because
-    // the transfer id + fingerprint match. The gate protects the PRE-SELECTED journal only:
-    // a manifest whose id differs from the expected resume id is a genuinely fresh sender,
-    // and its fresh journal has no verified progress at risk.
-    // The session authorization is SCOPED to the pre-selected journal: mutual resume-auth
-    // proved continuity with the peer for the SELECTED interrupted transfer only. A manifest
-    // carrying a DIFFERENT id that happens to have its own journal must never reuse that
-    // journal's verified progress — the auth bound a different transcript. A resumed journal
-    // with no authorization (or authorization for another journal) fails closed.
+    // V13-PR08 (review Blocker 2): an interrupted journal's verified progress may be reused
+    // ONLY for the journal THIS session authenticated a resume for. Successful auth for A
+    // must never authorize an existing journal B, and authorization with NO selected
+    // journal authorizes NOTHING. A fresh rendezvous authenticates the NEW session only;
+    // it does not prove continuity with the original transfer peer. Failing closed here is
+    // what makes a fresh session unable to skip old blocks merely because the transfer id +
+    // fingerprint match. A fresh journal created this session has no verified progress at
+    // risk and is never gated.
     const authorizedForThisJournal =
-      this.resumeAuthorized && (this.expectResume === '' || this.expectResume === this.transferId);
+      this.resumeAuthorized && this.expectResume !== '' && this.expectResume === this.transferId;
     if (this.resumed && !authorizedForThisJournal) {
       // The lease acquired above must not linger for a stale TTL after a fail-closed gate;
       // release it so a later authenticated resume attempt can acquire immediately.
@@ -231,6 +227,18 @@ export class DurableDestination implements BrowserDestination {
         throw new TransferError(
           'sink_error',
           `resume of ${this.transferId} was not authenticated in this session; refusing to reuse its verified progress — nothing was received or deleted. Start an authenticated resume so both peers authenticate first`,
+        );
+      }
+      if (this.resumeAuthorized && this.expectResume !== '') {
+        throw new TransferError(
+          'sink_error',
+          `this session authenticated resume for ${this.expectResume}, not ${this.transferId}; refusing to reuse ${this.transferId}'s verified progress — nothing was received or deleted. Start an authenticated resume for that transfer instead`,
+        );
+      }
+      if (this.resumeAuthorized) {
+        throw new TransferError(
+          'sink_error',
+          `this session authorized resume without selecting an interrupted journal; refusing to reuse ${this.transferId}'s verified progress — nothing was received or deleted`,
         );
       }
       throw new TransferError(

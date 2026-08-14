@@ -578,23 +578,44 @@ func (d *DurableDestination) Prepare(manifest wire.Manifest) error {
 			"transfer: journal %s does not match the authenticated manifest (fingerprint mismatch); refusing to guess — run \"sendbeam transfers inspect %s\" or discard it",
 			validated.TransferID, validated.TransferID)
 	}
-	// V13-PR08: an interrupted journal's verified progress may be reused ONLY after
-	// successful resume-auth in this session. A fresh rendezvous authenticates the NEW
-	// session only; it does not prove continuity with the original transfer peer. Failing
-	// closed here is what makes a fresh session unable to skip old blocks merely because
-	// the transfer id + fingerprint match.
-	if !d.resumeAuthorized {
-		// The pre-selected-journal branch fires only when the incoming manifest IS the
-		// interrupted journal the user chose; a different id means a fresh sender and is
-		// handled by the generic branch below (its journal, if any, still fails closed).
-		if d.expectResume != "" && d.expectResume == validated.TransferID {
+	// V13-PR08 (review Blocker 2): an interrupted journal's verified progress may be reused
+	// ONLY for the journal THIS session authenticated a resume for. The authorization is
+	// bound to the locally selected interrupted transfer: successful auth for A must never
+	// authorize an existing journal B, and authorization with no selected journal
+	// authorizes nothing. The strict predicate requires the expected resume id to equal
+	// BOTH the loaded journal's id AND the authenticated manifest's id. A fresh
+	// rendezvous authenticates the NEW session only; it does not prove continuity with
+	// the original transfer peer. Failing closed here is what makes a fresh session unable
+	// to skip old blocks merely because the transfer id + fingerprint match.
+	authorizedForThisJournal := d.resumeAuthorized &&
+		d.expectResume != "" &&
+		d.expectResume == existing.TransferID &&
+		d.expectResume == validated.TransferID
+	if !authorizedForThisJournal {
+		switch {
+		case d.expectResume != "" && d.expectResume == validated.TransferID:
+			// The user pre-selected THIS journal and the incoming manifest is it, but
+			// resume-auth never completed in this session.
 			return wire.Errorf(wire.CodeStorage,
 				"transfer: resume of %s was not authenticated in this session; refusing to reuse its verified progress — nothing was received or deleted. Re-run \"sendbeam transfers resume %s --code <fresh code>\" so both peers authenticate first",
 				validated.TransferID, validated.TransferID)
+		case d.resumeAuthorized && d.expectResume != "":
+			// The session authenticated for a DIFFERENT interrupted transfer; this
+			// journal's verified progress is not covered by that authorization.
+			return wire.Errorf(wire.CodeStorage,
+				"transfer: this session authenticated resume for %s, not %s; refusing to reuse %s's verified progress — nothing was received or deleted. Run \"sendbeam transfers resume %s --code <fresh code>\" for that transfer, or discard its state",
+				d.expectResume, validated.TransferID, validated.TransferID, validated.TransferID)
+		case d.resumeAuthorized:
+			// Authorization with no selected journal covers nothing.
+			return wire.Errorf(wire.CodeStorage,
+				"transfer: this session authorized resume without selecting an interrupted journal; refusing to reuse %s's verified progress — nothing was received or deleted",
+				validated.TransferID)
+		default:
+			// A plain fresh receive met an interrupted journal.
+			return wire.Errorf(wire.CodeStorage,
+				"transfer: transfer %s has verified partial data kept from an interrupted transfer; resuming it requires authenticated resume. Run \"sendbeam transfers resume %s --code <fresh code>\" (the sender re-runs its send for a fresh code), or discard the state with \"sendbeam transfers discard %s --out %s\" to receive fresh — nothing was received or deleted",
+				validated.TransferID, validated.TransferID, validated.TransferID, d.outRoot)
 		}
-		return wire.Errorf(wire.CodeStorage,
-			"transfer: transfer %s has verified partial data kept from an interrupted transfer; resuming it requires authenticated resume. Run \"sendbeam transfers resume %s --code <fresh code>\" (the sender re-runs its send for a fresh code), or discard the state with \"sendbeam transfers discard %s --out %s\" to receive fresh — nothing was received or deleted",
-			validated.TransferID, validated.TransferID, validated.TransferID, d.outRoot)
 	}
 	wantDest, err := destinationIdentity(d.outRoot)
 	if err != nil {
@@ -879,14 +900,29 @@ func (d *DurableDestination) ResumeStateFor(manifest wire.Manifest) (*wire.Recei
 	if journal == nil {
 		return nil, nil
 	}
-	// The gate protects the PRE-SELECTED interrupted journal only: a manifest whose id
-	// differs from the expected resume id is a genuinely fresh sender, and its fresh
-	// journal has no verified progress at risk. Expected must equal the journal's id for
-	// this to be the interrupted transfer the user chose.
-	if !authorized && expected != "" && expected == journal.TransferID {
+	// V13-PR08 (review Blocker 2): persisted haveBlocks may be advertised only for the
+	// journal THIS session authenticated a resume for. Successful auth for A must never
+	// advertise B's progress, and authorization with no selected journal advertises
+	// nothing. A fresh journal created during this session has zero committed progress and
+	// advertises a zero seed as an ordinary fresh receive.
+	hasProgress := false
+	for _, f := range journal.Files {
+		if f.CommittedBlocks > 0 {
+			hasProgress = true
+			break
+		}
+	}
+	authorizedForThis := authorized && expected != "" &&
+		expected == journal.TransferID && expected == manifest.TransferID
+	if hasProgress && !authorizedForThis {
+		if expected == "" {
+			return nil, wire.Errorf(wire.CodeStorage,
+				"transfer: refusing to advertise verified progress for %s: this session did not authenticate a resume for it",
+				journal.TransferID)
+		}
 		return nil, wire.Errorf(wire.CodeStorage,
-			"transfer: refusing to advertise verified progress for %s before resume authentication completed",
-			journal.TransferID)
+			"transfer: refusing to advertise verified progress for %s: this session authenticated resume for %s, not it",
+			journal.TransferID, expected)
 	}
 	fp, err := wire.ManifestFingerprint(manifest)
 	if err != nil {

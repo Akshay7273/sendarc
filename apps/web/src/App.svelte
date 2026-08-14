@@ -402,30 +402,46 @@
   /**
    * V13-PR08 (Blocker 3): the ONE shared sender-resume construction used by both the
    * persistent-handle reopen and the manual re-selection paths, so authenticated
-   * cross-session resume behaves identically either way. The resumeAttempt carries exactly
-   * the stored transferId + fingerprint + offerer role + persisted credential envelope; a
-   * legacy record without a credential never reuses its old stable transferId under a
-   * fresh session (restart fresh instead).
+   * cross-session resume behaves identically either way.
+   *
+   * V13-PR08 review (Blocker 1): the capability gate lives HERE, at the shared boundary,
+   * so the persistent-handle reopen path cannot bypass it. The old transferId +
+   * resumeAttempt reach runSend only when ALL of these hold:
+   *   - this rendezvous exists (handshake/signaling adopted)
+   *   - the remote peer advertised resume-auth-v1 in THIS session
+   *   - the record actually holds a resume credential (armed interrupted sender record)
+   * On any refusal: runSend is never called, the old transferId never leaves the host,
+   * the worker never starts, and the sender record is preserved.
    */
   function beginSendResume(rec: SenderRecord, files: File[], reattachment: SenderReattachment) {
+    if (handshake === undefined || signaling === undefined) return;
+    if (rec.resumeSecret === undefined) {
+      // Legacy pre-PR07 record: authenticated resume is unavailable and the old stable id
+      // is never reused under a fresh session — forget and restart fresh.
+      errorText =
+        'This interrupted send has no resume credential (legacy state); authenticated resume is unavailable and the transfer id cannot be reused — nothing was sent. Forget the record and start a fresh transfer.';
+      screen = 'failed';
+      return;
+    }
+    if (!remoteSupportsResume()) {
+      errorText =
+        'The receiver did not advertise authenticated resume (resume-auth-v1); the interrupted transfer id cannot be reused without it — nothing was sent. Ask the receiver to resume, or forget the record and send fresh.';
+      screen = 'failed';
+      return;
+    }
     const ice = iceServers();
-    const resumeAttempt =
-      rec.resumeSecret === undefined
-        ? undefined
-        : {
-            transferId: rec.transferId,
-            manifestFingerprint: rec.manifestFingerprint,
-            role: 'offerer' as const,
-            envelope: rec.resumeSecret,
-          };
+    const resumeAttempt = {
+      transferId: rec.transferId,
+      manifestFingerprint: rec.manifestFingerprint,
+      role: 'offerer' as const,
+      envelope: rec.resumeSecret,
+    };
     beginTransfer(
-      runSend(handshake!, signaling!, {
+      runSend(handshake, signaling, {
         files,
-        // The old stable id is reused ONLY when this session will authenticate continuity
-        // with the original peer; otherwise the sender mints a fresh id.
-        ...(resumeAttempt !== undefined ? { transferId: rec.transferId } : {}),
+        transferId: rec.transferId,
         reattachment,
-        ...(resumeAttempt !== undefined ? { resumeAttempt } : {}),
+        resumeAttempt,
         ...(ice ? { iceServers: ice } : {}),
       }),
     );

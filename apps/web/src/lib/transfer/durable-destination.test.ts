@@ -1581,8 +1581,32 @@ describe('createBrowserDestination wrapper (V13-PR08 Blocker 1)', () => {
     wrapper.authorizeResume?.();
     // The session authenticated continuity with the SELECTED journal only; this journal's
     // verified progress is never reused.
-    await expect(wrapper.prepare(m)).rejects.toThrow(/requires authenticated resume/);
+    await expect(wrapper.prepare(m)).rejects.toThrow(
+      /authenticated resume for .* not .*verified progress/,
+    );
     expect((await h.store.loadJournal(TRANSFER_ID)).kind).toBe('ok');
+  });
+
+  it('authorizeResume without an expected journal authorizes NOTHING (review Blocker 2)', async () => {
+    const h = await harness();
+    const m = manifest([['a.bin', 24]]);
+    await journalFor(h.store, h.files, [['a.bin', 24]], [2], m);
+    h.advance(DURABLE_LEASE_TTL_MS + 1);
+    const wrapper = createBrowserDestination({ kind: 'auto' }, h.digest, {
+      files: h.files,
+      store: h.store,
+      now: h.now,
+      renewMs: 0,
+      ensureSpace: async () => {},
+    });
+    // A bare authorization with NO selected interrupted journal must authorize nothing:
+    // the existing journal's verified progress stays unreusable.
+    wrapper.authorizeResume?.();
+    await expect(wrapper.prepare(m)).rejects.toThrow(
+      /authorized resume without selecting an interrupted journal/,
+    );
+    expect((await h.store.loadJournal(TRANSFER_ID)).kind).toBe('ok');
+    expect(h.files.data.get('a.bin')?.length).toBe(16);
   });
 
   it('fresh journal remains ordinary — no auth, no resume state, resume hooks inert', async () => {

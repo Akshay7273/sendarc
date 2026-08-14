@@ -551,6 +551,108 @@ describe('App transfer completion', () => {
     });
   });
 
+  it('persistent-handle send refuses when the peer lacks resume-auth-v1 (V13-PR08 review Blocker 1)', async () => {
+    // The interrupted send holds a credential and a reopenable directory handle.
+    const envelope = { format: 1, bytes: new Uint8Array([9, 9, 9]) };
+    const record = {
+      transferId: 'c'.repeat(32),
+      manifestFingerprint: 'd'.repeat(64),
+      files: [{ name: 'photo.bin', size: 8 }],
+      reattachment: { kind: 'handle', handleKind: 'directory', handle: {} },
+      resumeSecret: envelope,
+      updatedAt: 1_700_000_000_000,
+    };
+    mocks.listSenderRecords.mockResolvedValue([
+      { transferId: record.transferId, kind: 'ok', record },
+    ]);
+    mocks.senderRecordStoreWhenAvailable.mockReturnValue({
+      list: mocks.listSenderRecords,
+      remove: mocks.removeSenderRecord,
+    });
+    const file = new File([new Uint8Array([1, 2, 3])], 'photo.bin');
+    mocks.ensureReadPermission.mockResolvedValue(true);
+    mocks.materializeHandle.mockResolvedValue([file]);
+
+    const handshake = deferred<unknown>();
+    const signaling = {
+      send: vi.fn(),
+      sendBinary: vi.fn(),
+      onMessage: vi.fn(),
+      onBinary: vi.fn(),
+      onClose: vi.fn(),
+      close: vi.fn(),
+    };
+    const rendezvous = {
+      code: undefined,
+      phase: 'idle',
+      done: handshake.promise,
+      cancel: vi.fn(),
+      adoptSignaling: vi.fn(() => signaling),
+    };
+    mocks.offer.mockReturnValue(rendezvous);
+    const transfer = {
+      progress: vi.fn(() => 0),
+      total: vi.fn(() => 8),
+      snapshot: vi.fn(() => ({
+        bytes: 0,
+        reusedBytes: 0,
+        sessionBytes: 0,
+        total: 8,
+        rateBps: 0,
+        etaSeconds: undefined,
+        state: 'running' as const,
+      })),
+      transport: vi.fn(() => 'direct'),
+      done: deferred<unknown>().promise,
+      pause: vi.fn(),
+      resume: vi.fn(),
+      cancel: vi.fn(),
+    };
+    mocks.runSend.mockReturnValue(transfer);
+
+    component = mount(App, { target });
+    await settle();
+    await settle();
+    await settle();
+    const resumeButton = [...target.querySelectorAll('button')].find(
+      (button) => button.textContent?.trim() === 'Resume',
+    );
+    expect(resumeButton).toBeDefined();
+    resumeButton!.click();
+    await settle();
+
+    // The fresh rendezvous completes as the offerer, but the remote peer did NOT advertise
+    // resume-auth-v1: the persistent-handle reopen must fail closed at the shared boundary.
+    handshake.resolve({
+      master: new Uint8Array(32),
+      remoteCaps: {
+        version: 'sendbeam/1',
+        maxFrame: 16 * 1024,
+        blockSize: 1024 * 1024,
+        features: [],
+        sinkHints: ['opfs'],
+      },
+      role: 'offerer',
+    });
+    await settle();
+    await settle();
+
+    const sendAgainButton = [...target.querySelectorAll('button')].find(
+      (button) => button.textContent?.trim() === 'Send again',
+    );
+    expect(sendAgainButton).toBeDefined();
+    sendAgainButton!.click();
+    await settle();
+    await settle();
+    // Materialization may happen, but the worker must never start: no runSend, no old
+    // transferId anywhere, and the record stays intact with a clear capability error.
+    expect(mocks.materializeHandle).toHaveBeenCalledOnce();
+    expect(mocks.runSend).not.toHaveBeenCalled();
+    expect(mocks.removeSenderRecord).not.toHaveBeenCalled();
+    expect(target.textContent).toContain('did not advertise authenticated resume');
+    expect(target.textContent).toContain('nothing was sent');
+  });
+
   it('legacy sender record without a credential cannot send again (V13-PR08 Blocker 3)', async () => {
     const record = {
       transferId: 'e'.repeat(32),
