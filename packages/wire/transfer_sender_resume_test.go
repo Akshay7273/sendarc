@@ -27,7 +27,7 @@ func sealResumeIn(t *testing.T, keys TransferKeys, counter uint64, rs *ResumeSta
 // runSenderWithResume starts a sender that waits for one resume_state, injects it, then
 // drives the resumed stream to completion. It returns the sender error (nil on success),
 // the outbox snapshot, and the number of frames whose block data was transmitted.
-func runSenderWithResume(t *testing.T, data []byte, rs *ResumeState) (error, *outbox, int) {
+func runSenderWithResume(t *testing.T, data []byte, rs *ResumeState) (*outbox, int, error) {
 	t.Helper()
 	keys, err := DeriveTransferKeys(senderMaster())
 	if err != nil {
@@ -63,7 +63,7 @@ func runSenderWithResume(t *testing.T, data []byte, rs *ResumeState) (error, *ou
 	} else {
 		// Inject the resume_state before the manifest was ever validated.
 		s.Handle(sealResumeIn(t, keys, 0, NewResumeState("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", []ResumeFileState{{Idx: 0, HaveBlocks: 0}})))
-		return waitSenderResult(t, res), &out, -1
+		return &out, -1, waitSenderResult(t, res)
 	}
 
 	// With window=1 the resumed stream stalls after the manifest plus the frames of the
@@ -110,7 +110,7 @@ func runSenderWithResume(t *testing.T, data []byte, rs *ResumeState) (error, *ou
 			transmitted++
 		}
 	}
-	return runErr, &out, transmitted
+	return &out, transmitted, runErr
 }
 
 func waitSenderResult(t *testing.T, res chan error) error {
@@ -340,7 +340,7 @@ func TestSenderResumeStreamsOnlyMissingBlocks(t *testing.T) {
 	id := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	rs := NewResumeState(id, []ResumeFileState{{Idx: 0, HaveBlocks: 2}})
 	rs.ManifestFingerprint = fp(t, data, id)
-	err, out, transmitted := runSenderWithResume(t, data, rs)
+	out, transmitted, err := runSenderWithResume(t, data, rs)
 	if err != nil {
 		t.Fatalf("Run error = %v", err)
 	}
@@ -358,7 +358,7 @@ func TestSenderResumeStreamsOnlyMissingBlocks(t *testing.T) {
 func TestSenderAcceptsLegacyResumeStateWithoutFingerprint(t *testing.T) {
 	data := seq(20)
 	rs := NewResumeState("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", []ResumeFileState{{Idx: 0, HaveBlocks: 2}})
-	err, out, transmitted := runSenderWithResume(t, data, rs)
+	out, transmitted, err := runSenderWithResume(t, data, rs)
 	if err != nil {
 		t.Fatalf("Run error = %v", err)
 	}

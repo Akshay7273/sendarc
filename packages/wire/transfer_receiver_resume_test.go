@@ -43,7 +43,7 @@ func mustDigest(t *testing.T, prefix []byte) Digest {
 
 // runReceiverWithSeed drives a receiver whose seed is the given claim and returns the Wait
 // outcome plus the decoded back-channel frames.
-func runReceiverWithSeed(t *testing.T, manifest Manifest, seed *ReceiverResume) (ReceiveResult, error, []ControlMsg) {
+func runReceiverWithSeed(t *testing.T, manifest Manifest, seed *ReceiverResume) (ReceiveResult, []ControlMsg, error) {
 	t.Helper()
 	keys, err := DeriveTransferKeys(senderMaster())
 	if err != nil {
@@ -83,7 +83,7 @@ func runReceiverWithSeed(t *testing.T, manifest Manifest, seed *ReceiverResume) 
 		}
 		msgs = append(msgs, m)
 	}
-	return res, waitErr, msgs
+	return res, msgs, waitErr
 }
 
 // TestReceiverRejectsBadResumeSeeds: a host-provided seed is a claim, not a trust anchor.
@@ -123,7 +123,7 @@ func TestReceiverRejectsBadResumeSeeds(t *testing.T) {
 	for _, c := range cases {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
-			_, err, msgs := runReceiverWithSeed(t, manifest, c.rs)
+			_, msgs, err := runReceiverWithSeed(t, manifest, c.rs)
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("Wait error = %v, want one mentioning %q", err, c.want)
 			}
@@ -149,7 +149,7 @@ func TestReceiverAdvertisesFingerprintBoundResumeState(t *testing.T) {
 		ManifestFingerprint: fp,
 		Files:               map[int]ResumeFileProgress{0: {HaveBlocks: 2, SeedDigest: seedDigest}},
 	}
-	_, err, msgs := runReceiverWithSeed(t, manifest, seed)
+	_, msgs, err := runReceiverWithSeed(t, manifest, seed)
 	if err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestReceiverIgnoresSeedForDifferentTransfer(t *testing.T) {
 		ManifestFingerprint: strings.Repeat("0", 64),
 		Files:               map[int]ResumeFileProgress{0: {HaveBlocks: 2, SeedDigest: staleSeed}},
 	}
-	_, err, msgs := runReceiverWithSeed(t, manifest, seed)
+	_, msgs, err := runReceiverWithSeed(t, manifest, seed)
 	if err != nil {
 		t.Fatalf("Wait: %v", err)
 	}

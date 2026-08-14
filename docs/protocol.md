@@ -271,7 +271,7 @@ above; relayed payloads are the same AEAD frames, never re-encrypted or inspecte
    otherwise the sender fails the transfer closed.
 
    Resume state is a **claim, not a trust anchor**. A receiver only applies a locally restored
-   seed after it validates the seed against the *authenticated* manifest: the fingerprint must
+   seed after it validates the seed against the _authenticated_ manifest: the fingerprint must
    match (binding the exact file set and block geometry), the file coverage must be exact and
    complete, and every `haveBlocks` must lie within `[0, blocks]`. Any violation fails the
    receive closed (`sink_error`) before any of the seed is advertised — a claim is never
