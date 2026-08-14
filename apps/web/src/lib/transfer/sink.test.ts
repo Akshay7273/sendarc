@@ -160,4 +160,50 @@ describe('browser destinations', () => {
     await removeOpfsOutput('staged-key');
     expect(removeEntry).toHaveBeenCalledWith('staged-key');
   });
+
+  it('non-durable destinations never fail on credential attachment (BLOCKER 2)', async () => {
+    const resumeRoot = new Uint8Array(32).fill(7);
+    // direct-file + transferId: manifest setup succeeds and attach is a no-op.
+    const fileWritable = new FakeWritable();
+    const fileHandle = {
+      createWritable: vi.fn(async () => fileWritable),
+    } as unknown as FileSystemFileHandle;
+    const fileDest = createBrowserDestination({ kind: 'direct-file', handle: fileHandle });
+    const withId = (names: Array<[string, number]>) => ({
+      ...manifest(names),
+      transferId: 'a'.repeat(32),
+    });
+    await fileDest.prepare(withId([['out.bin', 3]]));
+    await fileDest.attachResumeSecret?.(withId([['out.bin', 3]]), resumeRoot);
+
+    // direct-directory + transferId: succeeds through manifest setup, attach is a no-op.
+    const dirWritable = new FakeWritable();
+    const dirRoot = {
+      kind: 'directory',
+      getDirectoryHandle: vi.fn(async () => ({
+        kind: 'directory',
+        getFileHandle: vi.fn(async () => ({ createWritable: vi.fn(async () => dirWritable) })),
+        removeEntry: vi.fn(async () => {}),
+      })),
+      removeEntry: vi.fn(async () => {}),
+    } as unknown as FileSystemDirectoryHandle;
+    const dirDest = createBrowserDestination({ kind: 'direct-directory', handle: dirRoot });
+    await dirDest.prepare(withId([['folder/out.bin', 3]]));
+    await dirDest.attachResumeSecret?.(withId([['folder/out.bin', 3]]), resumeRoot);
+
+    // Legacy single-file OPFS (no transferId): succeeds, attach is a no-op.
+    const legacyWritable = new FakeWritable();
+    const legacyRoot = fakeStorage(legacyWritable);
+    const legacyDest = createBrowserDestination({ kind: 'auto' });
+    await legacyDest.prepare(manifest([['plain.bin', 3]]));
+    await legacyDest.attachResumeSecret?.(manifest([['plain.bin', 3]]), resumeRoot);
+    expect(legacyRoot.getFileHandle).not.toHaveBeenCalled(); // no durable journal write path
+
+    // Legacy archive fallback (no transferId, folders): succeeds, attach is a no-op.
+    const archiveWritable = new FakeWritable();
+    fakeStorage(archiveWritable);
+    const archiveDest = createBrowserDestination({ kind: 'auto' });
+    await archiveDest.prepare(manifest([['folder/a.bin', 3]]));
+    await archiveDest.attachResumeSecret?.(manifest([['folder/a.bin', 3]]), resumeRoot);
+  });
 });

@@ -29,6 +29,12 @@ export interface BrowserDestination extends Destination {
   durableMeta?(): DurableMeta | undefined;
   /** Resume seed a reloaded receiver applies after the authenticated manifest arrives. */
   resumeStateFor?(manifest: Manifest): import('@sendbeam/protocol').ReceiverResumeState | undefined;
+  /**
+   * Persist the transfer-scoped resume credential into the receive journal (V13-PR07),
+   * after the authenticated manifest validated and bound to it. `resumeRoot` is the
+   * transient root derived by the main thread — never the session master.
+   */
+  attachResumeSecret?(manifest: Manifest, resumeRoot: Uint8Array): Promise<void>;
 }
 
 /**
@@ -71,6 +77,16 @@ export function createBrowserDestination(
     abort: (reason) => get().abort(reason),
     result: () => inner?.result(),
     durableMeta: () => inner?.durableMeta?.(),
+    // Credential attachment is meaningful ONLY for a durable journal-backed destination.
+    // Direct-file/direct-directory/legacy OPFS/archive destinations do not implement it, and
+    // the seam is genuinely absent for them: the resume root being present must never make an
+    // ordinary receive fail (V13-PR07 review, Blocker 2). Only the durable destination
+    // actually persists anything.
+    attachResumeSecret: (manifest, resumeRoot) => {
+      const target = inner;
+      if (!target?.attachResumeSecret) return Promise.resolve();
+      return target.attachResumeSecret(manifest, resumeRoot);
+    },
   };
 }
 

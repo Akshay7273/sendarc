@@ -144,7 +144,14 @@ func TestJournalRequiredFields(t *testing.T) {
 		{"bad identity charset", func(j *DurableJournal) { j.SourceIdentity.Value = "not hex or b64!!" }},
 		{"unsupported identity version", func(j *DurableJournal) { j.SourceIdentity.Version = 2 }},
 		{"empty resume secret value", func(j *DurableJournal) { j.ResumeSecret = &JournalResumeSecret{Version: 1, Value: ""} }},
-		{"unsupported resume secret version", func(j *DurableJournal) { j.ResumeSecret = &JournalResumeSecret{Version: 2, Value: "00"} }},
+		{"unsupported resume secret version", func(j *DurableJournal) {
+			j.ResumeSecret = &JournalResumeSecret{Version: 2, Value: strings.Repeat("ab", 32)}
+		}},
+		{"resume secret wrong length", func(j *DurableJournal) { j.ResumeSecret = &JournalResumeSecret{Version: 1, Value: "00"} }},
+		{"resume secret invalid encoding", func(j *DurableJournal) { j.ResumeSecret = &JournalResumeSecret{Version: 1, Value: "not hex or b64!!"} }},
+		{"resume secret uppercase hex", func(j *DurableJournal) {
+			j.ResumeSecret = &JournalResumeSecret{Version: 1, Value: strings.ToUpper(journalVectorSecretValue)}
+		}},
 		{"bad file digest", func(j *DurableJournal) { j.Files[0].FileDigest = "xyz" }},
 		{"file blocks mismatch", func(j *DurableJournal) { j.Files[0].Blocks = 1 }},
 		{"file size negative", func(j *DurableJournal) { j.Files[0].Size = -1 }},
@@ -587,9 +594,11 @@ func TestJournalChecksumIsWriteTimeDerivation(t *testing.T) {
 	}
 }
 
-func TestJournalResumeSecretOpaque(t *testing.T) {
+func TestJournalResumeSecretV1Credential(t *testing.T) {
+	// V13-PR07: version-1 resume secret is the exact 256-bit credential — 64 lowercase hex
+	// characters. The envelope round-trips byte-identically and the checksum covers it.
 	j := journalVectorSample(t)
-	j.ResumeSecret = &JournalResumeSecret{Version: 1, Value: "c2VjcmV0LW1hdGVyaWFs"} // base64url, opaque
+	j.ResumeSecret = &JournalResumeSecret{Version: 1, Value: journalVectorSecretValue}
 	encoded, err := EncodeJournal(j)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
@@ -601,12 +610,27 @@ func TestJournalResumeSecretOpaque(t *testing.T) {
 	if decoded.ResumeSecret == nil || decoded.ResumeSecret.Value != j.ResumeSecret.Value {
 		t.Fatalf("resume secret lost: %#v", decoded.ResumeSecret)
 	}
-	// A secret that is not a valid opaque value is rejected.
-	bad := j
-	bad.ResumeSecret.Value = "not valid material!"
-	bad.Checksum = ""
-	if err := ValidateJournal(bad); err == nil {
-		t.Fatalf("malformed resume secret must be rejected")
+	// The secret participates in the checksum: mutating it breaks verification.
+	tampered, err := EncodeJournal(j)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	mutated := rewriteJSON(t, tampered, func(m map[string]any) {
+		env := m["resumeSecret"].(map[string]any)
+		env["value"] = strings.Repeat("cd", 32)
+	})
+	if _, err := DecodeJournal(mutated); err == nil {
+		t.Fatal("tampered resume secret must fail checksum verification")
+	}
+	// A value that is not the exact 64-hex credential is rejected — an arbitrary old opaque
+	// value is never reinterpreted as a valid key.
+	for _, value := range []string{"c2VjcmV0LW1hdGVyaWFs", "00", strings.Repeat("ab", 33), "not hex!!"} {
+		bad := j
+		bad.ResumeSecret.Value = value
+		bad.Checksum = ""
+		if err := ValidateJournal(bad); err == nil {
+			t.Fatalf("malformed resume secret value %q must be rejected", value)
+		}
 	}
 }
 
@@ -747,6 +771,26 @@ func TestJournalVector(t *testing.T) {
 	}
 	if string(encoded) != doc.Journal {
 		t.Fatalf("journal bytes mismatch:\n got %s\nwant %s", encoded, doc.Journal)
+	}
+	// The with-secret canonical journal pins the resumeSecret serialization (V13-PR07).
+	withSecret := j
+	withSecret.ResumeSecret = &JournalResumeSecret{Version: 1, Value: journalVectorSecretValue}
+	encodedWithSecret, err := EncodeJournal(withSecret)
+	if err != nil {
+		t.Fatalf("encode with secret: %v", err)
+	}
+	if string(encodedWithSecret) != doc.JournalWithSecret {
+		t.Fatalf("journal-with-secret bytes mismatch:\n got %s\nwant %s", encodedWithSecret, doc.JournalWithSecret)
+	}
+	// The resume-secret envelope cases pin the exact v1 credential format.
+	for _, tc := range doc.ResumeSecretCases {
+		candidate := j
+		candidate.ResumeSecret = tc.Envelope
+		_, encodeErr := EncodeJournal(candidate)
+		valid := encodeErr == nil
+		if valid != tc.Valid {
+			t.Fatalf("resumeSecret case %q: valid=%v, want %v (err=%v)", tc.Name, valid, tc.Valid, encodeErr)
+		}
 	}
 }
 

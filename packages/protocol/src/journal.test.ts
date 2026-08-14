@@ -13,6 +13,7 @@ import {
   type DurableJournal,
   type JournalDigestCheckpoint,
   type JournalIdentity,
+  type JournalResumeSecret,
 } from './journal.js';
 import { decodeControl } from './transfer-messages.js';
 import { FrameType, type Manifest } from './transfer.js';
@@ -300,11 +301,17 @@ describe('journal schema v1', () => {
     for (const secret of [new TextDecoder().decode(master), new TextDecoder().decode(dirKey)]) {
       expect(text).not.toContain(secret);
     }
-    // Only the documented resumeSecret envelope is allowed, and it stays opaque.
+    // Only the documented resumeSecret envelope is allowed. V13-PR07: version 1 is the
+    // exact 256-bit credential — 64 lowercase hex chars — so it round-trips, while any
+    // other opaque value is rejected.
+    const secretValue = 'f1f2f3f4f5f6f7f8f9fafbfcfdfeff00f1f2f3f4f5f6f7f8f9fafbfcfdfeff00';
     const j = await vectorSample();
-    j.resumeSecret = { version: 1, value: 'c2VjcmV0LW1hdGVyaWFs' };
+    j.resumeSecret = { version: 1, value: secretValue };
     const withSecret = await decodeJournal(await encodeJournal(j));
-    expect(withSecret.resumeSecret?.value).toBe('c2VjcmV0LW1hdGVyaWFs');
+    expect(withSecret.resumeSecret?.value).toBe(secretValue);
+    await expect(
+      decodeJsonObj({ ...j, resumeSecret: { version: 1, value: 'c2VjcmV0LW1hdGVyaWFs' } }),
+    ).rejects.toThrow(/64 lowercase hex/);
   });
 
   it('matches the cross-language vector byte-for-byte', async () => {
@@ -328,6 +335,12 @@ describe('journal schema v1', () => {
       digestCheckpoints: Array<JournalDigestCheckpoint | null>;
       fingerprint: string;
       journal: string;
+      journalWithSecret: string;
+      resumeSecretCases: Array<{
+        name: string;
+        envelope: JournalResumeSecret | null;
+        valid: boolean;
+      }>;
     };
     const manifest = decodeControl(utf8(doc.manifest)) as Manifest;
     const j = await newJournal(
@@ -349,6 +362,20 @@ describe('journal schema v1', () => {
     }
     expect(current.manifestFingerprint).toBe(doc.fingerprint);
     expect(new TextDecoder().decode(await encodeJournal(current))).toBe(doc.journal);
+    // The with-secret canonical journal pins the resumeSecret serialization (V13-PR07).
+    const withSecret = { ...current, resumeSecret: doc.resumeSecretCases[0]!.envelope! };
+    expect(new TextDecoder().decode(await encodeJournal(withSecret))).toBe(doc.journalWithSecret);
+    // The resume-secret envelope cases pin the exact v1 credential format.
+    for (const tc of doc.resumeSecretCases) {
+      const candidate = { ...current, resumeSecret: tc.envelope ?? undefined };
+      let valid = true;
+      try {
+        await encodeJournal(candidate);
+      } catch {
+        valid = false;
+      }
+      expect(valid).toBe(tc.valid);
+    }
     // The pinned constants hold.
     expect(current.schemaVersion).toBe(JOURNAL_SCHEMA_VERSION);
     expect(current.resumeVersion).toBe(JOURNAL_RESUME_VERSION);

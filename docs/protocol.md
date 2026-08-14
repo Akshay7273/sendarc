@@ -291,3 +291,54 @@ implemented by the Go `packages/wire/journal.go` and TypeScript
 transmitted between peers, is not part of `sendbeam/1`, and carries no wire-version
 implication. The wire `resume_state` message gains only the additive, optional
 `manifestFingerprint` field described above; old peers ignore it and new peers validate it.
+
+### Resume authentication (capability `resume-auth-v1`)
+
+Cross-session resume (V13-PR07) — resuming after the original process/session is gone — is
+an **additive, capability-gated extension of `sendbeam/1`**, never a `sendbeam/2`. The full
+design, derivation formulas, state machine, and security analysis live in
+`docs/adr/0005-cross-session-resume.md`; this section summarizes the wire-visible shape.
+
+The capability is named **`resume-auth-v1`** (Go `wire.ResumeAuthCapability`, TS
+`RESUME_AUTH_CAPABILITY`). It is a `features` entry announced in caps like any other feature;
+it is **not** advertised in production defaults and the product flow is disabled until
+PR08/lead approval. Ordinary transfers are byte-for-byte unchanged, and legacy peers that
+never advertise the capability never receive resume-auth messages.
+
+When both peers agree on `resume-auth-v1` and both hold the transfer's local resume
+credential, the peers run the resume-auth handshake over the (abstract) transport. Message
+shapes (JSON, canonical field order, base64url-no-padding binary fields):
+
+| Step | Direction        | Type               | Fields                                                         |
+| ---- | ---------------- | ------------------ | -------------------------------------------------------------- |
+| 1    | offerer → joiner | `resume_init`      | `version: 1`, `role: "offerer"`, `nonce` (32 B)                |
+| 2    | joiner → offerer | `resume_challenge` | `version: 1`, `role: "joiner"`, `nonce` (32 B), `proof` (32 B) |
+| 3    | offerer → joiner | `resume_confirm`   | `version: 1`, `role: "offerer"`, `proof` (32 B)                |
+| 4    | joiner → offerer | `resume_ready`     | `version: 1`, `role: "joiner"`, `proof` (32 B)                 |
+
+`transferId` and the manifest fingerprint are never transmitted; both peers hold them
+locally and bind them into the authenticated transcript. Proofs are HMAC-SHA256 under
+role-separated subkeys derived from the transfer-scoped resume secret, over the canonical
+binary transcript (domain string + `u32be` version + transferId bytes + fingerprint bytes +
+both 32-byte nonces) plus a per-message tag byte. On mutual success both sides derive a
+fresh resume session master (HKDF under `sendbeam/1 resume master` || transcript) and feed
+it into the standard directional key derivation, producing completely fresh O2J/J2O keys
+and salts whose counters start at the fresh-session initial value. See
+`docs/adr/0005-cross-session-resume.md` for the exact formulas and the pinned vectors in
+`docs/test-vectors/resume-auth.json`.
+
+Security posture: fresh 256-bit nonces per attempt; replay, reflection, and
+capability-stripping cannot downgrade to an unauthenticated resume (absence of the
+capability or of a matching credential simply makes cross-session resume unavailable);
+old traffic keys/counters are never restored or reused; and the server cannot forge a
+resume authentication. Same-session resume (`resume_state` above) is unchanged.
+
+Decoder bounds: one resume-auth message is limited to **1024 bytes** (checked before any
+JSON parsing), every nonce/proof must be exactly the canonical 43-char unpadded base64url
+of 32 bytes (length checked before any base64 decoding), characters outside the base64url
+alphabet and padded or non-canonical spellings are rejected, and there is no implicit
+version — `version` must be exactly 1. The capability is included in the resume decision;
+PR08 owns the discovery path that obtains authenticated capability state for a
+cross-session attempt, and this protocol only guarantees the fail-closed side: capability
+absent, stripped, or untrusted ⇒ cross-session resume unavailable, never an unauthenticated
+resume.

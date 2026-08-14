@@ -22,6 +22,12 @@ export interface StartSendMsg extends SessionCrypto {
   /** Reuse a stable transfer id from an interrupted send (worker re-verifies the source). */
   transferId?: string;
   /**
+   * The transient resume root derived by the MAIN THREAD from the original session master
+   * (V13-PR07) — never the master itself. The worker uses it to derive the transfer-scoped
+   * resume secret for the sender record; it is never persisted, logged, or returned to UI.
+   */
+  resumeRoot?: Uint8Array;
+  /**
    * How this send's source can be reopened after an interruption. Persisted by the
    * worker's `onManifest` hook with the sender record; the handle crosses postMessage
    * via structured clone (Chromium supports serializing FileSystemHandles).
@@ -34,6 +40,13 @@ export interface StartSendMsg extends SessionCrypto {
 export interface StartRecvMsg extends SessionCrypto {
   kind: 'start-recv';
   destination: ReceiveDestinationSpec;
+  /**
+   * The transient resume root derived by the MAIN THREAD from the original session master
+   * (V13-PR07) — never the master itself. The worker uses it to derive the transfer-scoped
+   * resume secret persisted into the receive journal after the authenticated manifest
+   * validates; it is never persisted, logged, or returned to UI.
+   */
+  resumeRoot?: Uint8Array;
 }
 export type ReceiveDestinationSpec =
   | { kind: 'auto' }

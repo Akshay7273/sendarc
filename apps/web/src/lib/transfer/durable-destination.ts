@@ -16,8 +16,11 @@
 
 import {
   DIGEST_CHECKPOINT_FORMAT_HASH_WASM,
+  RESUME_AUTH_VERSION,
   TransferError,
   bytesToHex,
+  deriveResumeSecret,
+  encodeResumeSecretEnvelope,
   hexToBytes,
   manifestFingerprint,
   normalizeTransferPath,
@@ -204,6 +207,61 @@ export class DurableDestination implements BrowserDestination {
   /** The resume seed the wire receiver applies after the manifest matches the journal. */
   resumeStateFor(): ReceiverResumeState | undefined {
     return this.resumeState;
+  }
+
+  /**
+   * Derive the transfer-scoped resume credential from the original session resume root and
+   * persist it into the receive journal (V13-PR07). Runs only after the authenticated
+   * manifest validated and bound to the journal.
+   *
+   * Provenance (V13-PR07 security review, Blocker 1): the credential may be derived only
+   * for a journal created during THIS manifest/session (`prepare` did not load one). A
+   * journal loaded as existing/resumed state must NEVER receive a credential fabricated
+   * from a later session master: an existing credential is preserved exactly, a missing one
+   * stays missing.
+   */
+  async attachResumeSecret(manifest: Manifest, resumeRoot: Uint8Array): Promise<void> {
+    const journal = this.journal;
+    if (!journal || manifest.transferId !== journal.transferId) {
+      throw new TransferError(
+        'sink_error',
+        `no journal for ${manifest.transferId ?? '(no transfer id)'}; refusing to attach a resume credential`,
+      );
+    }
+    const fingerprint = await manifestFingerprint(manifest);
+    // The binding is validated FIRST so a manifest that does not match the journal fails
+    // closed even when a credential is already persisted (fail-closed ordering).
+    if (journal.manifestFingerprint !== fingerprint) {
+      throw new TransferError(
+        'sink_error',
+        `journal ${journal.transferId} does not match the authenticated manifest; refusing to attach a resume credential`,
+      );
+    }
+    if (journal.resumeSecret !== undefined) {
+      return; // original-session credential already persisted; never replace it
+    }
+    if (this.resumed) {
+      // The journal predates this session (loaded, not created): a missing credential stays
+      // missing — never fabricated from a later session master. Old partials are never
+      // deleted and the journal remains usable for its existing capabilities.
+      return;
+    }
+    const secret = await deriveResumeSecret(
+      resumeRoot,
+      RESUME_AUTH_VERSION,
+      journal.transferId,
+      fingerprint,
+    );
+    // The lease-guarded store operation is a compare-and-swap: it snapshots the current
+    // journal, then in one readwrite transaction verifies lease ownership and byte-compares
+    // the live journal against that snapshot before writing, so newer committed progress
+    // under the same owner is never overwritten and a lost lease fails closed.
+    this.journal = await this.store.attachResumeSecret(
+      journal.transferId,
+      encodeResumeSecretEnvelope(secret),
+      this.ownerId,
+      this.now(),
+    );
   }
 
   async open(file: FileEntry): Promise<Sink> {
