@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { FrameType, type Manifest } from '@sendbeam/protocol';
+import {
+  commitBlocks as advanceJournal,
+  DIGEST_CHECKPOINT_FORMAT_GO_STDLIB,
+  encodeJournal,
+  FrameType,
+  type JournalDigestCheckpoint,
+  type Manifest,
+} from '@sendbeam/protocol';
 import {
   DURABLE_LEASE_TTL_MS,
   discardDurableTransfer,
@@ -282,6 +289,179 @@ describe('indexedDbDurableStore', () => {
     const j = await s.loadJournal(TRANSFER_ID);
     if (j.kind !== 'ok') throw new Error('expected journal');
     await s.commitBlocks(j.journal, 0, 1, 1_100 + DURABLE_LEASE_TTL_MS + 2, OWNER_B);
+  });
+
+  it('lease-guarded credential attach: a stale owner cannot overwrite a taken-over journal (BLOCKER 6)', async () => {
+    const s = store();
+    await s.createJournal(
+      TRANSFER_ID,
+      manifest([['a.bin', 16]]),
+      { version: 1, value: '0'.repeat(64) },
+      { version: 1, value: '1'.repeat(64) },
+      1_000,
+    );
+    // A acquires the lease.
+    expect((await s.acquireLease(TRANSFER_ID, OWNER_A, 1_000)).kind).toBe('acquired');
+    // A's lease expires; B takes over and advances the journal.
+    const takenOverAt = 1_000 + DURABLE_LEASE_TTL_MS + 1;
+    expect((await s.acquireLease(TRANSFER_ID, OWNER_B, takenOverAt)).kind).toBe('stale-taken');
+    const loaded = await s.loadJournal(TRANSFER_ID);
+    if (loaded.kind !== 'ok') throw new Error('expected journal');
+    await s.commitBlocks(loaded.journal, 0, 1, takenOverAt + 1, OWNER_B);
+
+    // A wakes and tries to attach its credential: it lost the lease, so it fails closed and
+    // B's newer progress is untouched.
+    const envelope = { version: 1, value: 'e'.repeat(64) };
+    await expect(
+      s.attachResumeSecret(TRANSFER_ID, envelope, OWNER_A, takenOverAt + 2),
+    ).rejects.toThrow(/lease lost/);
+    const afterA = await s.loadJournal(TRANSFER_ID);
+    expect(afterA.kind).toBe('ok');
+    if (afterA.kind !== 'ok') return;
+    expect(afterA.journal.files[0]!.committedBlocks).toBe(1);
+    expect(afterA.journal.resumeSecret).toBeUndefined();
+
+    // B may attach successfully; the credential lands and progress is preserved.
+    const attached = await s.attachResumeSecret(TRANSFER_ID, envelope, OWNER_B, takenOverAt + 3);
+    expect(attached.resumeSecret).toEqual(envelope);
+    expect(attached.files[0]!.committedBlocks).toBe(1);
+    const final = await s.loadJournal(TRANSFER_ID);
+    expect(final.kind).toBe('ok');
+    if (final.kind !== 'ok') return;
+    expect(final.journal.resumeSecret).toEqual(envelope);
+    expect(final.journal.files[0]!.committedBlocks).toBe(1); // no regression/rewind
+  });
+
+  it('same-owner CAS: a journal advanced between the snapshot and write passes is never overwritten (BLOCKER 2)', async () => {
+    const s = store();
+    await s.createJournal(
+      TRANSFER_ID,
+      manifest([['a.bin', 16]]),
+      { version: 1, value: '0'.repeat(64) },
+      { version: 1, value: '1'.repeat(64) },
+      1_000,
+    );
+    await s.acquireLease(TRANSFER_ID, OWNER_A, 1_000);
+    const loaded = await s.loadJournal(TRANSFER_ID);
+    if (loaded.kind !== 'ok') throw new Error('expected journal');
+    expect(loaded.journal.files[0]!.committedBlocks).toBe(0);
+
+    // Pre-compute what owner A's concurrent commit (blocks 0 -> 1) will encode to.
+    const advanced = advanceJournal(loaded.journal, 0, 1, 2_000);
+    const advancedBytes = await encodeJournal(advanced);
+
+    // Inject the advance exactly when the attach's final readwrite (CAS) transaction is
+    // created — AFTER its pass-1 snapshot read, BEFORE its write pass — by writing the
+    // advanced bytes into the shared journals map synchronously at transaction creation.
+    const idb = (globalThis as unknown as { indexedDB: FakeIndexedDB }).indexedDB;
+    const stores = (idb.db as unknown as { stores: Map<string, Map<string, unknown>> }).stores;
+    let injected = false;
+    const origTx = idb.db.transaction.bind(idb.db);
+    idb.db.transaction = ((names: string[], mode: string) => {
+      if (!injected && mode === 'readwrite' && names.includes('journals')) {
+        injected = true;
+        stores.get('journals')!.set(TRANSFER_ID, advancedBytes);
+      }
+      return origTx(names, mode);
+    }) as typeof idb.db.transaction;
+
+    const envelope = { version: 1, value: 'e'.repeat(64) };
+    const attached = await s.attachResumeSecret(TRANSFER_ID, envelope, OWNER_A, 3_000);
+
+    // The CAS aborted the stale write and retried from a fresh snapshot: the final journal
+    // keeps committedBlocks = 1 (never regressed to 0) AND carries the credential.
+    expect(attached.files[0]!.committedBlocks).toBe(1);
+    expect(attached.resumeSecret).toEqual(envelope);
+    const final = await s.loadJournal(TRANSFER_ID);
+    expect(final.kind).toBe('ok');
+    if (final.kind !== 'ok') return;
+    expect(final.journal.files[0]!.committedBlocks).toBe(1); // no regression/rewind
+    expect(final.journal.resumeSecret).toEqual(envelope);
+  });
+
+  it('same-owner CAS: a newer digest checkpoint/timestamp between passes is preserved, never restored to the stale one (BLOCKER 2)', async () => {
+    const s = store();
+    await s.createJournal(
+      TRANSFER_ID,
+      manifest([['a.bin', 16]]),
+      { version: 1, value: '0'.repeat(64) },
+      { version: 1, value: '1'.repeat(64) },
+      1_000,
+    );
+    await s.acquireLease(TRANSFER_ID, OWNER_A, 1_000);
+    const loaded = await s.loadJournal(TRANSFER_ID);
+    if (loaded.kind !== 'ok') throw new Error('expected journal');
+
+    // Owner A advances the journal with a NEW digest checkpoint + timestamp while the
+    // attach is between its snapshot pass and its write pass.
+    const checkpoint: JournalDigestCheckpoint = {
+      format: DIGEST_CHECKPOINT_FORMAT_GO_STDLIB,
+      committedBlocks: 1,
+      committedBytes: 8,
+      state: 'ab'.repeat(32),
+    };
+    const advanced = advanceJournal(loaded.journal, 0, 1, 2_000, checkpoint);
+    const advancedBytes = await encodeJournal(advanced);
+
+    const idb = (globalThis as unknown as { indexedDB: FakeIndexedDB }).indexedDB;
+    const stores = (idb.db as unknown as { stores: Map<string, Map<string, unknown>> }).stores;
+    let injected = false;
+    const origTx = idb.db.transaction.bind(idb.db);
+    idb.db.transaction = ((names: string[], mode: string) => {
+      if (!injected && mode === 'readwrite' && names.includes('journals')) {
+        injected = true;
+        stores.get('journals')!.set(TRANSFER_ID, advancedBytes);
+      }
+      return origTx(names, mode);
+    }) as typeof idb.db.transaction;
+
+    const envelope = { version: 1, value: 'e'.repeat(64) };
+    const attached = await s.attachResumeSecret(TRANSFER_ID, envelope, OWNER_A, 3_000);
+
+    // The newer checkpoint and timestamp survive; the stale snapshot (blocks 0, no
+    // checkpoint, updatedAt 1_000) was never written back.
+    expect(attached.files[0]!.committedBlocks).toBe(1);
+    expect(attached.files[0]!.digestCheckpoint).toEqual(checkpoint);
+    expect(attached.updatedAt).toBe(2_000);
+    const final = await s.loadJournal(TRANSFER_ID);
+    expect(final.kind).toBe('ok');
+    if (final.kind !== 'ok') return;
+    expect(final.journal.files[0]!.committedBlocks).toBe(1);
+    expect(final.journal.files[0]!.digestCheckpoint).toEqual(checkpoint);
+    expect(final.journal.updatedAt).toBe(2_000);
+    expect(final.journal.resumeSecret).toEqual(envelope);
+  });
+
+  it('preserves an existing credential exactly and fails closed on an unusable journal (BLOCKER 6)', async () => {
+    const s = store();
+    await s.createJournal(
+      TRANSFER_ID,
+      manifest([['a.bin', 8]]),
+      { version: 1, value: '0'.repeat(64) },
+      { version: 1, value: '1'.repeat(64) },
+      1_000,
+    );
+    await s.acquireLease(TRANSFER_ID, OWNER_A, 1_000);
+    const first = { version: 1, value: 'd'.repeat(64) };
+    await s.attachResumeSecret(TRANSFER_ID, first, OWNER_A, 2_000);
+    // A second attach with a different envelope preserves the existing credential exactly.
+    const second = { version: 1, value: 'e'.repeat(64) };
+    await s.attachResumeSecret(TRANSFER_ID, second, OWNER_A, 3_000);
+    const loaded = await s.loadJournal(TRANSFER_ID);
+    expect(loaded.kind).toBe('ok');
+    if (loaded.kind !== 'ok') return;
+    expect(loaded.journal.resumeSecret).toEqual(first);
+
+    // A corrupt stored journal fails closed and is not overwritten by the attach.
+    const idb = (globalThis as unknown as { indexedDB: FakeIndexedDB }).indexedDB;
+    const tx = idb.db.transaction(['journals'], 'readwrite');
+    tx.objectStore('journals').put(new Uint8Array([9, 9, 9]), TRANSFER_ID);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await expect(s.attachResumeSecret(TRANSFER_ID, second, OWNER_A, 4_000)).rejects.toThrow(
+      /unusable/,
+    );
+    const again = await s.loadJournal(TRANSFER_ID);
+    expect(again.kind).toBe('corrupt'); // still present for explicit discard
   });
 
   it('renews, releases (owner-bound), and discards idempotently', async () => {

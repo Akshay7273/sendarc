@@ -26,3 +26,4 @@ export * from './transfer-set.js';
 export * from './errors.js';
 export * from './ice-servers.js';
 export * from './journal.js';
+export * from './resume-auth.js';

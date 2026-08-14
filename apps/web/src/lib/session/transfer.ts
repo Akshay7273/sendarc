@@ -10,7 +10,7 @@
  * have their own tests, and the whole path is covered by the e2e transfer.
  */
 
-import type { RendezvousResult } from '@sendbeam/protocol';
+import { deriveResumeRoot, type RendezvousResult } from '@sendbeam/protocol';
 import { WakeLockManager } from './wake-lock.js';
 import type { SignalChannel } from '../signaling/client.js';
 import { SignalAuthenticator } from '../transfer/authed-signaling.js';
@@ -107,11 +107,14 @@ export function runSend(
     role: 'send',
     total: opts.files.reduce((total, file) => total + file.size, 0),
     ...(opts.iceServers ? { iceServers: opts.iceServers } : {}),
-    start: () => ({
+    start: async () => ({
       kind: 'start-send',
       files: opts.files,
       ...(opts.transferId !== undefined ? { transferId: opts.transferId } : {}),
       ...(opts.reattachment !== undefined ? { reattachment: opts.reattachment } : {}),
+      // V13-PR07: the main thread derives the narrow transient resume root from the
+      // ORIGINAL session master and passes only that root to the worker — never the master.
+      ...(await resumeRootOf(rendezvous)),
       ...crypto(rendezvous),
     }),
   });
@@ -127,7 +130,14 @@ export function runReceive(
   return run(rendezvous, signaling, {
     role: 'receive',
     ...(opts.iceServers ? { iceServers: opts.iceServers } : {}),
-    start: () => ({ kind: 'start-recv', destination, ...crypto(rendezvous) }),
+    start: async () => ({
+      kind: 'start-recv',
+      destination,
+      // V13-PR07: the main thread derives the narrow transient resume root from the
+      // ORIGINAL session master and passes only that root to the worker — never the master.
+      ...(await resumeRootOf(rendezvous)),
+      ...crypto(rendezvous),
+    }),
   });
 }
 
@@ -137,7 +147,7 @@ interface RunSpec {
   total?: number;
   /** Operator-published ICE servers for direct-path candidate gathering. */
   iceServers?: RTCIceServer[];
-  start: () => HostToWorker;
+  start: () => Promise<HostToWorker>;
 }
 
 function run(
@@ -422,7 +432,7 @@ function run(
       });
 
       // Kick off the transfer in the worker.
-      const startMsg = spec.start();
+      const startMsg = await spec.start();
       w.postMessage(startMsg);
       wakeLock.setActive(true);
     } catch (err) {
@@ -590,4 +600,13 @@ function crypto(r: RendezvousResult): SessionCrypto {
   const sendDir = r.role === 'offerer' ? r.keys.o2j : r.keys.j2o;
   const recvDir = r.role === 'offerer' ? r.keys.j2o : r.keys.o2j;
   return { sendDir, recvDir, sendCounter: r.sendCounter, recvCounter: r.recvCounter };
+}
+
+/**
+ * Derive the transient resume root from the ORIGINAL session master (V13-PR07). The root is
+ * deliberately narrow and is never persisted, logged, or returned to the UI; the master
+ * cannot be recovered from it, which is what lets it cross into the transfer worker.
+ */
+async function resumeRootOf(r: RendezvousResult): Promise<{ resumeRoot: Uint8Array }> {
+  return { resumeRoot: await deriveResumeRoot(r.master) };
 }
