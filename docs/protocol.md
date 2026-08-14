@@ -309,12 +309,12 @@ When both peers agree on `resume-auth-v1` and both hold the transfer's local res
 credential, the peers run the resume-auth handshake over the (abstract) transport. Message
 shapes (JSON, canonical field order, base64url-no-padding binary fields):
 
-| Step | Direction | Type | Fields |
-| --- | --- | --- | --- |
-| 1 | offerer → joiner | `resume_init` | `version: 1`, `role: "offerer"`, `nonce` (32 B) |
-| 2 | joiner → offerer | `resume_challenge` | `version: 1`, `role: "joiner"`, `nonce` (32 B), `proof` (32 B) |
-| 3 | offerer → joiner | `resume_confirm` | `version: 1`, `role: "offerer"`, `proof` (32 B) |
-| 4 | joiner → offerer | `resume_ready` | `version: 1`, `role: "joiner"`, `proof` (32 B) |
+| Step | Direction        | Type               | Fields                                                         |
+| ---- | ---------------- | ------------------ | -------------------------------------------------------------- |
+| 1    | offerer → joiner | `resume_init`      | `version: 1`, `role: "offerer"`, `nonce` (32 B)                |
+| 2    | joiner → offerer | `resume_challenge` | `version: 1`, `role: "joiner"`, `nonce` (32 B), `proof` (32 B) |
+| 3    | offerer → joiner | `resume_confirm`   | `version: 1`, `role: "offerer"`, `proof` (32 B)                |
+| 4    | joiner → offerer | `resume_ready`     | `version: 1`, `role: "joiner"`, `proof` (32 B)                 |
 
 `transferId` and the manifest fingerprint are never transmitted; both peers hold them
 locally and bind them into the authenticated transcript. Proofs are HMAC-SHA256 under

@@ -81,13 +81,13 @@ that fail validation are rejected before any derivation (no partial bytes).
 
 Domain strings (ASCII, no trailing NUL):
 
-| Constant | Value |
-| --- | --- |
-| `INFO_RESUME_ROOT` | `sendbeam/1 resume root` |
-| `INFO_RESUME_SECRET` | `sendbeam/1 resume secret` |
+| Constant                    | Value                             |
+| --------------------------- | --------------------------------- |
+| `INFO_RESUME_ROOT`          | `sendbeam/1 resume root`          |
+| `INFO_RESUME_SECRET`        | `sendbeam/1 resume secret`        |
 | `INFO_RESUME_PROOF_OFFERER` | `sendbeam/1 resume offerer proof` |
-| `INFO_RESUME_PROOF_JOINER` | `sendbeam/1 resume joiner proof` |
-| `INFO_RESUME_MASTER` | `sendbeam/1 resume master` |
+| `INFO_RESUME_PROOF_JOINER`  | `sendbeam/1 resume joiner proof`  |
+| `INFO_RESUME_MASTER`        | `sendbeam/1 resume master`        |
 
 ```
 resumeRoot   = HKDF-SHA256(ikm = originalMaster, salt = nil,
@@ -167,12 +167,12 @@ strict and bounded: exact version, exact role per message type, nonce exactly 32
 proof exactly 32 bytes, no unknown fields, no trailing data, no attacker-controlled
 allocations.
 
-| Step | Direction | Type | Fields |
-| --- | --- | --- | --- |
-| 1 | offerer → joiner | `resume_init` | `version: 1`, `role: "offerer"`, `nonce` (32 B) |
-| 2 | joiner → offerer | `resume_challenge` | `version: 1`, `role: "joiner"`, `nonce` (32 B), `proof` (32 B) |
-| 3 | offerer → joiner | `resume_confirm` | `version: 1`, `role: "offerer"`, `proof` (32 B) |
-| 4 | joiner → offerer | `resume_ready` | `version: 1`, `role: "joiner"`, `proof` (32 B) |
+| Step | Direction        | Type               | Fields                                                         |
+| ---- | ---------------- | ------------------ | -------------------------------------------------------------- |
+| 1    | offerer → joiner | `resume_init`      | `version: 1`, `role: "offerer"`, `nonce` (32 B)                |
+| 2    | joiner → offerer | `resume_challenge` | `version: 1`, `role: "joiner"`, `nonce` (32 B), `proof` (32 B) |
+| 3    | offerer → joiner | `resume_confirm`   | `version: 1`, `role: "offerer"`, `proof` (32 B)                |
+| 4    | joiner → offerer | `resume_ready`     | `version: 1`, `role: "joiner"`, `proof` (32 B)                 |
 
 The fourth message exists because the offerer is the data producer: it must not begin
 streaming resumed data until it knows the joiner processed and authenticated the
@@ -265,13 +265,13 @@ all-or-nothing; failure abandons the candidate key material for that attempt.
 
 High-level classes (stable machine-readable codes; ADR 0002):
 
-| Class | Code | Meaning |
-| --- | --- | --- |
-| unsupported resume auth | `COMPAT` | version/capability mismatch |
-| missing local credential | `STORAGE` | local secret absent |
-| authentication failed | `AUTH` | proof/transcript/role/nonce mismatch |
-| malformed protocol message | `PROTOCOL` | strict decode violation |
-| storage failure | `STORAGE` | persist/load failure |
+| Class                      | Code       | Meaning                              |
+| -------------------------- | ---------- | ------------------------------------ |
+| unsupported resume auth    | `COMPAT`   | version/capability mismatch          |
+| missing local credential   | `STORAGE`  | local secret absent                  |
+| authentication failed      | `AUTH`     | proof/transcript/role/nonce mismatch |
+| malformed protocol message | `PROTOCOL` | strict decode violation              |
+| storage failure            | `STORAGE`  | persist/load failure                 |
 
 Errors never expose the expected/actual proof, the secret, key material, or the original
 master. Tests log secrets only inside fixed published KAT vectors.

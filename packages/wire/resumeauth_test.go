@@ -268,12 +268,16 @@ func TestResumeHandshakeFailsClosed(t *testing.T) {
 		t.Fatalf("wrong secret must fail verification, got %v", err)
 	}
 	// Wrong transferId / fingerprint.
-	expectHandshakeFail(t,
+	if err := expectHandshakeFail(t,
 		resumeTestContext(RoleOfferer, nil),
-		resumeTestContext(RoleJoiner, func(ctx *ResumeAuthContext) { ctx.TransferID = strings.Repeat("aa", 16) }))
-	expectHandshakeFail(t,
+		resumeTestContext(RoleJoiner, func(ctx *ResumeAuthContext) { ctx.TransferID = strings.Repeat("aa", 16) })); err == nil {
+		t.Fatal("wrong transferId must fail the handshake")
+	}
+	if err := expectHandshakeFail(t,
 		resumeTestContext(RoleOfferer, nil),
-		resumeTestContext(RoleJoiner, func(ctx *ResumeAuthContext) { ctx.ManifestFingerprint = strings.Repeat("ff", 32) }))
+		resumeTestContext(RoleJoiner, func(ctx *ResumeAuthContext) { ctx.ManifestFingerprint = strings.Repeat("ff", 32) })); err == nil {
+		t.Fatal("wrong manifest fingerprint must fail the handshake")
+	}
 	// Wrong version is rejected up front.
 	if _, err := NewResumeAuthSession(resumeTestContext(RoleOfferer, func(ctx *ResumeAuthContext) { ctx.Version = 2 })); err == nil {
 		t.Fatal("wrong version must be rejected")
