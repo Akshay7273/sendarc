@@ -92,6 +92,34 @@ never preempted once a server-reflexive hint appears. Symmetric NAT remains boun
 connectivity-check failure (~11s) because its unusable server-reflexive candidate is
 indistinguishable from a slow-but-healthy direct path.
 
+## Digest-checkpoint (V13-PR05)
+
+A resumed receive can either restore the serialized digest state — O(1), ~5 µs — or
+re-hash the whole persisted prefix through SHA-256. These benchmarks quantify that
+trade-off. Build-tagged (`-tags benchmark`), so normal test runs never execute them;
+run one at a time:
+
+```sh
+cd packages/wire
+SENDBEAM_BENCH_PREFIX_GIB=4 go test -tags benchmark -bench DigestCheckpoint -benchtime=1x -benchmem ./...
+```
+
+The target prefix size is parameterized with `SENDBEAM_BENCH_PREFIX_GIB` (default 4) and
+is always streamed in 1 MiB chunks, so the working set stays small at any size. Every
+row below is a measured run — numbers are never extrapolated from another size.
+
+| Machine | Prefix | Rehash (fallback) | Restore (checkpointed) |
+| ------- | -----: | ----------------: | ---------------------: |
+| i5-6200U @ 2.30 GHz, Linux, go1.24 | 4 GiB | ~17.0 s @ ~253 MB/s | ~5.1 µs |
+| GitHub-hosted ubuntu-latest, 4 vCPU AMD EPYC 7763, go1.25 | 10 GiB | 6.77 s @ 1,586 MB/s | 5.13 µs |
+| GitHub-hosted ubuntu-latest, 4 vCPU AMD EPYC 7763, go1.25 | 100 GiB | 67.7 s @ 1,586 MB/s | 4.97 µs |
+| GitHub-hosted ubuntu-latest, 4 vCPU AMD EPYC 7763, go1.25 | 256 GiB | 173.2 s @ 1,587 MB/s | 6.58 µs |
+
+Rehash cost is linear in the prefix (1,586 MB/s on the runner at every size — a
+consistent measurement, not an extrapolation); restore is a constant ~5 µs regardless
+of prefix size. At 256 GiB that is roughly 26 million times faster than re-hashing, and
+the restore cost does not grow with transfer size.
+
 ## CPU
 
 Crypto is the only CPU-heavy step: ~12.5 µs per 16 KiB frame, or ~0.8 s of one core per
