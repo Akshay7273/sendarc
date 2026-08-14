@@ -140,10 +140,18 @@ export interface ResumeFileState {
  * fresh session: "I already hold blocks `[0, haveBlocks)` of each file — restart there." The
  * sender validates it against its own manifest (same `transferId`, `haveBlocks ≤ file.blocks`)
  * and streams only the missing blocks; a mismatch fails the transfer closed.
+ *
+ * `manifestFingerprint` is the optional canonical manifest fingerprint (additive since V13-PR06,
+ * identical algorithm to the durable journal's `manifestFingerprint`). Receivers that understand
+ * it include it so the sender can prove the claims are for exactly the manifest being streamed
+ * before skipping any source block. It is omitted when the receiver predates the binding: an old
+ * sender ignores it, and a new sender treats absence as legacy negotiation (the structural
+ * validation that always applied still runs; a present-but-wrong fingerprint fails closed).
  */
 export interface ResumeState {
   type: FrameType.ResumeState;
   transferId: string;
+  manifestFingerprint?: string;
   files: ResumeFileState[];
 }
 

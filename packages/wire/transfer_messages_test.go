@@ -1,6 +1,9 @@
 package wire
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // The exact JSON byte strings JavaScript's JSON.stringify produces for these shapes. Go must
 // match them byte-for-byte (key order, no HTML escaping, no spaces) or a browser peer and a
@@ -44,6 +47,15 @@ func TestEncodeControlWireBytes(t *testing.T) {
 			"resume_state",
 			NewResumeState("0123456789abcdef0123456789abcdef", []ResumeFileState{{Idx: 0, HaveBlocks: 3}, {Idx: 1, HaveBlocks: 0}}),
 			`{"type":12,"transferId":"0123456789abcdef0123456789abcdef","files":[{"idx":0,"haveBlocks":3},{"idx":1,"haveBlocks":0}]}`,
+		},
+		{
+			"resume_state with manifest fingerprint",
+			&ResumeState{
+				Type: FrameResumeState, TransferID: "0123456789abcdef0123456789abcdef",
+				ManifestFingerprint: strings.Repeat("0123456789abcdef", 4),
+				Files:               []ResumeFileState{{Idx: 0, HaveBlocks: 3}, {Idx: 1, HaveBlocks: 0}},
+			},
+			`{"type":12,"transferId":"0123456789abcdef0123456789abcdef","manifestFingerprint":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","files":[{"idx":0,"haveBlocks":3},{"idx":1,"haveBlocks":0}]}`,
 		},
 	}
 	for _, c := range cases {
@@ -132,8 +144,22 @@ func TestDecodeControlFromTSShapes(t *testing.T) {
 	}
 	rs, ok := m.(*ResumeState)
 	if !ok || rs.TransferID != "abc123" || len(rs.Files) != 2 ||
-		rs.Files[0] != (ResumeFileState{Idx: 0, HaveBlocks: 5}) || rs.Files[1] != (ResumeFileState{Idx: 1, HaveBlocks: 0}) {
+		rs.Files[0] != (ResumeFileState{Idx: 0, HaveBlocks: 5}) || rs.Files[1] != (ResumeFileState{Idx: 1, HaveBlocks: 0}) ||
+		rs.ManifestFingerprint != "" {
 		t.Fatalf("decoded resume_state = %#v", m)
+	}
+
+	// A resume_state carrying the optional manifest fingerprint decodes with it preserved
+	// (a new receiver → legacy sender shape).
+	m, err = DecodeControl([]byte(`{"type":12,"transferId":"abc123","manifestFingerprint":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","files":[{"idx":0,"haveBlocks":5}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs, ok = m.(*ResumeState)
+	if !ok || rs.TransferID != "abc123" ||
+		rs.ManifestFingerprint != "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" ||
+		len(rs.Files) != 1 || rs.Files[0] != (ResumeFileState{Idx: 0, HaveBlocks: 5}) {
+		t.Fatalf("decoded fingerprint resume_state = %#v", m)
 	}
 
 	// A manifest carrying a transferId decodes with the id preserved.
@@ -150,17 +176,20 @@ func TestDecodeControlRejectsMalformed(t *testing.T) {
 	bad := []string{
 		`{{`,           // invalid JSON
 		`{"type":999}`, // out-of-range type
-		`{"type":263,"fileIdx":0,"blockIdx":1,"reason":"missing"}`, // must not wrap to nack
-		`{"type":11,"reason":"nope"}`,                              // bad fail reason
-		`{"type":7,"fileIdx":0,"blockIdx":1,"reason":"bad"}`,       // bad nack reason
-		`{"type":8,"op":"stop"}`,                                   // bad control operation
-		`{"type":9}`,                                               // complete missing fileDigest
-		`{"type":2,"files":[],"totalSize":0}`,                      // empty manifest files
-		`{"type":4,"fileIdx":0}`,                                   // block_hash missing sha256/blockIdx
-		`{"type":12,"files":[{"idx":0,"haveBlocks":0}]}`,           // resume_state missing transferId
-		`{"type":12,"transferId":"x","files":[]}`,                  // resume_state empty files
-		`{"type":12,"transferId":"x","files":[{"idx":0}]}`,         // resume file missing haveBlocks
-		`{"fileIdx":0}`,                                            // missing type
+		`{"type":263,"fileIdx":0,"blockIdx":1,"reason":"missing"}`,                                     // must not wrap to nack
+		`{"type":11,"reason":"nope"}`,                                                                  // bad fail reason
+		`{"type":7,"fileIdx":0,"blockIdx":1,"reason":"bad"}`,                                           // bad nack reason
+		`{"type":8,"op":"stop"}`,                                                                       // bad control operation
+		`{"type":9}`,                                                                                   // complete missing fileDigest
+		`{"type":2,"files":[],"totalSize":0}`,                                                          // empty manifest files
+		`{"type":4,"fileIdx":0}`,                                                                       // block_hash missing sha256/blockIdx
+		`{"type":12,"files":[{"idx":0,"haveBlocks":0}]}`,                                               // resume_state missing transferId
+		`{"type":12,"transferId":"x","files":[]}`,                                                      // resume_state empty files
+		`{"type":12,"transferId":"x","files":[{"idx":0}]}`,                                             // resume file missing haveBlocks
+		`{"type":12,"transferId":"x","files":[{"idx":0.5,"haveBlocks":0}]}`,                            // fractional idx (Go int decode)
+		`{"type":12,"transferId":"x","files":[{"idx":0,"haveBlocks":1.5}]}`,                            // fractional haveBlocks (Go int decode)
+		`{"type":12,"transferId":"x","manifestFingerprint":"nope","files":[{"idx":0,"haveBlocks":0}]}`, // malformed fingerprint
+		`{"fileIdx":0}`, // missing type
 	}
 	for _, s := range bad {
 		if _, err := DecodeControl([]byte(s)); err == nil {

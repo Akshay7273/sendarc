@@ -747,7 +747,11 @@ func (d *DurableDestination) ResumeStateFor(manifest wire.Manifest) (*wire.Recei
 		return nil, wire.Errorf(wire.CodeStorage,
 			"transfer: journal %s does not match the authenticated manifest; refusing to resume", journal.TransferID)
 	}
-	resume := &wire.ReceiverResume{TransferID: journal.TransferID, Files: make(map[int]wire.ResumeFileProgress)}
+	resume := &wire.ReceiverResume{
+		TransferID:          journal.TransferID,
+		ManifestFingerprint: journal.ManifestFingerprint,
+		Files:               make(map[int]wire.ResumeFileProgress),
+	}
 	for i, f := range journal.Files {
 		committed, err := journal.CommittedBytes(i)
 		if err != nil {

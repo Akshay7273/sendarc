@@ -549,6 +549,27 @@ func TestFaultDuplicateResumeStateIsIdempotent(t *testing.T) {
 	_ = sink.Write(0, data[:prefix])
 	seed := NewSHA256Digest()
 	seed.Update(data[:prefix])
+	// The seed must bind to the canonical fingerprint of the manifest the sender is about
+	// to stream (V13-PR06); recompute it from the same parameters.
+	sum := sha256.Sum256(data)
+	blocks := 0
+	if len(data) > 0 {
+		blocks = (len(data)-1)/1024 + 1
+	}
+	resumeManifest := Manifest{
+		Type:       FrameManifest,
+		TransferID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Files: []FileEntry{{
+			Idx: 0, Name: "f", Size: int64(len(data)), Mime: "application/octet-stream",
+			LastModified: 1, BlockSize: 1024, Blocks: blocks,
+			FileDigest: hex.EncodeToString(sum[:]),
+		}},
+		TotalSize: int64(len(data)),
+	}
+	resumeFingerprint, err := ManifestFingerprint(resumeManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
 	sender := NewSender(SenderOptions{
 		File:        BytesSource(data, FileMeta{Name: "f", Size: int64(len(data)), Mime: "application/octet-stream", LastModified: 1}, 0),
 		Send:        func(f []byte) error { return link.send(dirS2R, f) },
@@ -568,8 +589,9 @@ func TestFaultDuplicateResumeStateIsIdempotent(t *testing.T) {
 		RecvDir: keys.O2J,
 		Sink:    sink,
 		Resume: &ReceiverResume{
-			TransferID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			Files:      map[int]ResumeFileProgress{0: {HaveBlocks: 5, SeedDigest: seed}},
+			TransferID:          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			ManifestFingerprint: resumeFingerprint,
+			Files:               map[int]ResumeFileProgress{0: {HaveBlocks: 5, SeedDigest: seed}},
 		},
 	})
 	go func() {

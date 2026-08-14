@@ -9,7 +9,14 @@
 
 import { FrameReplayError, openSequenced, seal, type FrameHeaderInput } from './aead.js';
 import type { DirectionalKey } from './keyschedule.js';
-import { FrameType, type ControlOp, type Fail, type Manifest } from './transfer.js';
+import {
+  FrameType,
+  type ControlOp,
+  type Fail,
+  type Manifest,
+  type ResumeState,
+} from './transfer.js';
+import { manifestFingerprint } from './journal.js';
 import {
   DEFAULT_BLOCK_BYTES,
   DEFAULT_FRAME_BYTES,
@@ -94,6 +101,23 @@ const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_DONE_TIMEOUT_MS = 30_000;
 const DEFAULT_COMPLETE_INTERVAL_MS = 500;
 
+/** Reports whether two resume_state messages carry the same claims. */
+function resumeStatesEqual(a: ResumeState | undefined, b: ResumeState | undefined): boolean {
+  if (
+    !a ||
+    !b ||
+    a.transferId !== b.transferId ||
+    a.manifestFingerprint !== b.manifestFingerprint ||
+    a.files.length !== b.files.length
+  ) {
+    return false;
+  }
+  return a.files.every((f, i) => {
+    const other = b.files[i];
+    return !!other && f.idx === other.idx && f.haveBlocks === other.haveBlocks;
+  });
+}
+
 export class TransferSender {
   private readonly o: TransferSenderOptions;
   private readonly blockSize: number;
@@ -115,11 +139,18 @@ export class TransferSender {
   private activeFileAcknowledged = 0;
   /** The validated manifest, kept so a path change before any acknowledgment can retransmit it. */
   private manifest: Manifest | undefined;
+  /** Canonical fingerprint of {@link manifest}, computed before its frame is transmitted so an
+   *  early resume_state is never validated against an unset binding (V13-PR06). */
+  private manifestFingerprint = '';
 
   /** Set when a transfer id is advertised: the manifest carries it and a resume handshake runs. */
   private readonly transferId: string | undefined;
   /** Per-file high-water marks the receiver reported; each file restarts at its value. */
-  private readonly resumePlan = new Map<number, number>();
+  private resumePlan = new Map<number, number>();
+  /** The exact resume_state message that produced {@link resumePlan}, kept so a path cutover
+   *  that duplicates it is recognized as an idempotent re-answer while a conflicting duplicate
+   *  fails closed. */
+  private appliedResume: ResumeState | undefined;
   /** Resolves when the receiver's `resume_state` has been validated (resume mode only). */
   private resolveResumeReady!: () => void;
   private rejectResumeReady!: (e: Error) => void;
@@ -274,8 +305,13 @@ export class TransferSender {
     // transfer id + canonical source identity) are durable before the id is advertised,
     // and a rejection means the manifest never reaches the wire.
     await this.o.onManifest?.(manifest);
-    await this.sendControl(FrameType.Manifest, manifest);
+    // The fingerprint binding is registered before the manifest frame is transmitted: the
+    // receiver can answer a resume_state the moment it authenticates the manifest, possibly
+    // before drive reaches the wait, and that answer must never be validated against an
+    // unset binding.
+    this.manifestFingerprint = await manifestFingerprint(manifest);
     this.manifest = manifest;
+    await this.sendControl(FrameType.Manifest, manifest);
 
     // A transfer id opts into resumption: the receiver answers the manifest with a resume_state
     // carrying each file's high-water mark (all zero on a first attempt). Wait for it before
@@ -287,7 +323,10 @@ export class TransferSender {
     for (const [fileIdx, source] of this.files.entries()) {
       this.activeFileIdx = fileIdx;
       const file = manifest.files[fileIdx]!;
-      const haveBlocks = Math.min(this.resumePlan.get(fileIdx) ?? 0, file.blocks);
+      // resumePlan is only ever populated from a fully-validated resume_state whose claims
+      // were already bounded to the manifest geometry (see the ResumeState handler); a
+      // missing file here means fresh mode, restart at zero.
+      const haveBlocks = this.resumePlan.get(fileIdx) ?? 0;
       // Bytes the receiver already holds count as acknowledged up front so progress is continuous
       // across a resume. Only the final block may be partial, so a full prefix is haveBlocks blocks.
       const committed = haveBlocks >= file.blocks ? file.size : haveBlocks * this.blockSize;
@@ -396,26 +435,53 @@ export class TransferSender {
         this.queueRetry(msg.blockIdx);
         return;
       case FrameType.ResumeState: {
-        if (this.transferId === undefined) {
+        if (this.transferId === undefined || this.manifest === undefined) {
           throw new TransferError('integrity', 'unexpected resume_state');
-        }
-        if (this.resumeSettled) {
-          throw new TransferError('integrity', 'duplicate resume_state');
         }
         if (msg.transferId !== this.transferId) {
           throw new TransferError('integrity', 'resume_state transfer id mismatch');
         }
+        if (
+          msg.manifestFingerprint !== undefined &&
+          msg.manifestFingerprint !== this.manifestFingerprint
+        ) {
+          throw new TransferError('integrity', 'resume_state manifest fingerprint mismatch');
+        }
+        if (this.resumeSettled) {
+          // A path cutover can deliver the receiver's answer twice: an identical duplicate
+          // is an idempotent no-op, anything different fails closed.
+          if (resumeStatesEqual(msg, this.appliedResume)) return;
+          throw new TransferError('integrity', 'conflicting duplicate resume_state');
+        }
+        // Build the complete validated plan first; it is committed only after the whole
+        // message passes, so a bad claim can never leave a partially-applied resume plan.
+        const plan = new Map<number, number>();
         for (const entry of msg.files) {
-          const file = this.files[entry.idx];
-          const blocks = file ? Math.ceil(file.meta.size / this.blockSize) : -1;
-          if (blocks < 0 || this.resumePlan.has(entry.idx)) {
+          if (
+            !Number.isSafeInteger(entry.idx) ||
+            entry.idx < 0 ||
+            entry.idx >= this.manifest.files.length
+          ) {
             throw new TransferError('integrity', 'resume_state references an unknown file');
           }
-          if (entry.haveBlocks < 0 || entry.haveBlocks > blocks) {
+          if (plan.has(entry.idx)) {
+            throw new TransferError('integrity', 'resume_state references a file more than once');
+          }
+          const blocks = this.manifest.files[entry.idx]!.blocks;
+          if (
+            !Number.isSafeInteger(entry.haveBlocks) ||
+            entry.haveBlocks < 0 ||
+            entry.haveBlocks > blocks
+          ) {
             throw new TransferError('integrity', 'resume_state haveBlocks out of range');
           }
-          this.resumePlan.set(entry.idx, entry.haveBlocks);
+          plan.set(entry.idx, entry.haveBlocks);
         }
+        if (plan.size !== this.manifest.files.length) {
+          throw new TransferError('integrity', 'resume_state is missing a file entry');
+        }
+        this.resumePlan = plan;
+        this.appliedResume = msg;
         this.resumeSettled = true;
         this.resolveResumeReady();
         return;

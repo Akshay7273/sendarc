@@ -64,6 +64,25 @@ describe('control-message codec', () => {
     expect(decodeControl(wire)).toEqual(msg);
   });
 
+  it('round-trips a resume_state carrying the manifest fingerprint', () => {
+    const fp = '0123456789abcdef'.repeat(4);
+    const msg = {
+      type: FrameType.ResumeState,
+      transferId: '0123456789abcdef0123456789abcdef',
+      manifestFingerprint: fp,
+      files: [
+        { idx: 0, haveBlocks: 3 },
+        { idx: 1, haveBlocks: 0 },
+      ],
+    } as const;
+    const wire = encodeControl(msg);
+    // Key order is pinned: type, transferId, manifestFingerprint, then files.
+    expect(new TextDecoder().decode(wire)).toBe(
+      `{"type":12,"transferId":"0123456789abcdef0123456789abcdef","manifestFingerprint":"${fp}","files":[{"idx":0,"haveBlocks":3},{"idx":1,"haveBlocks":0}]}`,
+    );
+    expect(decodeControl(wire)).toEqual(msg);
+  });
+
   it('round-trips block and terminal messages', () => {
     const msgs = [
       { type: FrameType.BlockHash, fileIdx: 0, blockIdx: 1, sha256: 'ff' },
@@ -114,5 +133,15 @@ describe('control-message codec', () => {
         } as never),
       ),
     ).toThrow(); // resume file missing haveBlocks
+    expect(() =>
+      decodeControl(
+        encodeControl({
+          type: FrameType.ResumeState,
+          transferId: 'x',
+          manifestFingerprint: 'nope',
+          files: [{ idx: 0, haveBlocks: 0 }],
+        } as never),
+      ),
+    ).toThrow(); // malformed manifest fingerprint
   });
 });

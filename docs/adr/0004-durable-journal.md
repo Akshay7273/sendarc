@@ -81,6 +81,11 @@ The journal is local, user-editable on-disk state. It is **claims, not proof**:
   is handled by the storage layer per §8 and by resume validation per PR06, not by
   guessing.
 
+Implemented by V13-PR06: the receiver binds every restored seed to the authenticated
+manifest's canonical fingerprint (identical algorithm to the journal's `manifestFingerprint`),
+fails closed on any violation, and advertises only validated `haveBlocks` in the (additive,
+fingerprint-bound) `resume_state`. See `docs/protocol.md` § Transfer → Resume.
+
 ## 4. Schema
 
 The versioned schema lives in two twin modules that must serialize, validate, fingerprint,

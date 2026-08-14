@@ -78,8 +78,14 @@ clients honour via the 15-minute runtime-ICE-config TTL (`HOSTING.md`).
 AES-256-GCM with a per-direction monotonic nonce counter; the frame header is the GCM AAD,
 binding each frame to its position (file, block, offset, length). A reused counter is
 refused rather than risk nonce reuse. Any tampering fails the GCM auth tag; a bad per-block
-SHA-256 escalates to abort (no blind retry). Resume state is integrity-checked: a
-`resume_state` that does not match the authenticated manifest is rejected.
+SHA-256 escalates to abort (no blind retry). Resume state is a claim, not a trust anchor: a
+receiver only applies a locally restored seed after binding it to the authenticated
+manifest's canonical fingerprint (exact file set and block geometry) and failing closed on
+any violation, never clamping an out-of-range claim; the sender likewise rejects any
+`resume_state` that does not match its own manifest (unknown, duplicate, or missing file
+entries, out-of-range `haveBlocks`, a fingerprint mismatch, or a conflicting duplicate), so a
+malicious or stale peer cannot steer a resumed transfer into writing the wrong bytes or
+skipping unverified data.
 
 ### Code leakage
 
@@ -139,7 +145,9 @@ invite words, filenames, plaintext, or keys.
 Negative crypto tests are part of the suite: a wrong invite code fails closed; a tampered
 `pake` element aborts; a tampered or replayed SDP MAC is rejected; a reused GCM nonce is
 rejected; a bad block hash aborts without retry; two sessions sharing the same code derive
-different master keys (ephemeral SPAKE2 freshness); a forged `resume_state` is rejected.
+different master keys (ephemeral SPAKE2 freshness); a forged `resume_state` is rejected (bad
+transfer id, mismatched or malformed manifest fingerprint, unknown/duplicate/missing file
+entries, or out-of-range `haveBlocks` all fail closed on both the sender and receiver).
 Cross-language vector tests keep the TypeScript and Go implementations byte-identical, and
 the test-vector suite (KATs + a full transfer vector) is published under
 `docs/test-vectors/` for independent reimplementation. Before public release the crypto

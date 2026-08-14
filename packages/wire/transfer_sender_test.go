@@ -508,6 +508,10 @@ func TestSenderOnManifestRunsBeforeFirstFrame(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("OnManifest never called")
 	}
+	// The manifest frame must be on the wire before canceling: the cancellation sends its
+	// own control frame, and racing it against the manifest send makes the "first frame is
+	// the manifest" assertion below nondeterministic.
+	waitStable(t, &out, 1)
 
 	cancel()
 	if err := <-res; err == nil {

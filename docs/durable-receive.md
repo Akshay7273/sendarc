@@ -166,7 +166,9 @@ and the authenticated manifest matches an existing journal, the receiver:
    digest is restored from the journal's `digestCheckpoint` state when the format matches
    this runtime and the state decodes; otherwise the persisted prefix is re-hashed
    (correctness-first). A restored or re-hashed seed never bypasses the final whole-file
-   verification.
+   verification. The seed carries the journal's `manifestFingerprint`, and the receiver
+   re-binds the whole seed against the authenticated manifest before advertising any of it
+   (PR06): an impossible or mismatched claim fails closed rather than being clamped.
 4. Streams only the missing blocks from the sender.
 
 Resume is **same-session** recovery: the sender must still be connected in the room the
@@ -207,4 +209,5 @@ sendbeam transfers discard  <id>... [--out DIR] [--all] [--yes]
 - Cross-session authenticated resume with fresh traffic keys without a live sender is
   PR07 (the `resumeSecret` envelope exists in the schema but is unused by PR02).
 - Resume validation against authenticated peer identity (beyond the manifest fingerprint
-  and destination location) is PR06/PR07.
+  and destination location) is PR07. PR06 already binds every seed to the authenticated
+  manifest's fingerprint and geometry.

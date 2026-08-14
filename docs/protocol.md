@@ -261,10 +261,33 @@ above; relayed payloads are the same AEAD frames, never re-encrypted or inspecte
    ignoring any `resume_state` that does not match the manifest. A transfer with no prior
    state reports all-zero marks.
 
+   The `ResumeState` message is **additive** (key order pinned: `type`, `transferId`,
+   `manifestFingerprint`, `files`). The optional `manifestFingerprint` field carries the
+   canonical fingerprint of the exact manifest the checkpoints belong to (identical algorithm
+   to the durable journal's `manifestFingerprint`; see ADR 0004). It is **not** required for
+   wire compatibility: a peer that predates the binding answers without the field, and the
+   sender accepts that under the structural rules `sendbeam/1` always applied. When the field
+   is present it must be 64 lowercase hex and equal the sender's canonical manifest fingerprint,
+   otherwise the sender fails the transfer closed.
+
+   Resume state is a **claim, not a trust anchor**. A receiver only applies a locally restored
+   seed after it validates the seed against the _authenticated_ manifest: the fingerprint must
+   match (binding the exact file set and block geometry), the file coverage must be exact and
+   complete, and every `haveBlocks` must lie within `[0, blocks]`. Any violation fails the
+   receive closed (`sink_error`) before any of the seed is advertised — a claim is never
+   clamped into range. A seed whose `transferId` does not match the manifest belongs to a
+   different transfer and is ignored, starting a fresh receive.
+
+   Settlement is idempotent and cutover-safe: an identical duplicate `resume_state` (a path
+   cutover can deliver the receiver's answer twice) is a no-op, while a conflicting duplicate
+   fails; and when a cutover retransmits the manifest, the receiver re-answers with the exact
+   same fingerprint-bound `ResumeState` so the negotiation converges instead of stalling.
+
 Durable resumption across process/session boundaries additionally relies on a **local
 durable-transfer journal** — a versioned on-device persistence contract (schema, checksum,
 fingerprint, fail-closed loading) defined in `docs/adr/0004-durable-journal.md` and
 implemented by the Go `packages/wire/journal.go` and TypeScript
 `packages/protocol/src/journal.ts` twins. The journal is **not** wire state: it is never
 transmitted between peers, is not part of `sendbeam/1`, and carries no wire-version
-implication. The wire `resume_state` message is unchanged.
+implication. The wire `resume_state` message gains only the additive, optional
+`manifestFingerprint` field described above; old peers ignore it and new peers validate it.
