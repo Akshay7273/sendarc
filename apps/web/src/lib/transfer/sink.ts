@@ -1,7 +1,6 @@
 import {
   TransferError,
   normalizeTransferPath,
-  type Digest,
   type Destination,
   type FileEntry,
   type Manifest,
@@ -19,6 +18,7 @@ import {
   type ZipEntry,
 } from './zip.js';
 import type { ReceiveDestinationSpec } from './wire.js';
+import type { Sha256DigestFactory } from './digest.js';
 
 export type DestinationOutput =
   { kind: 'opfs'; key: string; name: string; mime: string } | { kind: 'direct' };
@@ -38,7 +38,7 @@ export interface BrowserDestination extends Destination {
  */
 export function createBrowserDestination(
   spec: ReceiveDestinationSpec,
-  createDigest?: () => Digest,
+  createDigest?: Sha256DigestFactory,
 ): BrowserDestination {
   let inner: BrowserDestination | undefined;
   const get = (): BrowserDestination => {

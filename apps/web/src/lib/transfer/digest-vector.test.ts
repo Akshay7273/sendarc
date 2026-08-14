@@ -44,7 +44,7 @@ describe('digest-checkpoint vector (V13-PR05)', () => {
       const live = make();
       live.update(prefix);
       const state = (live as unknown as DigestState).saveState();
-      const restored = (await createSha256DigestFactory(state))();
+      const restored = make.restore(state);
       restored.update(suffix);
       expect(await restored.hexDigest(), `${s.name} restored continuation`).toBe(s.fullDigest);
     }

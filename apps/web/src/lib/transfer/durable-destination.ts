@@ -42,7 +42,7 @@ import type {
   WritableFileLike,
 } from './durable-store.js';
 import { webDestinationIdentity } from './durable-store.js';
-import { createSha256DigestFactory } from './digest.js';
+import type { Sha256DigestFactory } from './digest.js';
 import {
   centralHeader,
   crc32Update,
@@ -62,7 +62,7 @@ export interface DurableMeta {
 }
 
 export interface DurableDestinationOptions {
-  createDigest(): Digest;
+  createDigest: Sha256DigestFactory;
   files: DurableFiles;
   store: DurableJournalStore;
   /** Injectable clock (unix ms); tests use a fixed clock with no sleeps. */
@@ -78,7 +78,7 @@ const DURABLE_LEASE_RENEW_MS = 30_000;
 const STORAGE_NAMESPACE = 'sendbeam';
 
 export class DurableDestination implements BrowserDestination {
-  private readonly createDigest: () => Digest;
+  private readonly createDigest: Sha256DigestFactory;
   private readonly files: DurableFiles;
   private readonly store: DurableJournalStore;
   private readonly now: () => number;
@@ -391,14 +391,16 @@ export class DurableDestination implements BrowserDestination {
             `journal ${this.transferId} file ${state.name}: partial data missing or truncated; refusing to resume — discard it`,
           );
         }
+      } else {
+        // Nothing persisted: the receiver starts fresh, no seed needed.
+        continue;
       }
       let digest: Digest;
       let restored = false;
       const cp = state.digestCheckpoint;
       if (cp && cp.format === DIGEST_CHECKPOINT_FORMAT_HASH_WASM) {
         try {
-          const factory = await createSha256DigestFactory(hexToBytes(cp.state));
-          digest = factory();
+          digest = this.createDigest.restore(hexToBytes(cp.state));
           restored = true;
         } catch {
           digest = this.createDigest();

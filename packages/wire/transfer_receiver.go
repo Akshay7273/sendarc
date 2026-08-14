@@ -520,10 +520,17 @@ func (r *Receiver) attachDigestState() error {
 		var err error
 		state, err = ds.MarshalState()
 		if err != nil {
-			return asTransferError(err, FailSinkError)
+			// Digest checkpoints are an optimization: serialization failure omits the
+			// state (the sink journals a checkpoint without it, and resume re-hashes
+			// the persisted prefix). Genuine journal/sink failures below must still
+			// propagate.
+			state = nil
 		}
 	}
-	return sink.SetDigestState(state)
+	if err := sink.SetDigestState(state); err != nil {
+		return asTransferError(err, FailSinkError)
+	}
+	return nil
 }
 
 func (r *Receiver) requestMissing() error {
