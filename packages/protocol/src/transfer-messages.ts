@@ -147,7 +147,15 @@ function asComplete(m: Record<string, unknown>): Complete {
 function asResumeFileState(v: unknown): ResumeFileState {
   if (typeof v !== 'object' || v === null) throw new Error('control frame: bad resume file state');
   const f = v as Record<string, unknown>;
-  return { idx: num(f, 'idx'), haveBlocks: num(f, 'haveBlocks') };
+  const idx = num(f, 'idx');
+  const haveBlocks = num(f, 'haveBlocks');
+  // The Go decoder's int fields already reject fractional/non-integral values at
+  // decode time; mirror that so both implementations fail the same malformed
+  // resume_state identically instead of only at semantic validation.
+  if (!Number.isSafeInteger(idx) || !Number.isSafeInteger(haveBlocks)) {
+    throw new Error('control frame: resume file state is not an integer');
+  }
+  return { idx, haveBlocks };
 }
 function asResumeState(m: Record<string, unknown>): ResumeState {
   if (!Array.isArray(m.files) || m.files.length === 0)
@@ -156,9 +164,19 @@ function asResumeState(m: Record<string, unknown>): ResumeState {
     throw new Error(
       `control frame: resume_state has ${m.files.length} files, maximum is ${MAX_TRANSFER_FILES}`,
     );
+  // manifestFingerprint is optional and keeps its position between transferId and files so
+  // the re-encoded wire bytes match the original key ordering.
+  const manifestFingerprint =
+    m.manifestFingerprint === undefined ? undefined : str(m, 'manifestFingerprint');
+  if (manifestFingerprint !== undefined && !/^[0-9a-f]{64}$/.test(manifestFingerprint)) {
+    throw new Error(
+      'control frame: resume_state.manifestFingerprint must be 64 lowercase hex characters',
+    );
+  }
   return {
     type: FrameType.ResumeState,
     transferId: str(m, 'transferId'),
+    ...(manifestFingerprint !== undefined ? { manifestFingerprint } : {}),
     files: m.files.map(asResumeFileState),
   };
 }

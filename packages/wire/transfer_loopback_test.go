@@ -166,16 +166,42 @@ func runResumeLoopback(t *testing.T, data []byte, blockSize, haveBlocks int, sen
 		TransferID: senderID,
 	})
 	var commits int
+	resume := &ReceiverResume{}
+	if resumeID == senderID {
+		// The seed must bind to the canonical fingerprint of the manifest the sender
+		// is about to stream (V13-PR06); recompute it from the same parameters.
+		sum := sha256.Sum256(data)
+		blocks := 0
+		if len(data) > 0 {
+			blocks = (len(data)-1)/blockSize + 1
+		}
+		manifest := Manifest{
+			Type:       FrameManifest,
+			TransferID: senderID,
+			Files: []FileEntry{{
+				Idx: 0, Name: "f", Size: int64(len(data)), Mime: "application/octet-stream",
+				LastModified: 1, BlockSize: blockSize, Blocks: blocks,
+				FileDigest: hex.EncodeToString(sum[:]),
+			}},
+			TotalSize: int64(len(data)),
+		}
+		fingerprint, err := ManifestFingerprint(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resume = &ReceiverResume{
+			TransferID:          resumeID,
+			ManifestFingerprint: fingerprint,
+			Files:               map[int]ResumeFileProgress{0: {HaveBlocks: haveBlocks, SeedDigest: seed}},
+		}
+	}
 	receiver := NewReceiver(ReceiverOptions{
 		Send:       func(f []byte) error { r2s <- cp(f); return nil },
 		SendDir:    keys.J2O,
 		RecvDir:    keys.O2J,
 		Sink:       sink,
 		OnProgress: func(int64) { commits++ },
-		Resume: &ReceiverResume{
-			TransferID: resumeID,
-			Files:      map[int]ResumeFileProgress{0: {HaveBlocks: haveBlocks, SeedDigest: seed}},
-		},
+		Resume:     resume,
 	})
 
 	go func() {

@@ -127,10 +127,19 @@ type ResumeFileState struct {
 // ResumeState tells the sender where to restart each file after the receiver reloaded and
 // re-handshaked. The sender validates it against its manifest (same TransferID, HaveBlocks
 // within bounds) and streams only the missing blocks.
+//
+// ManifestFingerprint is the optional canonical manifest fingerprint (additive since PR06;
+// see ManifestFingerprint). A receiver that understands it includes it so the sender can
+// prove the claims are for exactly the manifest being streamed before skipping any source
+// block. The field is omitted when the receiver predates the binding: an old decoder
+// ignores it, and a new sender treats its absence as legacy negotiation (the same
+// structural validation that always applied still runs, and a present-but-wrong
+// fingerprint fails closed). Field order matches the TypeScript twin byte-for-byte.
 type ResumeState struct {
-	Type       uint8             `json:"type"`
-	TransferID string            `json:"transferId"`
-	Files      []ResumeFileState `json:"files"`
+	Type                uint8             `json:"type"`
+	TransferID          string            `json:"transferId"`
+	ManifestFingerprint string            `json:"manifestFingerprint,omitempty"`
+	Files               []ResumeFileState `json:"files"`
 }
 
 // FrameType returns the frame-header tag for each message; the JSON "type" field carries the
@@ -204,7 +213,7 @@ func NewDone() *Done { return &Done{Type: FrameDone} }
 func NewFail(reason FailReason) *Fail { return &Fail{Type: FrameFail, Reason: reason} }
 
 // NewResumeState builds a resume_state message carrying the transfer id and per-file high-water
-// marks.
+// marks. Set ManifestFingerprint on the result to bind the claims to the canonical manifest.
 func NewResumeState(transferID string, files []ResumeFileState) *ResumeState {
 	return &ResumeState{Type: FrameResumeState, TransferID: transferID, Files: files}
 }
@@ -437,14 +446,18 @@ type rawResumeFileState struct {
 
 func decodeResumeState(payload []byte) (ControlMsg, error) {
 	var raw struct {
-		TransferID *string              `json:"transferId"`
-		Files      []rawResumeFileState `json:"files"`
+		TransferID          *string              `json:"transferId"`
+		ManifestFingerprint *string              `json:"manifestFingerprint"`
+		Files               []rawResumeFileState `json:"files"`
 	}
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return nil, errors.New("control frame: invalid resume_state")
 	}
 	if raw.TransferID == nil {
 		return nil, errors.New("control frame: resume_state.transferId missing")
+	}
+	if raw.ManifestFingerprint != nil && !isLowerHex(*raw.ManifestFingerprint, 64) {
+		return nil, errors.New("control frame: resume_state.manifestFingerprint must be 64 lowercase hex characters")
 	}
 	if len(raw.Files) == 0 {
 		return nil, errors.New("control frame: resume_state.files empty")
@@ -459,5 +472,9 @@ func decodeResumeState(payload []byte) (ControlMsg, error) {
 		}
 		files[i] = ResumeFileState{Idx: *rf.Idx, HaveBlocks: *rf.HaveBlocks}
 	}
-	return &ResumeState{Type: FrameResumeState, TransferID: *raw.TransferID, Files: files}, nil
+	rs := &ResumeState{Type: FrameResumeState, TransferID: *raw.TransferID, Files: files}
+	if raw.ManifestFingerprint != nil {
+		rs.ManifestFingerprint = *raw.ManifestFingerprint
+	}
+	return rs, nil
 }

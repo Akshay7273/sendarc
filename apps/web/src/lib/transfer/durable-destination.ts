@@ -418,7 +418,13 @@ export class DurableDestination implements BrowserDestination {
       }
       files.set(i, { haveBlocks: state.committedBlocks, seedDigest: digest });
     }
-    this.resumeState = { transferId: this.transferId, files };
+    this.resumeState = {
+      transferId: this.transferId,
+      // The wire receiver re-binds the seed against the authenticated manifest's canonical
+      // fingerprint before advertising any of it (V13-PR06).
+      manifestFingerprint: journal.manifestFingerprint,
+      files,
+    };
   }
 
   private async buildZip(): Promise<{ key: string; name: string }> {
