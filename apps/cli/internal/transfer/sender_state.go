@@ -40,8 +40,13 @@ import (
 	"github.com/sendbeam/wire"
 )
 
-// senderSchemaVersion is the current SenderRecord schema.
-const senderSchemaVersion = 1
+// senderSchemaVersion is the current SenderRecord schema. Schema version 2 adds the optional
+// opaque resume-secret envelope (V13-PR07); version 1 records (pre-PR07) are accepted on load
+// and migrated in memory to v2 with no cross-session auth material.
+const senderSchemaVersion = 2
+
+// senderSchemaVersionLegacy is the pre-PR07 schema still accepted on load.
+const senderSchemaVersionLegacy = 1
 
 // senderStateEnv overrides the sender-state directory (tests).
 const senderStateEnv = "SENDBEAM_SENDER_STATE"
@@ -60,19 +65,23 @@ type SenderFileState struct {
 	FileDigest   string `json:"fileDigest"`
 }
 
-// SenderRecord is the schema-v1 sender record: the stable transfer id plus the canonical
-// source identity (manifest fingerprint) and the exact file set it was computed from, and
-// the canonical absolute source paths the user invoked. It is local state, never sent.
+// SenderRecord is the schema-v2 sender record: the stable transfer id plus the canonical
+// source identity (manifest fingerprint) and the exact file set it was computed from, the
+// canonical absolute source paths the user invoked, and — for transfers that ran under a
+// PR07-aware original session — the opaque transfer-scoped resume credential (V13-PR07). It
+// is local state, never sent. The checksum covers every field including the resume-secret
+// envelope; the credential is never printed in listings, logs, errors, or diagnostics.
 type SenderRecord struct {
-	SchemaVersion       int               `json:"schemaVersion"`
-	TransferID          string            `json:"transferId"`
-	ManifestFingerprint string            `json:"manifestFingerprint"`
-	ProtocolVersion     string            `json:"protocolVersion"`
-	CreatedAt           int64             `json:"createdAt"`
-	UpdatedAt           int64             `json:"updatedAt"`
-	Paths               []string          `json:"paths"`
-	Files               []SenderFileState `json:"files"`
-	Checksum            string            `json:"checksum"`
+	SchemaVersion       int                        `json:"schemaVersion"`
+	TransferID          string                     `json:"transferId"`
+	ManifestFingerprint string                     `json:"manifestFingerprint"`
+	ProtocolVersion     string                     `json:"protocolVersion"`
+	CreatedAt           int64                      `json:"createdAt"`
+	UpdatedAt           int64                      `json:"updatedAt"`
+	Paths               []string                   `json:"paths"`
+	Files               []SenderFileState          `json:"files"`
+	ResumeSecret        *wire.ResumeSecretEnvelope `json:"resumeSecret,omitempty"`
+	Checksum            string                     `json:"checksum"`
 }
 
 // SenderEntry is one row of the management list: a valid record or an unreadable one.
@@ -407,6 +416,54 @@ func (s *SenderStore) verifyHook(rec SenderRecord) func(wire.Manifest) error {
 	}
 }
 
+// AttachResumeSecret derives the transfer-scoped resume credential from the resume root of
+// the ORIGINAL authenticated session and persists it into the record — strictly before the
+// manifest frame is transmitted (the driver composes this after the record exists). On a
+// restart the record already carries the credential from the original session and it is
+// NEVER re-derived or overwritten: a fresh session's master would derive a different secret
+// and break the original-session binding.
+func (s *SenderStore) AttachResumeSecret(manifest wire.Manifest, resumeRoot []byte) error {
+	validated, err := wire.ValidateManifest(manifest)
+	if err != nil {
+		return err
+	}
+	if validated.TransferID == "" {
+		return nil // no resumption: nothing to attach
+	}
+	rec, ok, err := s.Load(validated.TransferID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return wire.Errorf(wire.CodeStorage,
+			"sender: no record for %s; refusing to attach a resume credential", validated.TransferID)
+	}
+	// The binding is validated FIRST so a manifest that does not match the record fails
+	// closed even when a credential is already persisted (fail-closed ordering).
+	fp, err := wire.ManifestFingerprint(validated)
+	if err != nil {
+		return err
+	}
+	if rec.ManifestFingerprint != fp {
+		return wire.Errorf(wire.CodeStorage,
+			"sender: record %s does not match the authenticated manifest; refusing to attach a resume credential",
+			validated.TransferID)
+	}
+	if rec.ResumeSecret != nil {
+		return nil // original-session credential already persisted; never replace it
+	}
+	secret, err := wire.ResumeSecret(resumeRoot, wire.ResumeAuthVersion, validated.TransferID, fp)
+	if err != nil {
+		return err
+	}
+	env, err := wire.EncodeResumeSecretEnvelope(secret)
+	if err != nil {
+		return err
+	}
+	rec.ResumeSecret = env
+	return s.Save(rec)
+}
+
 // fileStatesFromManifest mirrors the validated manifest's file entries into the record.
 func fileStatesFromManifest(files []wire.FileEntry) []SenderFileState {
 	out := make([]SenderFileState, len(files))
@@ -420,9 +477,11 @@ func fileStatesFromManifest(files []wire.FileEntry) []SenderFileState {
 	return out
 }
 
-// ValidateSenderRecord enforces the schema-v1 invariants, including the self-check that the
+// ValidateSenderRecord enforces the schema-v2 invariants, including the self-check that the
 // stored manifest fingerprint is exactly what the stored transfer id + file set produce —
-// the same identity the receiver's durable journal binds. Any deviation fails closed.
+// the same identity the receiver's durable journal binds. Any deviation fails closed. The
+// optional resume secret must be the exact version-1 64-hex credential envelope (V13-PR07);
+// an arbitrary old opaque value is never reinterpreted as a valid key.
 func ValidateSenderRecord(rec SenderRecord) error {
 	switch {
 	case rec.SchemaVersion != senderSchemaVersion:
@@ -445,6 +504,13 @@ func ValidateSenderRecord(rec SenderRecord) error {
 	for _, p := range rec.Paths {
 		if p == "" || !filepath.IsAbs(p) || filepath.Clean(p) != p {
 			return wire.Errorf(wire.CodeStorage, "sender: source paths are not canonical")
+		}
+	}
+	// The optional resume credential (V13-PR07) must be the exact version-1 64-hex
+	// envelope; nothing else is a valid key.
+	if rec.ResumeSecret != nil {
+		if _, err := wire.DecodeResumeSecretEnvelope(rec.ResumeSecret); err != nil {
+			return err
 		}
 	}
 	var total int64
@@ -514,23 +580,62 @@ func encodeSenderRecord(rec SenderRecord) ([]byte, error) {
 }
 
 func decodeSenderRecord(data []byte) (SenderRecord, error) {
+	// Peek the schema version from the first JSON value only (trailing data is left for the
+	// strict per-version decoder to reject with its own fail-closed message).
+	var head struct {
+		SchemaVersion int `json:"schemaVersion"`
+	}
+	if err := json.NewDecoder(bytes.NewReader(data)).Decode(&head); err != nil {
+		return SenderRecord{}, wire.Errorf(wire.CodeStorage, "sender: malformed record: %v", err)
+	}
+	switch head.SchemaVersion {
+	case senderSchemaVersionLegacy:
+		return decodeSenderRecordV1(data)
+	case senderSchemaVersion:
+		return decodeSenderRecordV2(data)
+	default:
+		if head.SchemaVersion > senderSchemaVersion {
+			return SenderRecord{}, wire.Errorf(wire.CodeCompat,
+				"sender: record schema version %d is newer than this build supports (%d)",
+				head.SchemaVersion, senderSchemaVersion)
+		}
+		return SenderRecord{}, wire.Errorf(wire.CodeStorage, "sender: corrupt schema version %d", head.SchemaVersion)
+	}
+}
+
+// decodeSenderRecordV2 is the current-schema decode: strict parse, checksum verification
+// over the v2 body (which may carry the resume-secret envelope), then validation.
+func decodeSenderRecordV2(data []byte) (SenderRecord, error) {
 	var rec SenderRecord
 	if err := unmarshalStrictRecord(data, &rec); err != nil {
 		return SenderRecord{}, wire.Errorf(wire.CodeStorage, "sender: malformed record: %v", err)
 	}
-	if rec.SchemaVersion != senderSchemaVersion {
-		if rec.SchemaVersion > senderSchemaVersion {
-			return SenderRecord{}, wire.Errorf(wire.CodeCompat,
-				"sender: record schema version %d is newer than this build supports (%d)",
-				rec.SchemaVersion, senderSchemaVersion)
-		}
-		return SenderRecord{}, wire.Errorf(wire.CodeStorage, "sender: corrupt schema version %d", rec.SchemaVersion)
+	if err := verifyRecordChecksum(&rec); err != nil {
+		return SenderRecord{}, err
 	}
+	if err := ValidateSenderRecord(rec); err != nil {
+		return SenderRecord{}, err
+	}
+	return rec, nil
+}
+
+// decodeSenderRecordV1 accepts a pre-PR07 schema-v1 record and migrates it in memory to the
+// current schema: the v1 checksum is verified over the exact v1 body, then the record is
+// re-versioned as v2 with NO cross-session auth material (the original session master is
+// gone, so a resume secret is never fabricated for an old record). A re-save re-encodes it
+// as v2 with a fresh checksum.
+func decodeSenderRecordV1(data []byte) (SenderRecord, error) {
+	var rec SenderRecord
+	if err := unmarshalStrictRecord(data, &rec); err != nil {
+		return SenderRecord{}, wire.Errorf(wire.CodeStorage, "sender: malformed record: %v", err)
+	}
+	// Verify the checksum over the exact v1 body (schemaVersion 1, no resumeSecret).
 	stored := rec.Checksum
 	if !isLowerHex64(stored) {
 		return SenderRecord{}, wire.Errorf(wire.CodeStorage, "sender: malformed checksum")
 	}
 	rec.Checksum = ""
+	rec.SchemaVersion = senderSchemaVersionLegacy
 	body, err := marshalRecordJSON(rec)
 	if err != nil {
 		return SenderRecord{}, wire.Errorf(wire.CodeStorage, "sender: %v", err)
@@ -539,11 +644,35 @@ func decodeSenderRecord(data []byte) (SenderRecord, error) {
 	if hex.EncodeToString(sum[:]) != stored {
 		return SenderRecord{}, wire.Errorf(wire.CodeStorage, "sender: checksum mismatch (corrupt or tampered)")
 	}
-	rec.Checksum = stored
+	// Migrate: re-version to the current schema. The v1 record has no resume secret and one
+	// is never fabricated; the checksum is left empty until a re-save recomputes it.
+	rec.SchemaVersion = senderSchemaVersion
+	rec.ResumeSecret = nil
+	rec.Checksum = ""
 	if err := ValidateSenderRecord(rec); err != nil {
 		return SenderRecord{}, err
 	}
 	return rec, nil
+}
+
+// verifyRecordChecksum verifies a record's stored checksum over the exact canonical body of
+// every other field (the caller must already have strict-decoded `rec`).
+func verifyRecordChecksum(rec *SenderRecord) error {
+	stored := rec.Checksum
+	if !isLowerHex64(stored) {
+		return wire.Errorf(wire.CodeStorage, "sender: malformed checksum")
+	}
+	rec.Checksum = ""
+	body, err := marshalRecordJSON(rec)
+	if err != nil {
+		return wire.Errorf(wire.CodeStorage, "sender: %v", err)
+	}
+	sum := sha256.Sum256(body)
+	if hex.EncodeToString(sum[:]) != stored {
+		return wire.Errorf(wire.CodeStorage, "sender: checksum mismatch (corrupt or tampered)")
+	}
+	rec.Checksum = stored
+	return nil
 }
 
 // marshalRecordJSON is the canonical JSON encoder for sender records: no HTML escaping and

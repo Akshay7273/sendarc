@@ -65,6 +65,12 @@ type Spec struct {
 	// persist or verify its restart record before the id is advertised. An error aborts the
 	// send without transmitting the manifest.
 	OnSendManifest func(wire.Manifest) error
+	// OnResumeCredential, when set, is invoked (after OnSendManifest) with the validated
+	// manifest and the resume root derived from the ORIGINAL session master (V13-PR07). It
+	// persists the transfer-scoped resume credential into the sender record strictly before
+	// the manifest frame is transmitted; a restart's already-persisted credential is never
+	// replaced.
+	OnResumeCredential func(manifest wire.Manifest, resumeRoot []byte) error
 	// ICEServers overrides rtc.DefaultICEServers. An explicit empty slice uses host candidates
 	// only (loopback tests); nil takes the default STUN server.
 	ICEServers []webrtc.ICEServer
@@ -546,6 +552,16 @@ func (d *driver) send(ctx context.Context, conn dataConn, sv *supervisor.Supervi
 	if needsFolders && !containsString(res.RemoteCaps.Features, "folders") {
 		return nil, wire.Errorf(wire.CodeCompat, "transfer: receiver does not support files or folders as a set")
 	}
+	// V13-PR07: the transfer-scoped resume credential derives from the ORIGINAL session
+	// master, so it is available only after the handshake. The driver derives the narrow
+	// resume root here and hands it to the host seam, which persists the credential into the
+	// sender record strictly before the manifest frame is transmitted.
+	resumeRoot, err := wire.ResumeRoot(res.Master)
+	if err != nil {
+		return nil, wire.Errorf(wire.CodeAuth, "transfer: derive resume root: %v", err)
+	}
+	onManifest := d.spec.OnSendManifest
+	onResumeCredential := d.spec.OnResumeCredential
 	sender := wire.NewSender(wire.SenderOptions{
 		Files:            sources,
 		Send:             conn.Send,
@@ -559,9 +575,21 @@ func (d *driver) send(ctx context.Context, conn dataConn, sv *supervisor.Supervi
 		// can journal its verified progress and resume it (V13-PR02); the wire layer mints
 		// and validates it without any protocol change. A restart (V13-PR04) reuses the
 		// record's id, which the wire layer prefers over the mint.
-		TransferID:     d.spec.TransferID,
-		NewTransferID:  newTransferID,
-		OnManifest:     d.spec.OnSendManifest,
+		TransferID:    d.spec.TransferID,
+		NewTransferID: newTransferID,
+		OnManifest: func(manifest wire.Manifest) error {
+			// The record (stable id + source identity) is persisted first; only then is the
+			// resume credential attached — both strictly before the manifest frame goes out.
+			if onManifest != nil {
+				if err := onManifest(manifest); err != nil {
+					return err
+				}
+			}
+			if onResumeCredential != nil {
+				return onResumeCredential(manifest, resumeRoot)
+			}
+			return nil
+		},
 		OnProgress:     d.spec.OnProgress,
 		OnFileProgress: d.spec.OnFileProgress,
 		OnStateChange:  d.spec.OnStateChange,
@@ -632,6 +660,18 @@ func (d *driver) receive(ctx context.Context, conn dataConn, sv *supervisor.Supe
 			}
 			if resume != nil {
 				sharedResume = *resume
+			}
+			// V13-PR07: the transfer-scoped resume credential derives from the ORIGINAL
+			// session master, so it is available only after the handshake. The driver
+			// derives the narrow resume root here and persists the credential into the
+			// receive journal — after the manifest validated and bound to it, strictly
+			// before that credential can authorize a future cross-session resume.
+			resumeRoot, rootErr := wire.ResumeRoot(res.Master)
+			if rootErr != nil {
+				return wire.Errorf(wire.CodeAuth, "transfer: derive resume root: %v", rootErr)
+			}
+			if attachErr := destination.AttachResumeSecret(manifest, resumeRoot); attachErr != nil {
+				return attachErr
 			}
 			return nil
 		},

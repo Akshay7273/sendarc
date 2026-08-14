@@ -728,6 +728,54 @@ func (d *DurableDestination) commitBlocks(fileIdx, blocks int, digestState []byt
 	return d.hooks.writeJournal(d.store.JournalPath(d.transferID), *d.journal)
 }
 
+// AttachResumeSecret derives the transfer-scoped resume credential from the resume root of
+// the ORIGINAL authenticated session and persists it into the receive journal (V13-PR07).
+// It runs only after the manifest has been validated and bound to the journal, strictly
+// before that credential can authorize a future cross-session resume; on a journal that
+// already carries the original-session credential it is NEVER re-derived or replaced. A
+// non-resumable transfer (no journal) simply has nothing to attach.
+func (d *DurableDestination) AttachResumeSecret(manifest wire.Manifest, resumeRoot []byte) error {
+	validated, err := wire.ValidateManifest(manifest)
+	if err != nil {
+		return err
+	}
+	if validated.TransferID == "" {
+		return nil // non-resumable transfer: no journal, no credential
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.journal == nil || d.journal.TransferID != validated.TransferID {
+		return wire.Errorf(wire.CodeStorage,
+			"durable: no journal for %s; refusing to attach a resume credential", validated.TransferID)
+	}
+	// The binding is validated FIRST so a manifest that does not match the journal fails
+	// closed even when a credential is already persisted (fail-closed ordering).
+	fp, err := wire.ManifestFingerprint(validated)
+	if err != nil {
+		return err
+	}
+	if d.journal.ManifestFingerprint != fp {
+		return wire.Errorf(wire.CodeStorage,
+			"durable: journal %s does not match the authenticated manifest; refusing to attach a resume credential",
+			validated.TransferID)
+	}
+	if d.journal.ResumeSecret != nil {
+		return nil // original-session credential already persisted; never replace it
+	}
+	secret, err := wire.ResumeSecret(resumeRoot, wire.ResumeAuthVersion, validated.TransferID, fp)
+	if err != nil {
+		return err
+	}
+	env, err := wire.EncodeResumeSecretEnvelope(secret)
+	if err != nil {
+		return err
+	}
+	d.journal.ResumeSecret = &wire.JournalResumeSecret{Version: env.Version, Value: env.Value}
+	// Persist through the same atomic journal writer tests hook for crash injection, so
+	// the credential is durable before it can authorize anything.
+	return d.hooks.writeJournal(d.store.JournalPath(d.transferID), *d.journal)
+}
+
 // ResumeStateFor binds the loaded journal against the authenticated manifest and builds
 // the wire receiver's resume seed: per-file high-water marks plus a digest re-hashed from
 // the persisted prefix. Missing or truncated partials fail closed (never guessed, never

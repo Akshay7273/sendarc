@@ -1467,6 +1467,79 @@ func TestDurableNoTransferIDNonResumable(t *testing.T) {
 	})
 }
 
+func TestDurableAttachResumeSecretPersistsOnceAndNeverReplaces(t *testing.T) {
+	dir := t.TempDir()
+	dest, err := NewDurableDestination(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockSize := 1024
+	content := durableTestData(2 * blockSize)
+	manifest := durableTestManifest(t, durableTestID, blockSize, map[string][]byte{"f.bin": content})
+	if err := dest.Prepare(manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	resumeRoot := bytes.Repeat([]byte{0x42}, 32)
+	if err := dest.AttachResumeSecret(manifest, resumeRoot); err != nil {
+		t.Fatalf("AttachResumeSecret: %v", err)
+	}
+	j := journalOnDisk(t, dest)
+	if j.ResumeSecret == nil {
+		t.Fatal("resume secret not persisted into the journal")
+	}
+	secret, err := wire.DecodeResumeSecretEnvelope(&wire.ResumeSecretEnvelope{
+		Version: j.ResumeSecret.Version, Value: j.ResumeSecret.Value,
+	})
+	if err != nil {
+		t.Fatalf("decoded journal envelope: %v", err)
+	}
+	fp, err := wire.ManifestFingerprint(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := wire.ResumeSecret(resumeRoot, wire.ResumeAuthVersion, durableTestID, fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(secret, want) {
+		t.Fatal("journal secret differs from the derived transfer-scoped secret")
+	}
+
+	// A second attach (a restart with a DIFFERENT session root) never replaces the
+	// original-session credential.
+	if err := dest.AttachResumeSecret(manifest, bytes.Repeat([]byte{0x99}, 32)); err != nil {
+		t.Fatalf("re-attach: %v", err)
+	}
+	after := journalOnDisk(t, dest)
+	afterSecret, err := wire.DecodeResumeSecretEnvelope(&wire.ResumeSecretEnvelope{
+		Version: after.ResumeSecret.Version, Value: after.ResumeSecret.Value,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterSecret, secret) {
+		t.Fatal("re-attach replaced the original-session credential")
+	}
+
+	// A manifest that does not match the journal fails closed and persists nothing.
+	tampered := manifest
+	tampered.Files = make([]wire.FileEntry, len(manifest.Files))
+	copy(tampered.Files, manifest.Files)
+	tampered.Files[0].Name = "other.bin"
+	if err := dest.AttachResumeSecret(tampered, resumeRoot); err == nil || !strings.Contains(err.Error(), "does not match the authenticated manifest") {
+		t.Fatalf("mismatched attach = %v, want fingerprint failure", err)
+	}
+
+	// Discard removes the credential with its parent journal (lifecycle).
+	if err := dest.Store().Discard(durableTestID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := dest.Store().LoadJournal(durableTestID); err != nil || ok {
+		t.Fatalf("journal still present after discard: ok=%v err=%v", ok, err)
+	}
+}
+
 // TestDriverDurableReceiveEndToEnd runs the full driver pair through the in-memory relay:
 // the receiver journals mid-transfer and the store is clean afterwards (finals only).
 func TestDriverDurableReceiveEndToEnd(t *testing.T) {

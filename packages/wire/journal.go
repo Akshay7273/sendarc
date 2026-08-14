@@ -451,7 +451,13 @@ func validateEnvelope(e *JournalResumeSecret, label string) error {
 	if e.Version != 1 {
 		return Errorf(CodeCompat, "journal: unsupported %s version %d", label, e.Version)
 	}
-	return validateOpaqueValue(e.Value, label)
+	// V13-PR07: resume secret version 1 is the exact 256-bit transfer-scoped credential
+	// envelope — 64 lowercase hex characters (32 bytes). An arbitrary old opaque value is
+	// never reinterpreted as a valid key: any other length or encoding fails closed.
+	if !isLowerHex(e.Value, 64) {
+		return Errorf(CodeStorage, "journal: %s must be 64 lowercase hex characters", label)
+	}
+	return nil
 }
 
 func validateOpaqueValue(v, label string) error {

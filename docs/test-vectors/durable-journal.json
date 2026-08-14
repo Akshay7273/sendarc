@@ -1,5 +1,5 @@
 {
-  "description": "Canonical schema-v1 durable journal, produced by the Go implementation (packages/wire/journal.go). Both Go and TypeScript must reproduce `fingerprint` and the `journal` JSON byte-for-byte; a mismatch is a schema/codec violation.",
+  "description": "Canonical schema-v1 durable journal, produced by the Go implementation (packages/wire/journal.go). Both Go and TypeScript must reproduce `fingerprint`, the `journal` JSON, and the `journalWithSecret` JSON byte-for-byte; a mismatch is a schema/codec violation. `resumeSecretCases` pins the version-1 credential format (exactly 64 lowercase hex characters) introduced by V13-PR07.",
   "transferId": "0123456789abcdef0123456789abcdef",
   "manifest": "{\"type\":2,\"transferId\":\"0123456789abcdef0123456789abcdef\",\"files\":[{\"idx\":0,\"name\":\"a.txt\",\"size\":2048,\"mime\":\"text/plain\",\"lastModified\":1700000000,\"blockSize\":1024,\"blocks\":2,\"fileDigest\":\"abababababababababababababababababababababababababababababababab\"},{\"idx\":1,\"name\":\"b.bin\",\"size\":1024,\"mime\":\"application/octet-stream\",\"lastModified\":1700000001,\"blockSize\":1024,\"blocks\":1,\"fileDigest\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\"}],\"totalSize\":3072}",
   "sourceIdentity": {
@@ -26,5 +26,64 @@
     null
   ],
   "fingerprint": "c2b9e95e36d1ed0b807ae80c6f0bd85f1e100a3675e253e406bff185576fb5fa",
-  "journal": "{\"schemaVersion\":1,\"transferId\":\"0123456789abcdef0123456789abcdef\",\"manifestFingerprint\":\"c2b9e95e36d1ed0b807ae80c6f0bd85f1e100a3675e253e406bff185576fb5fa\",\"protocolVersion\":\"sendbeam/1\",\"resumeVersion\":1,\"blockSize\":1024,\"createdAt\":1723500000000,\"updatedAt\":1723500060000,\"sourceIdentity\":{\"version\":1,\"value\":\"736f757263652d73616d706c65\"},\"destinationIdentity\":{\"version\":1,\"value\":\"646573742d73616d706c65\"},\"files\":[{\"idx\":0,\"name\":\"a.txt\",\"size\":2048,\"mime\":\"text/plain\",\"lastModified\":1700000000,\"blockSize\":1024,\"blocks\":2,\"fileDigest\":\"abababababababababababababababababababababababababababababababab\",\"committedBlocks\":1,\"digestCheckpoint\":{\"format\":\"sha256-go-v1\",\"committedBlocks\":1,\"committedBytes\":1024,\"state\":\"7368610393fa7a18cb52031408d29f5110e42be6fc4a07de4d0e65025156c97d72e04acf000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000400\"}},{\"idx\":1,\"name\":\"b.bin\",\"size\":1024,\"mime\":\"application/octet-stream\",\"lastModified\":1700000001,\"blockSize\":1024,\"blocks\":1,\"fileDigest\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"committedBlocks\":0}],\"checksum\":\"7cbc989f2b238fc585bbe11e3de8f266a6ac73bcd4dca7c85e5d1a64ecb4240d\"}"
+  "journal": "{\"schemaVersion\":1,\"transferId\":\"0123456789abcdef0123456789abcdef\",\"manifestFingerprint\":\"c2b9e95e36d1ed0b807ae80c6f0bd85f1e100a3675e253e406bff185576fb5fa\",\"protocolVersion\":\"sendbeam/1\",\"resumeVersion\":1,\"blockSize\":1024,\"createdAt\":1723500000000,\"updatedAt\":1723500060000,\"sourceIdentity\":{\"version\":1,\"value\":\"736f757263652d73616d706c65\"},\"destinationIdentity\":{\"version\":1,\"value\":\"646573742d73616d706c65\"},\"files\":[{\"idx\":0,\"name\":\"a.txt\",\"size\":2048,\"mime\":\"text/plain\",\"lastModified\":1700000000,\"blockSize\":1024,\"blocks\":2,\"fileDigest\":\"abababababababababababababababababababababababababababababababab\",\"committedBlocks\":1,\"digestCheckpoint\":{\"format\":\"sha256-go-v1\",\"committedBlocks\":1,\"committedBytes\":1024,\"state\":\"7368610393fa7a18cb52031408d29f5110e42be6fc4a07de4d0e65025156c97d72e04acf000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000400\"}},{\"idx\":1,\"name\":\"b.bin\",\"size\":1024,\"mime\":\"application/octet-stream\",\"lastModified\":1700000001,\"blockSize\":1024,\"blocks\":1,\"fileDigest\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"committedBlocks\":0}],\"checksum\":\"7cbc989f2b238fc585bbe11e3de8f266a6ac73bcd4dca7c85e5d1a64ecb4240d\"}",
+  "journalWithSecret": "{\"schemaVersion\":1,\"transferId\":\"0123456789abcdef0123456789abcdef\",\"manifestFingerprint\":\"c2b9e95e36d1ed0b807ae80c6f0bd85f1e100a3675e253e406bff185576fb5fa\",\"protocolVersion\":\"sendbeam/1\",\"resumeVersion\":1,\"blockSize\":1024,\"createdAt\":1723500000000,\"updatedAt\":1723500060000,\"sourceIdentity\":{\"version\":1,\"value\":\"736f757263652d73616d706c65\"},\"destinationIdentity\":{\"version\":1,\"value\":\"646573742d73616d706c65\"},\"files\":[{\"idx\":0,\"name\":\"a.txt\",\"size\":2048,\"mime\":\"text/plain\",\"lastModified\":1700000000,\"blockSize\":1024,\"blocks\":2,\"fileDigest\":\"abababababababababababababababababababababababababababababababab\",\"committedBlocks\":1,\"digestCheckpoint\":{\"format\":\"sha256-go-v1\",\"committedBlocks\":1,\"committedBytes\":1024,\"state\":\"7368610393fa7a18cb52031408d29f5110e42be6fc4a07de4d0e65025156c97d72e04acf000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000400\"}},{\"idx\":1,\"name\":\"b.bin\",\"size\":1024,\"mime\":\"application/octet-stream\",\"lastModified\":1700000001,\"blockSize\":1024,\"blocks\":1,\"fileDigest\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"committedBlocks\":0}],\"resumeSecret\":{\"version\":1,\"value\":\"f1f2f3f4f5f6f7f8f9fafbfcfdfeff00f1f2f3f4f5f6f7f8f9fafbfcfdfeff00\"},\"checksum\":\"e0e03d9f39ee4ff8fa776169c8055dbd15c375605e9ab37d934b50368c3b0016\"}",
+  "resumeSecretCases": [
+    {
+      "name": "valid v1 secret",
+      "envelope": {
+        "version": 1,
+        "value": "f1f2f3f4f5f6f7f8f9fafbfcfdfeff00f1f2f3f4f5f6f7f8f9fafbfcfdfeff00"
+      },
+      "valid": true
+    },
+    {
+      "name": "wrong version",
+      "envelope": {
+        "version": 2,
+        "value": "f1f2f3f4f5f6f7f8f9fafbfcfdfeff00f1f2f3f4f5f6f7f8f9fafbfcfdfeff00"
+      },
+      "valid": false
+    },
+    {
+      "name": "wrong length (short)",
+      "envelope": {
+        "version": 1,
+        "value": "00"
+      },
+      "valid": false
+    },
+    {
+      "name": "wrong length (long)",
+      "envelope": {
+        "version": 1,
+        "value": "ababababababababababababababababababababababababababababababababab"
+      },
+      "valid": false
+    },
+    {
+      "name": "uppercase hex",
+      "envelope": {
+        "version": 1,
+        "value": "F1F2F3F4F5F6F7F8F9FAFBFCFDFEFF00F1F2F3F4F5F6F7F8F9FAFBFCFDFEFF00"
+      },
+      "valid": false
+    },
+    {
+      "name": "invalid encoding",
+      "envelope": {
+        "version": 1,
+        "value": "not hex or b64!!"
+      },
+      "valid": false
+    },
+    {
+      "name": "empty value",
+      "envelope": {
+        "version": 1,
+        "value": ""
+      },
+      "valid": false
+    }
+  ]
 }

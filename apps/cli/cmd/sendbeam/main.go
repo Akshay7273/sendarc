@@ -162,6 +162,13 @@ func runSend(args []string) int {
 		Sources:        sources,
 		TransferID:     transferID,
 		OnSendManifest: onSendManifest,
+		// V13-PR07: after the record (or its verification) persisted above, attach the
+		// transfer-scoped resume credential derived from the ORIGINAL session master —
+		// strictly before the manifest frame is transmitted. A restart's already-persisted
+		// credential is never replaced.
+		OnResumeCredential: func(manifest wire.Manifest, resumeRoot []byte) error {
+			return senderStore.AttachResumeSecret(manifest, resumeRoot)
+		},
 		ForceRelay:     *relayOnly,
 		ICEServers:     ice,
 		OnTransport:    transportPrinter,

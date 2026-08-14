@@ -1,0 +1,20 @@
+{
+  "description": "Cross-session authenticated resume (V13-PR07) derivation chain, produced by the Go implementation (packages/wire/resumeauth.go). Both Go and TypeScript must reproduce every value byte-for-byte from the fixed inputs; a mismatch is a crypto/codec violation. See docs/adr/0005-cross-session-resume.md.",
+  "version": 1,
+  "master": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "transferId": "0123456789abcdef0123456789abcdef",
+  "manifestFingerprint": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "resumeRoot": "419fcdc3cd6bf2088ae1ee2fcbf6097a41fe964e4714a4d50fdf8b6275d1d214",
+  "resumeSecret": "b4588a54a6ea54c8f869a8da4cf72db6a2bf1f36516d7f8960aed7f6b3b6a518",
+  "offererNonce": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+  "joinerNonce": "303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f",
+  "transcript": "73656e646265616d2f3120726573756d652d61757468000000010123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f",
+  "joinerProof": "c6e62f9631da6b0b8276074665536a4013f497db6488d693052585329cad9e09",
+  "offererProof": "242741b571d18f94f68013787b2b0c023023ddff7df27280309096c95a5465b4",
+  "readyProof": "fdae0f77716c28fe0d0f3f26e871f2bdd20fe36c19dce5e77aeef8519f104bc4",
+  "resumeMaster": "27dce6f06ca0790446fc969505ddf7bce2f3ba61ee898e0afc654567b0d4cbe0",
+  "o2jKey": "41012bf6af20b57df54d6941ea1aaaf3763dc9dd538d15f51aec14e3e7a16301",
+  "o2jSalt": "87246a20",
+  "j2oKey": "6538ccd58409138792becf76e1b9cfb57ad23c16156a2ede742d8ff3eaa300b2",
+  "j2oSalt": "9dd4e2f8"
+}

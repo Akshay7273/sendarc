@@ -195,7 +195,12 @@ function validateIdentity(id: JournalIdentity, label: string): void {
 
 function validateEnvelope(e: JournalResumeSecret, label: string): void {
   if (e.version !== 1) throw new Error(`journal: unsupported ${label} version ${e.version}`);
-  validateOpaqueValue(e.value, label);
+  // V13-PR07: resume secret version 1 is the exact 256-bit transfer-scoped credential
+  // envelope — 64 lowercase hex characters (32 bytes). An arbitrary old opaque value is
+  // never reinterpreted as a valid key: any other length or encoding fails closed.
+  if (!isLowerHex(e.value, 64)) {
+    throw new Error(`journal: ${label} must be 64 lowercase hex characters`);
+  }
 }
 
 /**

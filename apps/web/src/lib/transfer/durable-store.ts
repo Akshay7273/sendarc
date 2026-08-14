@@ -144,6 +144,8 @@ export interface DurableJournalStore {
     ownerId: string,
     digestCheckpoint?: JournalDigestCheckpoint,
   ): Promise<DurableJournal>;
+  /** Re-encode and persist a journal as-is (V13-PR07: the resume-secret envelope attach). */
+  saveJournal(journal: DurableJournal): Promise<DurableJournal>;
   /** Atomic test-and-set acquire with TTL; stale records are taken over. */
   acquireLease(transferId: string, ownerId: string, nowMs: number): Promise<LeaseOutcome>;
   renewLease(transferId: string, ownerId: string, nowMs: number): Promise<void>;
@@ -315,6 +317,11 @@ class IndexedDbDurableStore implements DurableJournalStore {
       tx.onabort = () => reject(new Error('durable journal commit aborted'));
     });
     return next;
+  }
+
+  async saveJournal(journal: DurableJournal): Promise<DurableJournal> {
+    await this.putJournal(journal);
+    return journal;
   }
 
   async acquireLease(transferId: string, ownerId: string, nowMs: number): Promise<LeaseOutcome> {

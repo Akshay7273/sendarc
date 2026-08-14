@@ -42,7 +42,7 @@ function testManifest(overrides: Partial<Manifest> = {}): Manifest {
 }
 
 describe('sender-record', () => {
-  it('builds a schema-v1 record from a manifest with a self-verifying checksum', async () => {
+  it('builds a schema-v2 record from a manifest with a self-verifying checksum', async () => {
     const manifest = testManifest();
     const record = await newSenderRecord(manifest, { kind: 'reselection' }, 1_234);
     expect(record.schemaVersion).toBe(SENDER_SCHEMA_VERSION);
@@ -99,7 +99,7 @@ describe('sender-record', () => {
       (r) => void ((r as unknown as Record<string, unknown>).extra = 'x'),
       'unknown field',
     );
-    await tamper((r) => (r.schemaVersion = 2 as 1), 'future schema version');
+    await tamper((r) => (r.schemaVersion = 3 as 2), 'future schema version');
     await tamper((r) => (r.transferId = 'zz'.repeat(16)), 'non-hex transfer id');
     await tamper((r) => (r.transferId = 'a'.repeat(31)), 'short transfer id');
     await tamper((r) => (r.manifestFingerprint = 'a'.repeat(63)), 'short fingerprint');
@@ -183,5 +183,87 @@ describe('sender-record', () => {
     await expect(refreshSenderRecord(prior, other, undefined, 2_000)).rejects.toThrow(
       /belongs to transfer/,
     );
+  });
+
+  it('accepts a valid v1 resume-secret envelope and rejects a malformed one', async () => {
+    const store = memorySenderRecordStore();
+    const manifest = testManifest();
+    const record = await newSenderRecord(manifest, { kind: 'reselection' }, 1_234);
+    record.resumeSecret = { version: 1, value: 'aa'.repeat(32) };
+    record.checksum = await senderRecordChecksum(record);
+    await store.put(record);
+    await expect(store.load(manifest.transferId!)).resolves.toEqual({ kind: 'ok', record });
+
+    const bad = structuredClone(record) as SenderRecord;
+    bad.resumeSecret = { version: 1, value: 'zz'.repeat(32) };
+    bad.checksum = await senderRecordChecksum(bad);
+    await expect(validateSenderRecord(bad)).rejects.toThrow(/invalid resumeSecret/);
+
+    const wrongLen = structuredClone(record) as SenderRecord;
+    wrongLen.resumeSecret = { version: 1, value: 'ab'.repeat(31) };
+    wrongLen.checksum = await senderRecordChecksum(wrongLen);
+    await expect(validateSenderRecord(wrongLen)).rejects.toThrow(/invalid resumeSecret/);
+
+    const wrongVersion = structuredClone(record) as SenderRecord;
+    wrongVersion.resumeSecret = { version: 2, value: 'aa'.repeat(32) };
+    wrongVersion.checksum = await senderRecordChecksum(wrongVersion);
+    await expect(validateSenderRecord(wrongVersion)).rejects.toThrow(/invalid resumeSecret/);
+
+    // A tampered envelope never survives: the checksum covers it.
+    const tampered = structuredClone(record) as SenderRecord;
+    tampered.resumeSecret = { version: 1, value: 'bb'.repeat(32) };
+    await expect(validateSenderRecord(tampered)).rejects.toThrow(/checksum mismatch/);
+  });
+
+  it('migrates a pre-PR07 schema-v1 record with no resume secret and never fabricates one', async () => {
+    const store = memorySenderRecordStore();
+    const manifest = testManifest();
+    const v2 = await newSenderRecord(manifest, { kind: 'reselection' }, 1_234);
+    // Rewrite the record exactly as a pre-PR07 v1 build would have stored it: schemaVersion 1
+    // with the checksum over the v1 core (the v2 core without the resumeSecret field).
+    const legacy = structuredClone(v2) as unknown as Record<string, unknown>;
+    delete (legacy as { resumeSecret?: unknown }).resumeSecret;
+    legacy.schemaVersion = 1;
+    legacy.checksum = '';
+    const legacyCore = JSON.stringify({
+      schemaVersion: 1,
+      transferId: legacy.transferId,
+      manifestFingerprint: legacy.manifestFingerprint,
+      protocolVersion: legacy.protocolVersion,
+      createdAt: legacy.createdAt,
+      updatedAt: legacy.updatedAt,
+      files: (legacy.files as Array<Record<string, unknown>>).map((f) => ({
+        name: f.name,
+        size: f.size,
+        mime: f.mime,
+        lastModified: f.lastModified,
+      })),
+      reattachment: { kind: 'reselection' },
+    });
+    const { sha256, bytesToHex, utf8 } = await import('@sendbeam/protocol');
+    legacy.checksum = bytesToHex(await sha256(utf8(legacyCore)));
+    // The memory store keeps the record itself (structured clone), keyed by transfer id.
+    await (store as unknown as { entries: Map<string, unknown> }).entries.set(
+      manifest.transferId!,
+      legacy,
+    );
+    const loaded = await store.load(manifest.transferId!);
+    expect(loaded.kind).toBe('ok');
+    if (loaded.kind !== 'ok') return;
+    expect(loaded.record.schemaVersion).toBe(SENDER_SCHEMA_VERSION);
+    expect(loaded.record.resumeSecret).toBeUndefined();
+    expect(loaded.record.checksum).toBe(await senderRecordChecksum(loaded.record));
+
+    // A tampered v1 body (checksum over the true body) fails closed as corrupt.
+    const tamperedLegacy = structuredClone(legacy);
+    tamperedLegacy.files = [
+      { ...(tamperedLegacy.files as Array<Record<string, unknown>>)[0]!, size: 99 },
+    ];
+    await (store as unknown as { entries: Map<string, unknown> }).entries.set(
+      'ff'.repeat(16),
+      tamperedLegacy,
+    );
+    const tamperedLoad = await store.load('ff'.repeat(16));
+    expect(tamperedLoad.kind).toBe('corrupt');
   });
 });

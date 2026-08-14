@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,7 +135,7 @@ func TestSenderRecordFailsClosed(t *testing.T) {
 		{
 			"future schema version",
 			func(b []byte) []byte {
-				return []byte(strings.ReplaceAll(string(b), `"schemaVersion":1`, `"schemaVersion":2`))
+				return []byte(strings.ReplaceAll(string(b), `"schemaVersion":2`, `"schemaVersion":3`))
 			},
 			"newer",
 		},
@@ -373,6 +374,161 @@ func TestPrepareSenderFreshRestartChangedAndVerify(t *testing.T) {
 	}
 	if _, ok, err := store.Lookup(PathKey(args)); err != nil || ok {
 		t.Fatalf("record still present after discard: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestAttachResumeSecretPersistsOnceAndNeverReplaces(t *testing.T) {
+	store := testSenderStore(t)
+	rec := SenderRecord{
+		SchemaVersion:   senderSchemaVersion,
+		TransferID:      strings.Repeat("33", 16),
+		ProtocolVersion: wire.ProtocolVersion,
+		CreatedAt:       1,
+		UpdatedAt:       2,
+		Paths:           []string{"/tmp/b"},
+		Files:           fileStatesFromManifest(testManifestFiles(t)),
+	}
+	fp, err := wire.ManifestFingerprint(wire.Manifest{
+		TransferID: rec.TransferID, Files: testManifestFiles(t), TotalSize: 3072,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.ManifestFingerprint = fp
+	if err := store.Save(rec); err != nil {
+		t.Fatal(err)
+	}
+
+	resumeRoot := bytes.Repeat([]byte{0x42}, 32)
+	manifest := wire.Manifest{
+		TransferID: rec.TransferID, Files: testManifestFiles(t), TotalSize: 3072,
+	}
+
+	// Attach: the secret is derived from the resume root + transfer id + fingerprint and
+	// persisted as the exact v1 envelope; nothing else appears in the record.
+	if err := store.AttachResumeSecret(manifest, resumeRoot); err != nil {
+		t.Fatalf("AttachResumeSecret: %v", err)
+	}
+	stored, ok, err := store.Load(rec.TransferID)
+	if err != nil || !ok {
+		t.Fatalf("Load after attach: ok=%v err=%v", ok, err)
+	}
+	if stored.ResumeSecret == nil {
+		t.Fatal("resume secret not persisted")
+	}
+	secret, err := wire.DecodeResumeSecretEnvelope(stored.ResumeSecret)
+	if err != nil {
+		t.Fatalf("decoded envelope: %v", err)
+	}
+	wantSecret, err := wire.ResumeSecret(resumeRoot, wire.ResumeAuthVersion, rec.TransferID, fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(secret, wantSecret) {
+		t.Fatalf("stored secret differs from the derived transfer-scoped secret")
+	}
+
+	// A second attach (a restart with a DIFFERENT session root) never replaces the
+	// original-session credential.
+	otherRoot := bytes.Repeat([]byte{0x99}, 32)
+	if err := store.AttachResumeSecret(manifest, otherRoot); err != nil {
+		t.Fatalf("re-attach: %v", err)
+	}
+	after, _, err := store.Load(rec.TransferID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterSecret, err := wire.DecodeResumeSecretEnvelope(after.ResumeSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterSecret, secret) {
+		t.Fatal("re-attach replaced the original-session credential")
+	}
+
+	// Attaching without a record fails closed.
+	missingManifest := wire.Manifest{
+		TransferID: strings.Repeat("44", 16), Files: testManifestFiles(t), TotalSize: 3072,
+	}
+	if err := store.AttachResumeSecret(missingManifest, resumeRoot); err == nil {
+		t.Fatal("attach to a missing record succeeded")
+	}
+
+	// Discard removes the credential with its parent record (lifecycle).
+	if err := store.Discard(rec.TransferID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.Load(rec.TransferID); err != nil || ok {
+		t.Fatalf("record still present after discard: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestSenderRecordV1MigrationCarriesNoResumeSecret(t *testing.T) {
+	// Build a schema-v2 record, then rewrite it exactly as a pre-PR07 v1 build would have
+	// stored it: schemaVersion 1, no resumeSecret, checksum over the v1 body.
+	v2 := SenderRecord{
+		SchemaVersion:   senderSchemaVersion,
+		TransferID:      strings.Repeat("55", 16),
+		ProtocolVersion: wire.ProtocolVersion,
+		CreatedAt:       1,
+		UpdatedAt:       2,
+		Paths:           []string{"/tmp/c"},
+		Files:           fileStatesFromManifest(testManifestFiles(t)),
+	}
+	fp, err := wire.ManifestFingerprint(wire.Manifest{
+		TransferID: v2.TransferID, Files: testManifestFiles(t), TotalSize: 3072,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2.ManifestFingerprint = fp
+	body, err := encodeSenderRecord(v2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v1 SenderRecord
+	if err := json.Unmarshal(body, &v1); err != nil {
+		t.Fatal(err)
+	}
+	if v1.SchemaVersion != senderSchemaVersion {
+		t.Fatalf("fixture decode: schemaVersion=%d", v1.SchemaVersion)
+	}
+	v1.SchemaVersion = senderSchemaVersionLegacy
+	v1.ResumeSecret = nil
+	storedChecksum := v1.Checksum
+	v1.Checksum = ""
+	v1body, err := marshalRecordJSON(v1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(v1body)
+	v1.Checksum = storedChecksum // irrelevant; the checksum is recomputed below
+	v1.Checksum = hex.EncodeToString(sum[:])
+	v1data, err := marshalRecordJSON(v1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec, err := decodeSenderRecord(v1data)
+	if err != nil {
+		t.Fatalf("v1 decode: %v", err)
+	}
+	if rec.SchemaVersion != senderSchemaVersion {
+		t.Fatalf("migrated schemaVersion=%d, want %d", rec.SchemaVersion, senderSchemaVersion)
+	}
+	if rec.ResumeSecret != nil {
+		t.Fatal("migrated record fabricated a resume secret")
+	}
+
+	// A tampered v1 body (checksum over the true body) fails closed.
+	tampered := v1
+	tampered.Files[0].Size = 99
+	tamperedData, err := marshalRecordJSON(tampered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeSenderRecord(tamperedData); err == nil || !strings.Contains(err.Error(), "checksum") {
+		t.Fatalf("tampered v1 = %v, want checksum failure", err)
 	}
 }
 

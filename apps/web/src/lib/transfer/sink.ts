@@ -29,6 +29,12 @@ export interface BrowserDestination extends Destination {
   durableMeta?(): DurableMeta | undefined;
   /** Resume seed a reloaded receiver applies after the authenticated manifest arrives. */
   resumeStateFor?(manifest: Manifest): import('@sendbeam/protocol').ReceiverResumeState | undefined;
+  /**
+   * Persist the transfer-scoped resume credential into the receive journal (V13-PR07),
+   * after the authenticated manifest validated and bound to it. `resumeRoot` is the
+   * transient root derived by the main thread — never the session master.
+   */
+  attachResumeSecret?(manifest: Manifest, resumeRoot: Uint8Array): Promise<void>;
 }
 
 /**
@@ -71,6 +77,13 @@ export function createBrowserDestination(
     abort: (reason) => get().abort(reason),
     result: () => inner?.result(),
     durableMeta: () => inner?.durableMeta?.(),
+    attachResumeSecret: (manifest, resumeRoot) => {
+      const target = get();
+      if (!target.attachResumeSecret) {
+        throw new TransferError('sink_error', 'destination does not support resume credentials');
+      }
+      return target.attachResumeSecret(manifest, resumeRoot);
+    },
   };
 }
 

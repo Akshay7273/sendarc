@@ -19,20 +19,27 @@
 
 import {
   bytesToHex,
+  decodeResumeSecretEnvelope,
   manifestFingerprint,
   PROTOCOL_VERSION,
   sha256,
   TransferError,
   utf8,
   type Manifest,
+  type ResumeSecretEnvelope,
 } from '@sendbeam/protocol';
 
 /** IndexedDB database and store names for sender metadata. */
 export const SENDER_DB = 'sendbeam-sender';
 export const SENDER_RECORDS_STORE = 'records';
 
-/** The per-transfer metadata schema this build persists and accepts. */
-export const SENDER_SCHEMA_VERSION = 1 as const;
+/** The per-transfer metadata schema this build persists. Schema 2 adds the optional
+ * transfer-scoped resume credential (V13-PR07); schema 1 records load and migrate with no
+ * cross-session auth material. */
+export const SENDER_SCHEMA_VERSION = 2 as const;
+
+/** The pre-PR07 schema still accepted on load, migrated to v2 with no resume secret. */
+export const SENDER_SCHEMA_VERSION_LEGACY = 1 as const;
 
 /** One file of the interrupted send, mirroring the CLI's SenderFileState fields. */
 export interface SenderFileState {
@@ -56,7 +63,7 @@ export type SenderReattachment =
  * JSON core (everything except `checksum` and the opaque `reattachment.handle` object).
  */
 export interface SenderRecord {
-  schemaVersion: 1;
+  schemaVersion: 2;
   transferId: string;
   /** Canonical SHA-256 (hex) of the validated manifest — the identity to re-verify. */
   manifestFingerprint: string;
@@ -66,6 +73,13 @@ export interface SenderRecord {
   updatedAt: number;
   files: SenderFileState[];
   reattachment: SenderReattachment;
+  /**
+   * The opaque transfer-scoped resume credential (V13-PR07), derived from the ORIGINAL
+   * authenticated session and persisted strictly before the manifest frame is transmitted.
+   * Absent on pre-PR07 records: nothing is ever fabricated for them. Never printed in
+   * listings, logs, errors, or diagnostics.
+   */
+  resumeSecret?: ResumeSecretEnvelope;
   checksum: string;
 }
 
@@ -110,6 +124,9 @@ function canonicalCore(record: SenderRecord): string {
       record.reattachment.kind === 'handle'
         ? { kind: 'handle', handleKind: record.reattachment.handleKind }
         : { kind: 'reselection' },
+    // The resume-secret envelope is part of the checksummed core (V13-PR07): the stored
+    // credential can never be altered without the checksum failing.
+    ...(record.resumeSecret !== undefined ? { resumeSecret: record.resumeSecret } : {}),
   };
   return JSON.stringify(core);
 }
@@ -150,6 +167,18 @@ export async function validateSenderRecord(record: unknown): Promise<SenderRecor
       'updatedAt',
       'files',
       'reattachment',
+      'checksum',
+    ]) &&
+    !exactKeys(record, [
+      'schemaVersion',
+      'transferId',
+      'manifestFingerprint',
+      'protocolVersion',
+      'createdAt',
+      'updatedAt',
+      'files',
+      'reattachment',
+      'resumeSecret',
       'checksum',
     ])
   ) {
@@ -210,6 +239,17 @@ export async function validateSenderRecord(record: unknown): Promise<SenderRecor
     }
   } else {
     throw new Error('sender record: unknown reattachment kind');
+  }
+  // The optional resume credential (V13-PR07) must be the exact version-1 64-hex envelope;
+  // nothing else is a valid key, and an arbitrary old opaque value is never reinterpreted.
+  if (r.resumeSecret !== undefined) {
+    try {
+      decodeResumeSecretEnvelope(r.resumeSecret);
+    } catch (e) {
+      throw new Error(
+        `sender record: invalid resumeSecret: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
   }
   if (!isLowerHex(r.checksum, 64)) {
     throw new Error('sender record: checksum must be 64 lowercase hex characters');
@@ -438,7 +478,13 @@ async function decodeStored(value: unknown): Promise<SenderRecordListEntry> {
     return { kind: 'corrupt', transferId: '', error: 'sender record has no transfer id' };
   }
   try {
-    const record = await validateSenderRecord(stored.record);
+    // A pre-PR07 schema-v1 record is migrated in memory (checksum verified over the exact
+    // v1 body, then re-versioned as v2 with NO cross-session auth material — the original
+    // session master is gone, so a resume secret is never fabricated for an old record).
+    const record =
+      (stored.record as { schemaVersion?: unknown }).schemaVersion === SENDER_SCHEMA_VERSION_LEGACY
+        ? await migrateSenderRecordV1(stored.record)
+        : await validateSenderRecord(stored.record);
     if (record.transferId !== stored.transferId) {
       throw new Error('sender record key does not match its transfer id');
     }
@@ -450,6 +496,56 @@ async function decodeStored(value: unknown): Promise<SenderRecordListEntry> {
       error: e instanceof Error ? e.message : String(e),
     };
   }
+}
+
+/**
+ * Verify a pre-PR07 schema-v1 record over its exact v1 body and migrate it to the current
+ * schema: the v1 checksum is verified, then the record is re-versioned as v2 with no resume
+ * secret and a recomputed checksum. Throws on any deviation.
+ */
+async function migrateSenderRecordV1(record: unknown): Promise<SenderRecord> {
+  const v1 = record as Record<string, unknown>;
+  const v1Keys = [
+    'schemaVersion',
+    'transferId',
+    'manifestFingerprint',
+    'protocolVersion',
+    'createdAt',
+    'updatedAt',
+    'files',
+    'reattachment',
+    'checksum',
+  ];
+  if (!exactKeys(v1, v1Keys)) {
+    throw new Error('sender record: unexpected or missing fields');
+  }
+  if (v1.schemaVersion !== SENDER_SCHEMA_VERSION_LEGACY) {
+    throw new Error(`sender record: unsupported schema version ${String(v1.schemaVersion)}`);
+  }
+  const storedChecksum = v1.checksum;
+  if (typeof storedChecksum !== 'string' || !isLowerHex(storedChecksum, 64)) {
+    throw new Error('sender record: malformed checksum');
+  }
+  // Verify the checksum over the exact v1 body (schemaVersion 1, no resumeSecret): the
+  // v1 core shape is the v2 core without the resumeSecret field.
+  const legacy = {
+    ...v1,
+    schemaVersion: SENDER_SCHEMA_VERSION_LEGACY,
+    checksum: '',
+  } as unknown as SenderRecord;
+  const legacySum = bytesToHex(await sha256(utf8(canonicalCore(legacy))));
+  if (legacySum !== storedChecksum) {
+    throw new Error('sender record: checksum mismatch (corrupt or tampered)');
+  }
+  // Migrate: re-version to the current schema. The v1 record has no resume secret and one
+  // is never fabricated; the checksum is recomputed over the migrated core.
+  const migrated = {
+    ...v1,
+    schemaVersion: SENDER_SCHEMA_VERSION,
+    checksum: '',
+  } as unknown as SenderRecord;
+  migrated.checksum = await senderRecordChecksum(migrated);
+  return migrated;
 }
 
 // ---------------------------------------------------------------------------

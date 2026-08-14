@@ -107,6 +107,11 @@ class MemoryStore implements DurableJournalStore {
     return next;
   }
 
+  async saveJournal(journal: DurableJournal): Promise<DurableJournal> {
+    this.journals.set(journal.transferId, await encodeJournal(journal));
+    return journal;
+  }
+
   async acquireLease(transferId: string, ownerId: string, nowMs: number): Promise<LeaseOutcome> {
     const lease = this.leases.get(transferId);
     const expiresAt = nowMs + DURABLE_LEASE_TTL_MS;
@@ -1212,6 +1217,44 @@ describe('DurableDestination', () => {
     for (const secret of ['invite', 'master', 'sendDir', 'recvDir', 'counter', 'o2j', 'j2o']) {
       expect(text.toLowerCase()).not.toContain(secret);
     }
+    await d.abort();
+  });
+
+  it('attaches the transfer-scoped resume credential once the manifest is bound to the journal (V13-PR07)', async () => {
+    const h = await harness();
+    const d = h.makeDestination();
+    const m = manifest([['a.bin', 8]]);
+    await d.prepare(m);
+    const resumeRoot = new Uint8Array(32).fill(7);
+    await d.attachResumeSecret(m, resumeRoot);
+    const stored = h.store.journals.get(TRANSFER_ID)!;
+    const obj = JSON.parse(new TextDecoder().decode(stored)) as { resumeSecret?: unknown };
+    expect(obj.resumeSecret).toBeDefined();
+    const envelope = obj.resumeSecret as { version: number; value: string };
+    expect(envelope.version).toBe(1);
+    expect(envelope.value).toMatch(/^[0-9a-f]{64}$/);
+    // Re-attaching after the original-session credential is persisted never replaces it.
+    const before = JSON.parse(new TextDecoder().decode(h.store.journals.get(TRANSFER_ID)!));
+    await d.attachResumeSecret(m, new Uint8Array(32).fill(9));
+    const after = JSON.parse(new TextDecoder().decode(h.store.journals.get(TRANSFER_ID)!));
+    expect(after.resumeSecret).toEqual(before.resumeSecret);
+    await d.abort();
+  });
+
+  it('refuses to attach a resume credential to a journal that does not match the manifest (V13-PR07)', async () => {
+    const h = await harness();
+    const d = h.makeDestination();
+    const m = manifest([['a.bin', 8]]);
+    await d.prepare(m);
+    const other = manifest([['b.bin', 8]]);
+    await expect(d.attachResumeSecret(other, new Uint8Array(32).fill(7))).rejects.toThrow(
+      /does not match the authenticated manifest/,
+    );
+    // Nothing was persisted.
+    const obj = JSON.parse(new TextDecoder().decode(h.store.journals.get(TRANSFER_ID)!)) as {
+      resumeSecret?: unknown;
+    };
+    expect(obj.resumeSecret).toBeUndefined();
     await d.abort();
   });
 

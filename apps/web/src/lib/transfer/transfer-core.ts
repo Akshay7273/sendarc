@@ -9,10 +9,14 @@
  */
 
 import {
+  RESUME_AUTH_VERSION,
   TransferSender,
   TransferReceiver,
   TransferError,
   bytesToHex,
+  deriveResumeSecret,
+  encodeResumeSecretEnvelope,
+  manifestFingerprint,
   type Digest,
   type Destination,
   type FileEntry,
@@ -29,7 +33,12 @@ import type {
   WorkerToHost,
 } from './wire.js';
 import type { BrowserDestination } from './sink.js';
-import { newSenderRecord, refreshSenderRecord, type SenderRecordStore } from './sender-record.js';
+import {
+  newSenderRecord,
+  refreshSenderRecord,
+  senderRecordChecksum,
+  type SenderRecordStore,
+} from './sender-record.js';
 
 export interface TransferCoreDeps {
   /** Fresh streaming whole-file hasher (matches `sha256sum`). One live digest per call. */
@@ -174,6 +183,9 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
             // Persist or verify the sender record strictly before the manifest frame goes
             // out: the stable id + canonical source identity are durable before the id is
             // advertised, and a changed source aborts the send with nothing transmitted.
+            // The transfer-scoped resume credential (V13-PR07) is derived from the resume
+            // root and attached only to a fresh record — a restart's already-persisted
+            // credential is never replaced.
             await persistSenderRecord(store, msg, manifest);
           },
           onStateChange: (state) => post({ kind: 'state', state }),
@@ -247,6 +259,13 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
                 const state = destination.resumeStateFor?.(manifest);
                 if (state) receiverOpts.resume = state;
               }
+            }
+            // V13-PR07: after the manifest validated and bound to the journal, derive the
+            // transfer-scoped resume credential from the original session resume root and
+            // persist it into the receive journal — before it can authorize a future
+            // cross-session resume. Only the scoped root crosses into the worker.
+            if (_msg.resumeRoot !== undefined && isBrowserDestination(destination)) {
+              await destination.attachResumeSecret?.(manifest, _msg.resumeRoot);
             }
           },
         };
@@ -354,9 +373,42 @@ async function persistSenderRecord(
       msg.reattachment ?? { kind: 'reselection' },
       Date.now(),
     );
+    if (msg.resumeRoot !== undefined) {
+      // V13-PR07: derive the transfer-scoped resume credential from the ORIGINAL session
+      // resume root and persist it in the same record, strictly before the manifest frame
+      // is transmitted. On a restart the record already carries the original-session
+      // credential and it is never re-derived or replaced.
+      const envelope = await deriveResumeSecretEnvelope(manifest, msg.resumeRoot);
+      record.resumeSecret = envelope;
+      record.checksum = await senderRecordChecksum(record);
+    }
     await store.put(record);
     return;
   }
   const refreshed = await refreshSenderRecord(prior.record, manifest, msg.reattachment, Date.now());
+  // A restart keeps the record's original-session credential untouched: refreshSenderRecord
+  // spreads the prior record, so resumeSecret rides along and is never replaced.
   await store.put(refreshed);
+}
+
+/**
+ * Derive the persisted transfer-scoped resume credential envelope from the resume root and
+ * the authenticated manifest (V13-PR07). The manifest's transfer id + canonical fingerprint
+ * are bound into the derivation; the secret is never persisted outside this envelope.
+ */
+async function deriveResumeSecretEnvelope(
+  manifest: Manifest,
+  resumeRoot: Uint8Array,
+): Promise<import('@sendbeam/protocol').ResumeSecretEnvelope> {
+  if (manifest.transferId === undefined) {
+    throw new TransferError('integrity', 'resume secret requires a manifest with a transfer id');
+  }
+  const fingerprint = await manifestFingerprint(manifest);
+  const secret = await deriveResumeSecret(
+    resumeRoot,
+    RESUME_AUTH_VERSION,
+    manifest.transferId,
+    fingerprint,
+  );
+  return encodeResumeSecretEnvelope(secret);
 }
