@@ -80,6 +80,13 @@ export interface TransferReceiverOptions {
   /** Reports bytes only after verify-and-sink. */
   onProgress?(acknowledgedBytes: number): void;
   onFileProgress?(fileIdx: number, fileBytes: number, acknowledgedBytes: number): void;
+  /**
+   * Reports the verified baseline reused from the authenticated durable checkpoint (the
+   * persisted haveBlocks claim) once the resume seed is applied, invoked ONCE before the
+   * first new block is acknowledged. The host anchors its session rate on this baseline:
+   * sessionBytes = verified - reused (V13-PR08).
+   */
+  onResume?(reusedBytes: number): void;
   onStateChange?(state: TransferRunState): void;
   /** Called once with the validated complete file set before any destination opens. */
   onManifestSet?(manifest: Manifest): void | Promise<void>;
@@ -298,6 +305,16 @@ export class TransferReceiver {
       if (this.o.resume && this.o.resume.transferId === manifest.transferId) {
         await this.validateResumeSeed(manifest, this.o.resume);
         this.activeResume = this.o.resume;
+        // V13-PR08 progress contract: surface the verified baseline reused from the
+        // authenticated checkpoint immediately — before the first new block is
+        // acknowledged — so the host anchors its session rate on it.
+        let reusedTotal = 0;
+        for (const file of manifest.files) {
+          const have = this.activeResume.files.get(file.idx)?.haveBlocks ?? 0;
+          if (have <= 0) continue;
+          reusedTotal += have >= file.blocks ? file.size : have * file.blockSize;
+        }
+        if (reusedTotal > 0) this.o.onResume?.(reusedTotal);
       }
       await this.sendResumeState(manifest);
     }

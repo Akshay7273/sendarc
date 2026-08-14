@@ -682,3 +682,57 @@ describe('sender-record seam (V13-PR04)', () => {
     await expect(sendP).rejects.toThrow(/no sender record/);
   });
 });
+
+describe('resume role binding (V13-PR08 review)', () => {
+  it('rejects a sender resume attempt whose role is not offerer', async () => {
+    const keys = await deriveTransferKeys(new Uint8Array(32).fill(41));
+    const sendPort = new FakePort();
+    const sendP = runTransferCore(sendPort, {
+      createDigest: await createSha256DigestFactory(),
+      createSink: () => {
+        throw new Error('sender has no sink');
+      },
+      fileSource: blobFileSource,
+    });
+    sendPort.toWorker({
+      kind: 'start-send',
+      files: [new File([new Uint8Array(8)], 'x.bin')],
+      sendDir: keys.o2j,
+      recvDir: keys.j2o,
+      sendCounter: 1,
+      recvCounter: 1,
+      resumeAttempt: {
+        transferId: 'ab'.repeat(16),
+        manifestFingerprint: 'a'.repeat(64),
+        role: 'joiner', // mismatched persisted/host role
+        resumeSecret: new Uint8Array(32).fill(9),
+      },
+    });
+    await expect(sendP).rejects.toThrow(/sender resume attempt must carry the offerer role/);
+  });
+
+  it('rejects a receiver resume attempt whose role is not joiner', async () => {
+    const keys = await deriveTransferKeys(new Uint8Array(32).fill(42));
+    const recvPort = new FakePort();
+    const recvP = runTransferCore(recvPort, {
+      createDigest: await createSha256DigestFactory(),
+      createSink: () => new MemorySink(),
+      fileSource: blobFileSource,
+    });
+    recvPort.toWorker({
+      kind: 'start-recv',
+      destination: { kind: 'auto' },
+      sendDir: keys.j2o,
+      recvDir: keys.o2j,
+      sendCounter: 1,
+      recvCounter: 1,
+      resumeAttempt: {
+        transferId: 'ab'.repeat(16),
+        manifestFingerprint: 'a'.repeat(64),
+        role: 'offerer', // mismatched persisted/host role
+        resumeSecret: new Uint8Array(32).fill(9),
+      },
+    });
+    await expect(recvP).rejects.toThrow(/receiver resume attempt must carry the joiner role/);
+  });
+});

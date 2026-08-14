@@ -123,7 +123,14 @@ export interface ManifestMsg {
 }
 export interface ProgressMsg {
   kind: 'progress';
+  /** Verified high-water (ACKed) bytes; on a resume this includes the reused baseline. */
   bytes: number;
+  /**
+   * V13-PR08: verified baseline reused from the authenticated durable checkpoint at resume
+   * start. sessionBytes = bytes - reusedBytes. Present on resumed transfers from the
+   * moment the checkpoint is accepted (before the first new block arrives).
+   */
+  reusedBytes?: number;
 }
 export interface StateMsg {
   kind: 'state';

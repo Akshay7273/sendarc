@@ -211,10 +211,14 @@ the ids match.
 ### The flow
 
 1. The user selects the interrupted transfer locally (sender record / receive journal).
-2. The sender revalidates its source: reopen the persisted path or handle, recompute the
-   canonical identity + exact manifest fingerprint, compare with the record. A changed
-   source is a hard resume refusal — a valid `resumeSecret` is not authorization to
-   change the source.
+2. The sender revalidates its source: reopen the persisted path or handle (or an explicit
+   reselection), and run a cheap pre-check — the canonical source identity (count, names,
+   sizes, mtimes in canonical order) compared against the record — refusing before
+   dialing on any obvious mismatch. The EXACT manifest fingerprint is recomputed from the
+   validated manifest and compared with the record strictly before the manifest frame is
+   transmitted: after resume-auth, but before any durable progress is reused or any data
+   is sent under the resumed transfer. A changed source is a hard resume refusal — a
+   valid `resumeSecret` is not authorization to change the source.
 3. A fresh temporary rendezvous is created and a fresh invite code shown (the code is
    never persisted and never derived from the resume secret).
 4. Both peers join; peer capabilities are checked (`resume-auth-v1`).

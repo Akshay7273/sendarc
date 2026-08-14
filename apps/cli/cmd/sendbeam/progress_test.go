@@ -25,6 +25,31 @@ func TestProgressRateAndETAStabilizeWithinFiveSeconds(t *testing.T) {
 	}
 }
 
+func TestProgressSetReusedAnchorsSessionRate(t *testing.T) {
+	now := time.Unix(0, 0)
+	p := newProgressWithClock(100_000, func() time.Time { return now })
+	// The engine reports the verified baseline reused from the authenticated checkpoint
+	// BEFORE the first new block is acknowledged (V13-PR08).
+	p.setReused(68_000)
+	now = now.Add(time.Second)
+	p.report(69_000) // one block durably ACKed this session
+	p.mu.Lock()
+	rate, eta := p.rateAndETA()
+	reused := p.reused
+	p.mu.Unlock()
+	if reused != 68_000 {
+		t.Fatalf("reused = %d, want 68000", reused)
+	}
+	// 1000 bytes over 1s: the reused jump (68000) is NOT counted as transferred bytes.
+	if math.Abs(rate-1000) > 0.01 {
+		t.Fatalf("rate = %f, want 1000 (session advancement only)", rate)
+	}
+	// ETA uses remaining verified bytes and the current-session rate.
+	if eta != 31*time.Second {
+		t.Fatalf("eta = %s, want 31s", eta)
+	}
+}
+
 func TestProgressNeverRegresses(t *testing.T) {
 	p := newProgressWithClock(100, time.Now)
 	p.report(50)

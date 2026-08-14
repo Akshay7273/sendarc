@@ -96,6 +96,10 @@ type Spec struct {
 	// OnProgress reports cumulative bytes acknowledged after verify-and-sink.
 	OnProgress     func(int64)
 	OnFileProgress func(fileIdx int, fileBytes, acknowledgedBytes int64)
+	// OnResumeProgress reports the verified baseline reused from the authenticated durable
+	// checkpoint at resume start, once, before the first new block is acknowledged. The host
+	// anchors its session rate on it: sessionBytes = verified - reused (V13-PR08).
+	OnResumeProgress func(int64)
 	// OnControls receives the live engine after the channel opens, before bytes begin moving.
 	OnControls func(Controls)
 	// OnStateChange reports pause, resume, and remote cancellation.
@@ -590,6 +594,15 @@ func (d *driver) prepareResumePreamble(conn dataConn, res *rendezvous.Result, se
 	if d.spec.Resume == nil {
 		return nil, nil
 	}
+	// Role binding (V13-PR08 review): the persisted/host resume role MUST equal the actual
+	// rendezvous role of this session. A mismatched role is a hard failure — never silently
+	// ignored — because the resume-auth transcript binds the role, and a wrong claim can
+	// only come from misusing local interrupted state across a different session shape.
+	if d.spec.Resume.Role != res.Role {
+		return nil, wire.Errorf(wire.CodeProtocol,
+			"transfer: resume role mismatch: the interrupted %s state cannot resume in this %s session; nothing was sent or received — restart the resume with the matching side",
+			d.spec.Resume.Role, res.Role)
+	}
 	if !wire.NegotiateResumeAuth([]string{wire.ResumeAuthCapability}, res.RemoteCaps.Features) {
 		if res.Role == wire.RoleOfferer {
 			return nil, wire.Errorf(wire.CodeCompat,
@@ -765,6 +778,7 @@ func (d *driver) send(ctx context.Context, conn dataConn, sv *supervisor.Supervi
 		},
 		OnProgress:     d.spec.OnProgress,
 		OnFileProgress: d.spec.OnFileProgress,
+		OnResume:       d.spec.OnResumeProgress,
 		OnStateChange:  d.spec.OnStateChange,
 	})
 	if sv != nil {
@@ -846,6 +860,7 @@ func (d *driver) receive(ctx context.Context, conn dataConn, sv *supervisor.Supe
 		Resume:           &sharedResume,
 		OnProgress:       d.spec.OnProgress,
 		OnFileProgress:   d.spec.OnFileProgress,
+		OnResume:         d.spec.OnResumeProgress,
 		OnStateChange:    d.spec.OnStateChange,
 		OnManifestSet: func(manifest wire.Manifest) error {
 			if d.spec.OnManifestSet != nil {

@@ -24,11 +24,17 @@ type progressFile struct {
 }
 
 // progress renders acknowledged bytes, a five-second rolling rate, and ETA on stderr,
-// with a live percentage bar when the total is known.
+// with a live percentage bar when the total is known. On an authenticated resume
+// (V13-PR08) the verified checkpoint is surfaced immediately and reused bytes are tracked
+// separately: sessionBytes = verified - reused, and the rate/ETA measure only session
+// advancement so the reused jump is never counted as transferred.
 type progress struct {
-	mu        sync.Mutex
-	total     int64
-	bytes     int64
+	mu    sync.Mutex
+	total int64
+	bytes int64
+	// reused is the verified baseline backed by the authenticated durable checkpoint at
+	// resume start; bytes = reused + sessionBytes (never less).
+	reused    int64
 	lastPct   int
 	reported  bool
 	paused    bool
@@ -58,6 +64,17 @@ func (p *progress) setFiles(files []progressFile) {
 	p.mu.Lock()
 	p.files = append([]progressFile(nil), files...)
 	p.mu.Unlock()
+}
+
+// setReused anchors the verified baseline reused from the authenticated durable checkpoint
+// (V13-PR08). It fires BEFORE the first new block is acknowledged, so the first rate sample
+// sits exactly on the checkpoint and the reused jump is never counted as transferred bytes.
+func (p *progress) setReused(n int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.reused = n
+	// Surface the checkpoint immediately: the reused bytes ARE verified progress.
+	p.reportLocked(n)
 }
 
 func (p *progress) reportFile(fileIdx int, fileBytes, acknowledgedBytes int64) {
@@ -112,7 +129,19 @@ func (p *progress) reportLocked(n int64) {
 		file := p.files[p.fileIdx]
 		detail = fmt.Sprintf("%s · %s / %s", p.st.dim(file.name), humanBytes(p.fileBytes), humanBytes(file.size)) + " · " + detail
 	}
-	fmt.Fprintf(os.Stderr, "\r  %s %s  %s", bar(pct, 18), p.st.cyan(fmt.Sprintf("%d%%", pct)), detail)
+	label := fmt.Sprintf("%d%%", pct)
+	if p.reused > 0 {
+		// Resumed session: verified = reused + session, and the rate/ETA measure only the
+		// session's advancement.
+		session := n - p.reused
+		if session < 0 {
+			session = 0
+		}
+		label = fmt.Sprintf("%d%% verified", pct)
+		detail = fmt.Sprintf("%s reused · %s this session",
+			humanBytes(p.reused), humanBytes(session)) + " · " + detail
+	}
+	fmt.Fprintf(os.Stderr, "\r  %s %s  %s", bar(pct, 18), p.st.cyan(label), detail)
 }
 
 func (p *progress) recordSample() {

@@ -86,6 +86,16 @@ export function progressLabel(done: number, total: number): string {
   return `${humanBytes(done)} / ${humanBytes(total)} (${progressPercent(done, total)}%)`;
 }
 
+/**
+ * V13-PR08: resumed-session caption — the verified checkpoint is surfaced separately from
+ * the bytes transferred this session (verified = reused + session). Fresh transfers never
+ * call this (their reused baseline is zero).
+ */
+export function progressResumedLabel(verified: number, reused: number, total: number): string {
+  const session = Math.max(0, verified - reused);
+  return `Resuming from ${progressPercent(verified, total)}% verified — ${humanBytes(reused)} reused · ${humanBytes(session)} transferred this session`;
+}
+
 /** Smoothed acknowledged throughput for the transfer detail line. */
 export function rateLabel(bytesPerSecond: number): string {
   if (bytesPerSecond <= 0) return 'Calculating speed…';

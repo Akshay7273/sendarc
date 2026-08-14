@@ -372,9 +372,10 @@ func transfersResume(args []string) int {
 			progress.setFiles(files)
 			connectPrinter(fmt.Sprintf("Receiving %s (%s) …", labelFor(manifest), humanBytes(manifest.TotalSize)))()
 		},
-		OnFileProgress: progress.reportFile,
-		OnControls:     terminalControls(),
-		OnStateChange:  progress.setState,
+		OnFileProgress:   progress.reportFile,
+		OnResumeProgress: progress.setReused,
+		OnControls:       terminalControls(),
+		OnStateChange:    progress.setState,
 	})
 	progress.finish()
 	if err != nil {

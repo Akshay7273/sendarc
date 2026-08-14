@@ -216,7 +216,14 @@ export class DurableDestination implements BrowserDestination {
     // the transfer id + fingerprint match. The gate protects the PRE-SELECTED journal only:
     // a manifest whose id differs from the expected resume id is a genuinely fresh sender,
     // and its fresh journal has no verified progress at risk.
-    if (this.resumed && !this.resumeAuthorized) {
+    // The session authorization is SCOPED to the pre-selected journal: mutual resume-auth
+    // proved continuity with the peer for the SELECTED interrupted transfer only. A manifest
+    // carrying a DIFFERENT id that happens to have its own journal must never reuse that
+    // journal's verified progress — the auth bound a different transcript. A resumed journal
+    // with no authorization (or authorization for another journal) fails closed.
+    const authorizedForThisJournal =
+      this.resumeAuthorized && (this.expectResume === '' || this.expectResume === this.transferId);
+    if (this.resumed && !authorizedForThisJournal) {
       // The lease acquired above must not linger for a stale TTL after a fail-closed gate;
       // release it so a later authenticated resume attempt can acquire immediately.
       await this.store.releaseLease(this.transferId, this.ownerId).catch(() => {});

@@ -8,7 +8,12 @@ import {
 } from '@sendbeam/protocol';
 import { streamSink, type WritableFileLike } from './stream-sink.js';
 import { DurableDestination, type DurableMeta } from './durable-destination.js';
-import { durableOpfsFiles, indexedDbDurableStore } from './durable-store.js';
+import {
+  durableOpfsFiles,
+  indexedDbDurableStore,
+  type DurableFiles,
+  type DurableJournalStore,
+} from './durable-store.js';
 import {
   centralHeader,
   crc32Update,
@@ -56,26 +61,68 @@ export interface BrowserDestination extends Destination {
 export function createBrowserDestination(
   spec: ReceiveDestinationSpec,
   createDigest?: Sha256DigestFactory,
+  durable?: {
+    files?: DurableFiles;
+    store?: DurableJournalStore;
+    now?(): number;
+    renewMs?: number;
+    ensureSpace?(requiredBytes: number): Promise<void>;
+  },
 ): BrowserDestination {
   let inner: BrowserDestination | undefined;
+  // V13-PR08: pre-manifest resume-auth state retained by the WRAPPER until the inner
+  // destination is constructed at prepare(). The inner DurableDestination is created lazily
+  // there, so these seams cannot be plain forwards: the expected interrupted journal id is
+  // applied strictly before inner.prepare(), and session authorization only if this session
+  // actually authenticated (never because an id/fingerprint/journal/secret merely exists).
+  let expectedResumeTransferId = '';
+  let resumeAuthorizedThisSession = false;
   const get = (): BrowserDestination => {
     if (!inner) throw new TransferError('sink_error', 'destination used before manifest');
     return inner;
   };
   return {
     async prepare(manifest) {
-      if (spec.kind === 'direct-file') inner = new DirectFileDestination(spec.handle);
-      else if (spec.kind === 'direct-directory')
+      if (spec.kind === 'direct-file') {
+        // An armed authenticated-journal resume must never silently target a fresh save:
+        // the journal + partial storage IS the destination for that attempt (V13-PR08).
+        if (expectedResumeTransferId !== '') {
+          throw new TransferError(
+            'sink_error',
+            'authenticated journal resume cannot target a single-file save; resume into the kept partial data or discard the interrupted transfer first',
+          );
+        }
+        inner = new DirectFileDestination(spec.handle);
+      } else if (spec.kind === 'direct-directory') {
+        if (expectedResumeTransferId !== '') {
+          throw new TransferError(
+            'sink_error',
+            'authenticated journal resume cannot target a folder save; resume into the kept partial data or discard the interrupted transfer first',
+          );
+        }
         inner = new DirectDirectoryDestination(spec.handle);
-      else if (manifest.transferId !== undefined) {
+      } else if (manifest.transferId !== undefined) {
         if (!createDigest) {
           throw new TransferError('sink_error', 'durable receive requires a digest factory');
         }
-        inner = new DurableDestination({
+        const durableDestination = new DurableDestination({
           createDigest,
-          files: durableOpfsFiles(),
-          store: indexedDbDurableStore(),
+          files: durable?.files ?? durableOpfsFiles(),
+          store: durable?.store ?? indexedDbDurableStore(),
+          ...(durable?.now !== undefined ? { now: durable.now } : {}),
+          ...(durable?.renewMs !== undefined ? { renewMs: durable.renewMs } : {}),
+          ...(durable?.ensureSpace !== undefined ? { ensureSpace: durable.ensureSpace } : {}),
         });
+        // V13-PR08: apply the pre-manifest resume-auth state to the REAL destination
+        // strictly before prepare(): the expected interrupted journal id first, then the
+        // session authorization ONLY if this session actually authenticated.
+        if (expectedResumeTransferId !== '') {
+          durableDestination.expectResumeFor(expectedResumeTransferId);
+        }
+        if (resumeAuthorizedThisSession) {
+          durableDestination.authorizeResume();
+        }
+        inner = durableDestination;
       } else if (manifest.files.length === 1 && !manifest.files[0]!.name.includes('/')) {
         inner = new OpfsFileDestination();
       } else {
@@ -88,6 +135,9 @@ export function createBrowserDestination(
     abort: (reason) => get().abort(reason),
     result: () => inner?.result(),
     durableMeta: () => inner?.durableMeta?.(),
+    // Forwarded lazily: the inner destination exists only after prepare(manifest), and the
+    // resume seed is only meaningful for the durable destination.
+    resumeStateFor: (manifest) => inner?.resumeStateFor?.(manifest),
     // Credential attachment is meaningful ONLY for a durable journal-backed destination.
     // Direct-file/direct-directory/legacy OPFS/archive destinations do not implement it, and
     // the seam is genuinely absent for them: the resume root being present must never make an
@@ -97,6 +147,39 @@ export function createBrowserDestination(
       const target = inner;
       if (!target?.attachResumeSecret) return Promise.resolve();
       return target.attachResumeSecret(manifest, resumeRoot);
+    },
+    /**
+     * V13-PR08: mark this receive as an explicit authenticated-resume attempt for the
+     * interrupted journal `transferId`. Before prepare() the wrapper records it and applies
+     * it to the durable destination it constructs; after prepare() it forwards to the inner
+     * destination and fails closed when the inner one is not durable — the semantics are
+     * never silently dropped.
+     */
+    expectResumeFor(transferId) {
+      if (inner !== undefined) {
+        const target = inner;
+        if (!target.expectResumeFor) {
+          throw new TransferError(
+            'sink_error',
+            'an interrupted-journal resume cannot target this destination; nothing was received or deleted',
+          );
+        }
+        target.expectResumeFor(transferId);
+        return;
+      }
+      expectedResumeTransferId = transferId;
+    },
+    /**
+     * V13-PR08: record that mutual resume-auth completed in THIS session. Applied to the
+     * durable destination before prepare() only when this session actually authenticated;
+     * a matching id/fingerprint/journal/secret alone never authorizes reuse.
+     */
+    authorizeResume() {
+      if (inner !== undefined) {
+        inner.authorizeResume?.();
+        return;
+      }
+      resumeAuthorizedThisSession = true;
     },
   };
 }

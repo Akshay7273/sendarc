@@ -220,13 +220,14 @@ func runSend(args []string) int {
 				fmt.Fprintln(os.Stderr, s.cyan("Authenticating the interrupted transfer with the receiver …"))
 			}
 		},
-		ForceRelay:     *relayOnly,
-		ICEServers:     ice,
-		OnTransport:    transportPrinter,
-		OnConnect:      connectPrinter(fmt.Sprintf("Sending %s (%s) …", label, humanBytes(totalSize))),
-		OnFileProgress: progress.reportFile,
-		OnControls:     terminalControls(),
-		OnStateChange:  progress.setState,
+		ForceRelay:       *relayOnly,
+		ICEServers:       ice,
+		OnTransport:      transportPrinter,
+		OnConnect:        connectPrinter(fmt.Sprintf("Sending %s (%s) …", label, humanBytes(totalSize))),
+		OnFileProgress:   progress.reportFile,
+		OnResumeProgress: progress.setReused,
+		OnControls:       terminalControls(),
+		OnStateChange:    progress.setState,
 	})
 	progress.finish()
 	s := newStyle(os.Stderr)
@@ -327,9 +328,10 @@ func runReceive(args []string) int {
 			}
 			connectPrinter(fmt.Sprintf("Receiving %s (%s) …", label, humanBytes(manifest.TotalSize)))()
 		},
-		OnFileProgress: progress.reportFile,
-		OnControls:     terminalControls(),
-		OnStateChange:  progress.setState,
+		OnFileProgress:   progress.reportFile,
+		OnResumeProgress: progress.setReused,
+		OnControls:       terminalControls(),
+		OnStateChange:    progress.setState,
 	})
 	progress.finish()
 	if err != nil {

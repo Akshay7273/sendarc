@@ -74,6 +74,15 @@ export class ResumePreamble {
   private settled = false;
   private donePromise: Promise<ResumeAuthResult | undefined>;
   private resolveDone!: (r: ResumeAuthResult | undefined) => void;
+  /**
+   * Serializes ALL inbound preamble processing in arrival order: every handle() call
+   * appends to this chain, so exactly one frame can open/mutate counters at a time even
+   * when frames are delivered without awaiting (the worker dispatches `void
+   * preamble.handle(frame)` for every inbound frame). The chain swallows rejections so a
+   * later queued frame still runs and observes the settled state (failures are recorded
+   * via {@link fail}, never thrown through the queue).
+   */
+  private queue: Promise<void> = Promise.resolve();
   /** Canonical payload of the last accepted inbound message, for idempotent re-answers. */
   private lastAccepted: Uint8Array | undefined;
 
@@ -124,12 +133,26 @@ export class ResumePreamble {
   }
 
   /**
-   * Feed one inbound sealed frame. Called from the read loop and fully serialized; a
+   * Feed one inbound sealed frame. Called from the read loop; processing is serialized in
+   * arrival order through an internal promise chain, so exactly one frame can open/mutate
+   * counters at a time even when the caller does not await between deliveries. A
    * malformed, wrong-type, replayed, or otherwise invalid frame settles the preamble failed
-   * (terminal) before the transfer could start.
+   * (terminal) before the transfer could start; frames queued behind a failure observe the
+   * settled state and cannot resurrect it.
    */
-  async handle(frame: Uint8Array): Promise<void> {
-    if (this.settled) return; // settled: ignore late frames
+  handle(frame: Uint8Array): Promise<void> {
+    const run = this.queue.then(() => this.handleSerialized(frame));
+    // Keep the chain alive regardless of task outcome: failures are recorded via fail()
+    // (never thrown through the queue), so later queued frames must still execute and see
+    // the settled state. The returned promise is the caller's own task (which cannot
+    // reject: every path is caught), so `void preamble.handle(frame)` is safe.
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  /** One serialized step of inbound processing (guarded by the queue). */
+  private async handleSerialized(frame: Uint8Array): Promise<void> {
+    if (this.settled) return; // settled: ignore late frames (including queued-after-failure)
     let payload: Uint8Array;
     try {
       payload = await this.openLocked(frame);
@@ -137,6 +160,7 @@ export class ResumePreamble {
       this.fail(err as Error);
       return;
     }
+    if (this.settled) return; // canceled while the frame was being opened
     let out: ResumeMessage | undefined;
     let result: ResumeAuthResult | undefined;
     try {
@@ -147,6 +171,7 @@ export class ResumePreamble {
       this.fail(err as Error);
       return;
     }
+    if (this.settled) return; // canceled while the engine was handling the frame
     this.lastAccepted = payload;
     // The final step (the joiner's accept of resume_confirm) returns BOTH the outbound
     // resume_ready AND the result: the ready must go out before the side is announced
@@ -159,6 +184,7 @@ export class ResumePreamble {
         return;
       }
     }
+    if (this.settled) return; // canceled while the reply was being transmitted
     if (result !== undefined) {
       this.resultValue = result;
       this.settled = true;

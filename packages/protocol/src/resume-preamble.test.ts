@@ -238,6 +238,211 @@ describe('resume preamble', () => {
     expect(String(errJ)).toContain('resume');
   });
 
+  describe('serialized inbound processing (V13-PR08 Blocker 5)', () => {
+    /**
+     * Delivers init and its transport re-send to the joiner via Promise.all — WITHOUT
+     * awaiting between deliveries. The queue must process them in strict arrival order: the
+     * first consumes counter 1 and answers challenge at j2o counter 1; the second is the
+     * exact-duplicate re-send (counter 1 again) re-answered idempotently at counter 2. The
+     * send counters prove the two inbound frames were consumed exactly once, in order, and
+     * no counter was consumed twice. Without serialization the second handle would open at
+     * the already-advanced counter and fail as a replay.
+     */
+    it('two frames delivered without awaiting process in strict arrival order — no counter consumed twice', async () => {
+      const keys = await sessionKeys();
+      const secret = new Uint8Array(32).fill(0x5a);
+      const o = preambleOptions('offerer', secret, keys, { nonceSource: nonceSource(1) });
+      const j = preambleOptions('joiner', secret, keys, { nonceSource: nonceSource(0x11) });
+      const chO: Uint8Array[] = [];
+      const chJ: Uint8Array[] = [];
+      o.send = (f) => void chJ.push(f);
+      j.send = (f) => void chO.push(f);
+      const po = new ResumePreamble(o);
+      const pj = new ResumePreamble(j);
+      await po.start();
+      // The transport re-sends init (the joiner's first challenge was "lost"): both frames
+      // are delivered to the joiner at once, without awaiting between the deliveries.
+      const init = chJ.shift()!;
+      const handled = await Promise.all([pj.handle(init), pj.handle(init)]);
+      await Promise.all(handled);
+      // Exactly two challenges, at j2o counters 1 and 2, with byte-identical plaintexts:
+      // the re-send was re-answered idempotently from the engine snapshot, never with a
+      // fresh nonce or proof, and the counters advanced strictly in arrival order.
+      expect(chO).toHaveLength(2);
+      const open1 = await openSequenced(keys.j2o, 1, chO[0]!);
+      const open2 = await openSequenced(keys.j2o, 2, chO[1]!);
+      expect(open1.header.type).toBe(FrameType.ResumeAuth);
+      expect(open2.header.type).toBe(FrameType.ResumeAuth);
+      expect(bytesToHex(open1.plaintext)).toBe(bytesToHex(open2.plaintext));
+      expect(pj.isSettled()).toBe(false); // re-answers never settle the joiner
+
+      // Drive the rest of the handshake: both challenges reach the offerer in order (the
+      // second is a fresh counter-2 frame, re-answered identically), then confirm reaches
+      // the joiner, then ready reaches the offerer. Everything settles successfully.
+      await po.handle(chO.shift()!);
+      await po.handle(chO.shift()!);
+      const confirms = chJ.splice(0);
+      expect(confirms).toHaveLength(2);
+      const c1 = await openSequenced(keys.o2j, 2, confirms[0]!);
+      const c2 = await openSequenced(keys.o2j, 3, confirms[1]!);
+      expect(bytesToHex(c1.plaintext)).toBe(bytesToHex(c2.plaintext));
+      await pj.handle(confirms[0]!);
+      await po.handle(chO.shift()!);
+      const resO = await po.done();
+      const resJ = await pj.done();
+      expect(resO).toBeDefined();
+      expect(resJ).toBeDefined();
+      expect(bytesToHex(resO!.keys.o2j.key)).toBe(bytesToHex(resJ!.keys.o2j.key));
+    });
+
+    it('concurrent exact duplicate stays deterministic and settles successfully', async () => {
+      const keys = await sessionKeys();
+      const secret = new Uint8Array(32).fill(0x6b);
+      const o = preambleOptions('offerer', secret, keys, { nonceSource: nonceSource(1) });
+      const j = preambleOptions('joiner', secret, keys, { nonceSource: nonceSource(0x11) });
+      const chO: Uint8Array[] = [];
+      const chJ: Uint8Array[] = [];
+      o.send = (f) => void chJ.push(f);
+      j.send = (f) => void chO.push(f);
+      const po = new ResumePreamble(o);
+      const pj = new ResumePreamble(j);
+      await po.start();
+      // init -> joiner.
+      await pj.handle(chJ.shift()!);
+      // The SAME challenge frame delivered twice concurrently: the first consumes counter 1,
+      // the second is the exact-duplicate re-send (counter 1 again) re-answered idempotently.
+      const challenge = chO.shift()!;
+      const handleDup = await Promise.all([po.handle(challenge), po.handle(challenge)]);
+      await Promise.all(handleDup);
+      const confirms = chJ.splice(0);
+      // Two identical message-level confirms (counters 2 and 3), never a fresh handshake.
+      expect(confirms).toHaveLength(2);
+      const open1 = await openSequenced(keys.o2j, 2, confirms[0]!);
+      const open2 = await openSequenced(keys.o2j, 3, confirms[1]!);
+      expect(bytesToHex(open1.plaintext)).toBe(bytesToHex(open2.plaintext));
+      await pj.handle(confirms[0]!);
+      await po.handle(chO.shift()!);
+      const resO = await po.done();
+      const resJ = await pj.done();
+      expect(resO).toBeDefined();
+      expect(resJ).toBeDefined();
+    });
+
+    it('concurrent conflicting duplicate fails terminally; the queued valid frame observes the failure', async () => {
+      const keys = await sessionKeys();
+      const secret = new Uint8Array(32).fill(0x7c);
+      const o = preambleOptions('offerer', secret, keys, { nonceSource: nonceSource(1) });
+      const j = preambleOptions('joiner', secret, keys, { nonceSource: nonceSource(0x11) });
+      const chO: Uint8Array[] = [];
+      const chJ: Uint8Array[] = [];
+      o.send = (f) => void chJ.push(f);
+      j.send = (f) => void chO.push(f);
+      const po = new ResumePreamble(o);
+      const pj = new ResumePreamble(j);
+      await po.start();
+      await pj.handle(chJ.shift()!);
+      const challenge = chO.shift()!;
+      // A forged frame sealed at the SAME counter (1) whose plaintext differs from the real
+      // challenge: delivered concurrently with the genuine challenge, forged first.
+      const header: FrameHeaderInput = {
+        version: 1,
+        type: FrameType.ResumeAuth,
+        flags: 0,
+        fileIdx: 0,
+        blockIdx: 0,
+        frameOff: 0,
+      };
+      const forged = await seal(
+        o.recvDir,
+        1,
+        header,
+        new TextEncoder().encode('forged conflicting replay'),
+      );
+      const handled = await Promise.all([po.handle(forged), po.handle(challenge)]);
+      await Promise.all(handled);
+      // First failure is terminal; the queued genuine frame observes the settled state and
+      // cannot resurrect the preamble. No handle() promise rejects (no unhandled rejection).
+      const resO = await po.done();
+      expect(resO).toBeUndefined();
+      expect(po.isSettled()).toBe(true);
+      expect(() => po.result()).toThrow(/resume/);
+      // The peer never receives a confirm: the offerer failed before answering.
+      expect(chJ).toHaveLength(0);
+    });
+
+    it('malformed first frame settles failed; a later queued valid frame cannot resurrect it', async () => {
+      const keys = await sessionKeys();
+      const secret = new Uint8Array(32).fill(0x8d);
+      const o = preambleOptions('offerer', secret, keys, { nonceSource: nonceSource(1) });
+      const j = preambleOptions('joiner', secret, keys, { nonceSource: nonceSource(0x11) });
+      const chO: Uint8Array[] = [];
+      const chJ: Uint8Array[] = [];
+      o.send = (f) => void chJ.push(f);
+      j.send = (f) => void chO.push(f);
+      const po = new ResumePreamble(o);
+      const pj = new ResumePreamble(j);
+      await po.start();
+      await pj.handle(chJ.shift()!);
+      const challenge = chO.shift()!;
+      // A MANIFEST frame under the session key at the expected counter: wrong type, so it
+      // settles the preamble failed. The genuine challenge queued behind it observes the
+      // settled state and is dropped — the failure is terminal.
+      const header: FrameHeaderInput = {
+        version: 1,
+        type: FrameType.Manifest,
+        flags: 0,
+        fileIdx: 0,
+        blockIdx: 0,
+        frameOff: 0,
+      };
+      const foreign = await seal(o.recvDir, 1, header, new TextEncoder().encode('{}'));
+      const handled = await Promise.all([po.handle(foreign), po.handle(challenge)]);
+      await Promise.all(handled);
+      const resO = await po.done();
+      expect(resO).toBeUndefined();
+      expect(po.isSettled()).toBe(true);
+      expect(() => po.result()).toThrow(/resume/);
+      expect(chJ).toHaveLength(0);
+    });
+
+    it('cancel while the handler is awaiting settles queued work and abandons the attempt', async () => {
+      const keys = await sessionKeys();
+      const secret = new Uint8Array(32).fill(0x9e);
+      const o = preambleOptions('offerer', secret, keys, { nonceSource: nonceSource(1) });
+      const j = preambleOptions('joiner', secret, keys, { nonceSource: nonceSource(0x11) });
+      const chO: Uint8Array[] = [];
+      const chJ: Uint8Array[] = [];
+      // The joiner's send is gated so its handle(init) stays in flight across an await while
+      // we cancel — the crypto is mid-processing, exactly the reload/teardown race.
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      j.send = (f) => {
+        chO.push(f);
+        return gate;
+      };
+      o.send = (f) => void chJ.push(f);
+      const po = new ResumePreamble(o);
+      const pj = new ResumePreamble(j);
+      await po.start();
+      const inFlight = pj.handle(chJ.shift()!);
+      // Cancel while the handler awaits the send gate; then release it so the handler resumes
+      // and observes the settled state.
+      pj.cancel();
+      release();
+      await inFlight;
+      const resJ = await pj.done();
+      expect(resJ).toBeUndefined();
+      expect(pj.isSettled()).toBe(true);
+      expect(() => pj.result()).toThrow(/canceled/);
+      // A frame queued after cancellation is dropped — it cannot resurrect a settled preamble.
+      await pj.handle(chJ.shift()!);
+      expect(pj.isSettled()).toBe(true);
+      expect(() => pj.result()).toThrow(/canceled/);
+      // The offerer never settles on its own (production teardown releases it).
+      expect(po.isSettled()).toBe(false);
+    });
+  });
+
   it('an exact duplicate of the last accepted frame is re-answered idempotently', async () => {
     const keys = await sessionKeys();
     const secret = new Uint8Array(32).fill(0x42);

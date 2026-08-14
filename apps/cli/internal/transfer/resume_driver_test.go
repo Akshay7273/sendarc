@@ -227,6 +227,25 @@ func TestDriverFreshSessionCannotSkipOldBlocksWithoutResumeAuth(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
+	// Variant C: the persisted resume role does NOT match the actual rendezvous role (the
+	// sender record was somehow armed on a session whose role is not offerer). The driver
+	// must fail closed on the role mismatch before anything is sent — never silently
+	// ignore a mismatched persisted/host role.
+	sendC, recvC, _, _ := runResumeLeg(ctx, t, senderStore, outDir, args, resumeLegSpec{
+		sendResume: &ResumeContext{
+			TransferID: srec.TransferID, ManifestFingerprint: srec.ManifestFingerprint,
+			Role: wire.RoleJoiner, ResumeSecret: decodeRecordSecret(t, srec.ResumeSecret),
+		},
+		sendCaps: resumeCaps(),
+		recvCaps: resumeCaps(),
+	})
+	if sendC.err == nil || !bytes.Contains([]byte(sendC.err.Error()), []byte("resume role mismatch")) {
+		t.Fatalf("sender must fail closed on a resume role mismatch, got %v", sendC.err)
+	}
+	if recvC.err == nil {
+		t.Fatal("receiver must not complete when the sender's role binding fails")
+	}
+
 	// Variant A: the sender reuses its record (Spec.Resume set, capability advertised) but
 	// the receiver joins as a plain fresh receive (no resume context, no capability). The
 	// sender must refuse to reuse the id before anything is sent. runResumeLeg cancels the

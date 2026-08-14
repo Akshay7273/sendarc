@@ -21,6 +21,7 @@
     senderRecordStoreWhenAvailable,
     type SenderRecord,
     type SenderRecordListEntry,
+    type SenderReattachment,
   } from './lib/transfer/sender-record.js';
   import { baseUrl, iceServers, loadConfig } from './lib/config.js';
   import { toJSON } from './lib/transfer/diagnostics.js';
@@ -47,6 +48,7 @@
     phaseLabel,
     progressLabel,
     progressPercent,
+    progressResumedLabel,
     rateLabel,
     etaLabel,
     humanBytes,
@@ -96,7 +98,15 @@
   // A journal selected for resume: joining a FRESH rendezvous carries this attempt so the
   // worker authenticates the original peer before reusing the verified checkpoint.
   let pendingReceiveResume = $state.raw<ReceiveJournalEntry | undefined>(undefined);
+  // V13-PR08 (Blocker 2): the ACTIVE receive-resume attempt for THIS fresh rendezvous/
+  // session — snapshotted from the pending selection at startReceive (before reset() clears
+  // it) and consumed by startTransferIfReady. Cleared only on reset (cancel / start over /
+  // terminal), never left armed for a later unrelated receive.
+  let activeReceiveResume = $state.raw<ReceiveJournalEntry | undefined>(undefined);
   let receiveResumeHint = $state('');
+  // V13-PR08: one-line in-flight resume note shown in the transfer block (what is reused,
+  // and only after authentication).
+  let resumeNote = $state('');
   let directoryPickerAvailable = $state(false);
   directoryPickerAvailable = typeof (window as PickerWindow).showDirectoryPicker === 'function';
 
@@ -112,6 +122,9 @@
   let transfer = $state.raw<TransferController | null>(null);
   let sentBytes = $state(0);
   let totalBytes = $state(0);
+  // V13-PR08: verified baseline reused from the authenticated checkpoint (sessionBytes =
+  // sentBytes - reusedBytes); zero on ordinary fresh transfers.
+  let reusedBytes = $state(0);
   let rateBps = $state(0);
   let etaSeconds = $state<number | undefined>(undefined);
   let transferState = $state<'running' | 'paused' | 'canceled'>('running');
@@ -134,7 +147,14 @@
     return typeof window === 'undefined' ? '' : codeFromHash(window.location.hash);
   }
 
-  function browserCaps(): Partial<CapsPayload> {
+  /**
+   * V13-PR08 (Blocker 4): resume-auth-v1 is advertised ONLY when THIS fresh rendezvous is
+   * actually participating in an interrupted-transfer resume (the user pre-selected it
+   * locally before creating the offer / joining). Ordinary sends and receives never
+   * announce it, so a peer can never infer resume intent from generic implementation
+   * support and one side cannot wait for a preamble the other side never intends to run.
+   */
+  function browserCaps(opts: { resume?: boolean } = {}): Partial<CapsPayload> {
     const pickerWindow = window as PickerWindow;
     const storage = navigator.storage as StorageManager | undefined;
     const hasOpfs = typeof storage?.getDirectory === 'function';
@@ -147,6 +167,7 @@
     }
     if (pickerWindow.showSaveFilePicker) sinkHints.push('direct-file');
     features.push('relay');
+    if (opts.resume === true) features.push('resume-auth-v1');
     return { features, sinkHints };
   }
 
@@ -155,7 +176,42 @@
     screen = 'sending';
     track(
       offer({
+        // An ordinary fresh send never advertises resume-auth-v1.
         localCaps: browserCaps(),
+        onPhase: (p) => (phase = p),
+        onCode: (c) => {
+          code = c;
+          link = inviteLinkFor(baseUrl(), c);
+        },
+      }),
+    );
+  }
+
+  /**
+   * V13-PR08 (Blocker 4): resume an interrupted send. The record is selected BEFORE the
+   * fresh offer is created, and the offer advertises resume-auth-v1 only because this
+   * rendezvous is participating in an authenticated resume. A legacy record without a
+   * credential cannot resume — restart fresh or forget it.
+   */
+  async function startSendResume(rec: SenderRecord) {
+    if (rec.resumeSecret === undefined) {
+      // Pre-PR07/legacy record: no credential, so authenticated cross-session resume is
+      // unavailable. Never reuse the old stable transferId under a fresh session.
+      resumeHint =
+        'This interrupted send has no resume credential — authenticated resume is unavailable. Forget it and start a fresh transfer (old data is never reused).';
+      await refreshSenderRecords();
+      return;
+    }
+    pickError = '';
+    reset();
+    pendingResume = rec;
+    resumeHint =
+      'Authenticated resume armed — verified progress is reused only after the peer authenticates. Pick the original source.';
+    resumeNote = 'Resuming the interrupted send — nothing is sent until both peers authenticate.';
+    screen = 'sending';
+    track(
+      offer({
+        localCaps: browserCaps({ resume: true }),
         onPhase: (p) => (phase = p),
         onCode: (c) => {
           code = c;
@@ -168,19 +224,31 @@
   async function startReceive() {
     const trimmed = codeInput.trim();
     if (trimmed === '') return;
+    // V13-PR08 (Blocker 2): snapshot the EXACT selected journal entry into active session
+    // state BEFORE reset(), which clears the pending selection; the attempt then survives
+    // the fresh rendezvous and reaches runReceive exactly once.
+    const resumeAttempt = pendingReceiveResume;
+    reset();
+    activeReceiveResume = resumeAttempt;
     let destination: ReceiveDestinationSpec = { kind: 'auto' };
     try {
-      const pickerWindow = window as PickerWindow;
-      if (receiveTarget === 'direct-file') {
-        if (!pickerWindow.showSaveFilePicker) throw new Error('Direct file saving is unavailable.');
-        destination = { kind: 'direct-file', handle: await pickerWindow.showSaveFilePicker() };
-      } else if (receiveTarget === 'direct-directory') {
-        if (!pickerWindow.showDirectoryPicker)
-          throw new Error('Direct folder saving is unavailable.');
-        destination = {
-          kind: 'direct-directory',
-          handle: await pickerWindow.showDirectoryPicker(),
-        };
+      // V13-PR08 (Blocker 7): an armed journal resume always targets the durable
+      // journal-backed destination — the kept partial data IS the destination. The
+      // ordinary save-to selector is never consulted for that attempt.
+      if (resumeAttempt === undefined) {
+        const pickerWindow = window as PickerWindow;
+        if (receiveTarget === 'direct-file') {
+          if (!pickerWindow.showSaveFilePicker)
+            throw new Error('Direct file saving is unavailable.');
+          destination = { kind: 'direct-file', handle: await pickerWindow.showSaveFilePicker() };
+        } else if (receiveTarget === 'direct-directory') {
+          if (!pickerWindow.showDirectoryPicker)
+            throw new Error('Direct folder saving is unavailable.');
+          destination = {
+            kind: 'direct-directory',
+            handle: await pickerWindow.showDirectoryPicker(),
+          };
+        }
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return;
@@ -188,20 +256,19 @@
       screen = 'failed';
       return;
     }
-    // V13-PR08: joining a FRESH rendezvous while an interrupted receive is selected arms the
-    // authenticated-resume attempt — the worker runs resume-auth-v1 with the peer strictly
-    // before reusing the verified checkpoint, under a fresh key epoch.
-    const resumeAttempt = pendingReceiveResume;
-    reset();
     if (resumeAttempt !== undefined) {
-      receiveResumeHint = `Authenticated resume armed for ${resumeAttempt.label} — verified prior progress is reused only after the peer authenticates.`;
+      receiveResumeHint = `Authenticated resume armed for ${resumeAttempt.label} — verified prior progress (${humanBytes(resumeAttempt.committedBytes)}) is reused only after the peer authenticates.`;
+      resumeNote =
+        'Resuming the interrupted receive — the verified checkpoint is reused only after the peer authenticates.';
     }
     receiveDestination = destination;
     screen = 'receiving';
     track(
       join({
         code: trimmed,
-        localCaps: browserCaps(),
+        // V13-PR08 (Blocker 4): resume-auth-v1 is advertised only for this resume attempt;
+        // ordinary receives never announce it.
+        localCaps: browserCaps({ resume: resumeAttempt !== undefined }),
         onPhase: (p) => (phase = p),
       }),
     );
@@ -251,6 +318,15 @@
   }
 
   /**
+   * V13-PR08 (Blocker 4): the host checks the remote capability BEFORE the worker starts.
+   * A peer that did not advertise resume-auth-v1 in this rendezvous cannot participate in
+   * authenticated resume.
+   */
+  function remoteSupportsResume(): boolean {
+    return peerCaps?.features?.includes('resume-auth-v1') === true;
+  }
+
+  /**
    * Kick off the transfer once everything it needs is in hand. The joiner receives as soon as the
    * channel is adopted; the offerer waits until a file has been picked. Guarded so it runs once.
    */
@@ -260,37 +336,23 @@
     if (role === 'offerer') {
       if (pickedFiles.length === 0) return;
       if (pendingResume) {
-        // Resuming an interrupted send: the picked selection is cheap-checked against the
-        // record first (a friendly refusal beats a pointless transfer), then re-verified
-        // authoritatively by the worker before the manifest frame goes out.
+        // Resuming an interrupted send: the peer must have advertised resume-auth-v1, or
+        // the old transferId never reaches the transfer engine (fail closed, nothing sent).
+        if (!remoteSupportsResume()) {
+          errorText =
+            'The receiver did not advertise authenticated resume (resume-auth-v1); the interrupted transfer id cannot be reused without it — nothing was sent. Ask the receiver to resume, or forget the record and send fresh.';
+          screen = 'failed';
+          return;
+        }
+        // The picked selection is cheap-checked against the record first (a friendly
+        // refusal beats a pointless transfer), then re-verified authoritatively by the
+        // worker before the manifest frame goes out.
         const mismatch = cheapSourceCheck(pendingResume, pickedFiles);
         if (mismatch !== undefined) {
           pickError = `Resume refused — ${mismatch}`;
           return;
         }
-        beginTransfer(
-          runSend(handshake, signaling, {
-            files: pickedFiles,
-            transferId: pendingResume.transferId,
-            reattachment: { kind: 'reselection' },
-            // V13-PR08: the record's persisted credential (when present) arms an explicit
-            // cross-session resume — the worker runs resume-auth-v1 with the peer strictly
-            // before reusing any durable progress, under a fresh key epoch. A pre-PR07
-            // record without a credential resumes as an ordinary fresh send (the old
-            // partials are never silently trusted).
-            ...(pendingResume.resumeSecret !== undefined
-              ? {
-                  resumeAttempt: {
-                    transferId: pendingResume.transferId,
-                    manifestFingerprint: pendingResume.manifestFingerprint,
-                    role: 'offerer' as const,
-                    envelope: pendingResume.resumeSecret,
-                  },
-                }
-              : {}),
-            ...(ice ? { iceServers: ice } : {}),
-          }),
-        );
+        beginSendResume(pendingResume, pickedFiles, { kind: 'reselection' });
         pendingResume = undefined;
         resumeHint = '';
         return;
@@ -302,14 +364,27 @@
         }),
       );
     } else {
-      const resumeAttempt = pendingReceiveResume;
+      // V13-PR08 (Blocker 2): the attempt is the ACTIVE session state, snapshotted at
+      // startReceive — never the pending selection, which reset() cleared.
+      const resumeAttempt = activeReceiveResume;
+      const capable = remoteSupportsResume();
+      if (resumeAttempt !== undefined && !capable) {
+        // Authenticated resume is unavailable: the journal is preserved untouched and the
+        // receive proceeds as a genuinely fresh transfer. Its durable gate still refuses
+        // any progress reuse if the manifest happens to match the kept journal.
+        resumeNote =
+          'The sender did not advertise authenticated resume — kept partial data is preserved but is not reused; this transfer starts fresh.';
+      } else if (resumeAttempt !== undefined) {
+        resumeNote = 'Authenticated resume in progress — the verified checkpoint is reused.';
+      }
       beginTransfer(
         runReceive(handshake, signaling, receiveDestination, {
           ...(ice ? { iceServers: ice } : {}),
           // V13-PR08: the persisted credential envelope stays on the main thread; only
           // the decoded secret crosses into the worker, which authenticates the original
-          // peer before reusing any verified progress.
-          ...(resumeAttempt?.journal?.resumeSecret !== undefined
+          // peer before reusing any verified progress. Without the remote capability the
+          // attempt is NOT passed — the worker treats the transfer as fresh.
+          ...(resumeAttempt?.journal?.resumeSecret !== undefined && capable
             ? {
                 resumeAttempt: {
                   transferId: resumeAttempt.transferId,
@@ -324,11 +399,44 @@
     }
   }
 
+  /**
+   * V13-PR08 (Blocker 3): the ONE shared sender-resume construction used by both the
+   * persistent-handle reopen and the manual re-selection paths, so authenticated
+   * cross-session resume behaves identically either way. The resumeAttempt carries exactly
+   * the stored transferId + fingerprint + offerer role + persisted credential envelope; a
+   * legacy record without a credential never reuses its old stable transferId under a
+   * fresh session (restart fresh instead).
+   */
+  function beginSendResume(rec: SenderRecord, files: File[], reattachment: SenderReattachment) {
+    const ice = iceServers();
+    const resumeAttempt =
+      rec.resumeSecret === undefined
+        ? undefined
+        : {
+            transferId: rec.transferId,
+            manifestFingerprint: rec.manifestFingerprint,
+            role: 'offerer' as const,
+            envelope: rec.resumeSecret,
+          };
+    beginTransfer(
+      runSend(handshake!, signaling!, {
+        files,
+        // The old stable id is reused ONLY when this session will authenticate continuity
+        // with the original peer; otherwise the sender mints a fresh id.
+        ...(resumeAttempt !== undefined ? { transferId: rec.transferId } : {}),
+        reattachment,
+        ...(resumeAttempt !== undefined ? { resumeAttempt } : {}),
+        ...(ice ? { iceServers: ice } : {}),
+      }),
+    );
+  }
+
   /** Bind a running transfer's live progress and terminal outcome to the UI. */
   function beginTransfer(ctrl: TransferController) {
     transfer = ctrl;
     sentBytes = 0;
     totalBytes = ctrl.total() ?? 0;
+    reusedBytes = 0;
     rateBps = 0;
     etaSeconds = undefined;
     transferState = 'running';
@@ -336,6 +444,7 @@
       const snapshot = ctrl.snapshot();
       sentBytes = snapshot.bytes;
       totalBytes = snapshot.total ?? totalBytes;
+      reusedBytes = snapshot.reusedBytes;
       rateBps = snapshot.rateBps;
       etaSeconds = snapshot.etaSeconds;
       transferState = snapshot.state;
@@ -393,6 +502,7 @@
     receiveDestination = { kind: 'auto' };
     sentBytes = 0;
     totalBytes = 0;
+    reusedBytes = 0;
     rateBps = 0;
     etaSeconds = undefined;
     transferState = 'running';
@@ -413,7 +523,9 @@
     pickError = '';
     receiveJournalList = [];
     pendingReceiveResume = undefined;
+    activeReceiveResume = undefined;
     receiveResumeHint = '';
+    resumeNote = '';
   }
 
   async function discardDurable() {
@@ -504,11 +616,16 @@
     await refreshReceiveJournals();
   }
 
-  /** Resume an interrupted send from its record. */
+  /**
+   * Resume an interrupted send from its record. V13-PR08 (Blocker 3): BOTH paths — the
+   * persistent-handle reopen and the manual re-selection — share one resume construction
+   * (beginSendResume), so the authenticated resume attempt (stored transferId +
+   * fingerprint + offerer role + credential) reaches runSend regardless of how the source
+   * was reopened. A revoked permission or dead handle falls back to re-selection.
+   */
   async function sendAgain(rec: SenderRecord) {
     if (handshake === undefined || signaling === undefined) return;
     pickError = '';
-    const ice = iceServers();
     if (rec.reattachment.kind === 'handle') {
       // The persisted handle reopens the original source directly; a revoked permission or a
       // dead handle falls back to re-selection (the record keeps the transfer id either way).
@@ -517,14 +634,8 @@
         try {
           const files = await materializeHandle(rec.reattachment.handle);
           if (files.length === 0) throw new Error('the folder is empty');
-          beginTransfer(
-            runSend(handshake, signaling, {
-              files,
-              transferId: rec.transferId,
-              reattachment: rec.reattachment,
-              ...(ice ? { iceServers: ice } : {}),
-            }),
-          );
+          resumeNote = 'Authenticated resume in progress — the verified checkpoint is reused.';
+          beginSendResume(rec, files, rec.reattachment);
           return;
         } catch {
           // fall through to re-selection
@@ -581,9 +692,11 @@
     void refreshReceiveJournals();
   }
 
-  // Populate the interrupted-receives list once the app mounts.
+  // Populate the interrupted-receives AND interrupted-sends lists once the app mounts, so
+  // interrupted transfers are discoverable before a fresh rendezvous is created.
   if (typeof window !== 'undefined') {
     void refreshReceiveJournals();
+    void refreshSenderRecords();
   }
 </script>
 
@@ -620,6 +733,56 @@
           Send a file
         </button>
         <p class="hint">Files stay end-to-end encrypted with no server-side file storage.</p>
+        {#if senderRecordList.length > 0}
+          <!-- V13-PR08 (Blocker 4): interrupted sends are visible BEFORE a fresh offer, so
+            the user selects the record first and the offer advertises resume-auth-v1 only
+            for that rendezvous. -->
+          <div class="resume-zone">
+            <h3>Interrupted sends</h3>
+            {#each senderRecordList as entry (entry.transferId)}
+              <div class="resume-card">
+                {#if entry.kind === 'ok'}
+                  <p class="resume-name">
+                    {entry.record.files.length} file{entry.record.files.length === 1 ? '' : 's'}
+                    ({humanBytes(entry.record.files.reduce((total, f) => total + f.size, 0))})
+                  </p>
+                  <p class="muted">
+                    {entry.record.reattachment.kind === 'handle'
+                      ? 'Reopens the original folder'
+                      : 'Re-select the original source'}
+                    {#if entry.record.resumeSecret === undefined}
+                      {'\u00b7'} restart required (no credential)
+                    {/if}
+                    {'\u00b7'} interrupted {new Date(entry.record.updatedAt).toLocaleString()}
+                  </p>
+                  <div class="resume-actions">
+                    <button
+                      class="ghost"
+                      disabled={entry.record.resumeSecret === undefined}
+                      title={entry.record.resumeSecret === undefined
+                        ? 'No resume credential — authenticated resume is unavailable; start a fresh transfer instead'
+                        : undefined}
+                      onclick={() => startSendResume(entry.record)}
+                    >
+                      Resume
+                    </button>
+                    <button class="ghost" onclick={() => forgetSenderRecord(entry)}>Forget</button>
+                  </div>
+                {:else}
+                  <p class="resume-name">Corrupt sender record</p>
+                  <p class="muted">
+                    {entry.error} — nothing was sent; forget it to start a new transfer.
+                  </p>
+                  <div class="resume-actions">
+                    <button class="ghost" onclick={() => forgetSenderRecord(entry)}>
+                      Forget
+                    </button>
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {/if}
       </article>
 
       <article class="card receive-card">
@@ -650,11 +813,24 @@
             </button>
           </div>
           <label for="destination">Save to</label>
-          <select id="destination" bind:value={receiveTarget}>
+          <!-- V13-PR08 (Blocker 7): while an interrupted receive is armed for resume, the
+            journal + partial storage IS the destination; the ordinary selector is disabled
+            so a resume can never silently fall back to a fresh save. -->
+          <select
+            id="destination"
+            bind:value={receiveTarget}
+            disabled={pendingReceiveResume !== undefined}
+          >
             <option value="auto">Download when verified</option>
             <option value="direct-file">Save directly to one file</option>
             <option value="direct-directory">Save directly to a folder</option>
           </select>
+          {#if pendingReceiveResume !== undefined}
+            <p class="resume-hint">
+              Resuming into the kept partial data — verified progress is reused only after the peer
+              authenticates.
+            </p>
+          {/if}
         </form>
         {#if receiveResumeHint}
           <p class="resume-hint">{receiveResumeHint}</p>
@@ -839,7 +1015,16 @@
           <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100">
             <div class="bar-fill" style={`width:${progressPercent(sentBytes, totalBytes)}%`}></div>
           </div>
-          <p class="status" aria-live="polite">{progressLabel(sentBytes, totalBytes)}</p>
+          <p class="status" aria-live="polite">
+            {#if reusedBytes > 0}
+              {progressResumedLabel(sentBytes, reusedBytes, totalBytes)}
+            {:else}
+              {progressLabel(sentBytes, totalBytes)}
+            {/if}
+          </p>
+          {#if resumeNote}
+            <p class="resume-hint">{resumeNote}</p>
+          {/if}
           <div class="stats">
             <div class="stat">
               <span class="stat-label">Rate</span>
@@ -928,10 +1113,23 @@
                       {entry.record.reattachment.kind === 'handle'
                         ? 'Reopens the original folder'
                         : 'Re-select the original source'}
+                      {#if entry.record.resumeSecret === undefined}
+                        {'\u00b7'} restart required (no resume credential)
+                      {/if}
                       {'\u00b7'} interrupted {new Date(entry.record.updatedAt).toLocaleString()}
                     </p>
                     <div class="resume-actions">
-                      <button class="ghost" onclick={() => sendAgain(entry.record)}>
+                      <!-- V13-PR08 (Blocker 3): a legacy record without a credential cannot
+                        resume; never reuse its old stable transferId under a fresh session.
+                        Restart fresh (mint a new id) or forget it. -->
+                      <button
+                        class="ghost"
+                        disabled={entry.record.resumeSecret === undefined}
+                        title={entry.record.resumeSecret === undefined
+                          ? 'No resume credential — authenticated resume is unavailable; start a fresh transfer instead'
+                          : undefined}
+                        onclick={() => sendAgain(entry.record)}
+                      >
                         Send again
                       </button>
                       <button class="ghost" onclick={() => forgetSenderRecord(entry)}>

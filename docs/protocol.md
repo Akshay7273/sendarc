@@ -308,13 +308,15 @@ unchanged, and legacy peers that never advertise the capability never receive re
 messages.
 
 The host integration ordering for a cross-session durable resume is: local interrupted
-state selected → source/destination revalidated → fresh signaling/rendezvous created →
-peer capability checked → ResumeAuthSession completes mutually → fresh traffic keys
-available → transfer sender/receiver constructed under the NEW key epoch → authenticated
-Manifest → fingerprint-bound resume_state → sender validates the durable claim → missing
-blocks only → whole-file verification. No Manifest/ResumeState/BlockData/Complete from a
-resumed transfer is sent or trusted before resume-auth completes, and the normal transfer
-protocol never runs under provisional resume-auth keys.
+state selected → source/destination revalidated (cheap source pre-check — canonical
+identity — before dialing; the exact manifest fingerprint is recomputed and compared with
+the record strictly before the manifest frame is transmitted) → fresh signaling/rendezvous
+created → peer capability checked → ResumeAuthSession completes mutually → fresh traffic
+keys available → transfer sender/receiver constructed under the NEW key epoch →
+authenticated Manifest → fingerprint-bound resume_state → sender validates the durable
+claim → missing blocks only → whole-file verification. No Manifest/ResumeState/BlockData/
+Complete from a resumed transfer is sent or trusted before resume-auth completes, and the
+normal transfer protocol never runs under provisional resume-auth keys.
 
 When both peers agree on `resume-auth-v1` and both hold the transfer's local resume
 credential, the peers run the resume-auth handshake over the (abstract) transport. Message

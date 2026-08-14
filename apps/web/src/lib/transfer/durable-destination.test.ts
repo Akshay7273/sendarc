@@ -29,6 +29,7 @@ import {
 } from '@sendbeam/protocol';
 import { createSha256DigestFactory, type Sha256DigestFactory } from './digest.js';
 import { DurableDestination } from './durable-destination.js';
+import { createBrowserDestination } from './sink.js';
 import {
   DURABLE_LEASE_TTL_MS,
   webDestinationIdentity,
@@ -376,6 +377,7 @@ interface Harness {
   files: MemoryFiles;
   makeDestination: (overrides?: Partial<{ now: () => number }>) => DurableDestination;
   digest: Sha256DigestFactory;
+  now: () => number;
   advance: (ms: number) => void;
 }
 
@@ -401,6 +403,7 @@ async function harness(): Promise<Harness> {
     files,
     makeDestination,
     digest: digestFactory,
+    now,
     advance: (ms) => {
       clock += ms;
     },
@@ -1503,5 +1506,149 @@ describe('DurableDestination', () => {
     await retry.close();
     expect((await h.store.loadJournal(TRANSFER_ID)).kind).toBe('none');
     expect(h.store.leases.has(TRANSFER_ID)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createBrowserDestination wrapper (V13-PR08 Blocker 1): the wrapper must retain the
+// pre-manifest resume-auth state (expected interrupted journal id + session authorization)
+// and apply it to the lazily-constructed inner DurableDestination strictly before
+// prepare(), or the auth gate is silently dropped and an existing journal's verified
+// progress could be reused unauthenticated.
+// ---------------------------------------------------------------------------
+
+describe('createBrowserDestination wrapper (V13-PR08 Blocker 1)', () => {
+  it('existing journal + expected id + NO auth refuses progress and keeps everything', async () => {
+    const h = await harness();
+    const m = manifest([['a.bin', 24]]);
+    await journalFor(h.store, h.files, [['a.bin', 24]], [2], m);
+    h.advance(DURABLE_LEASE_TTL_MS + 1); // stale lease → takeover, so the auth gate is what refuses
+    const wrapper = createBrowserDestination({ kind: 'auto' }, h.digest, {
+      files: h.files,
+      store: h.store,
+      now: h.now,
+      renewMs: 0,
+      ensureSpace: async () => {},
+    });
+    wrapper.expectResumeFor?.(TRANSFER_ID);
+    await expect(wrapper.prepare(m)).rejects.toThrow(/not authenticated/);
+    // Nothing was received or deleted: journal + partials survive the refusal. The lease
+    // acquired during prepare is released by the fail-closed gate so a later authenticated
+    // attempt can acquire it immediately (never lingering for the stale TTL).
+    expect((await h.store.loadJournal(TRANSFER_ID)).kind).toBe('ok');
+    expect(h.files.data.get('a.bin')?.length).toBe(16);
+    expect(h.store.leases.has(TRANSFER_ID)).toBe(false);
+  });
+
+  it('existing journal + successful auth state reuses the checkpoint', async () => {
+    const h = await harness();
+    const m = manifest([['a.bin', 24]]);
+    await journalFor(h.store, h.files, [['a.bin', 24]], [2], m);
+    h.advance(DURABLE_LEASE_TTL_MS + 1);
+    const wrapper = createBrowserDestination({ kind: 'auto' }, h.digest, {
+      files: h.files,
+      store: h.store,
+      now: h.now,
+      renewMs: 0,
+      ensureSpace: async () => {},
+    });
+    wrapper.expectResumeFor?.(TRANSFER_ID);
+    wrapper.authorizeResume?.();
+    await wrapper.prepare(m);
+    expect(wrapper.durableMeta?.()?.resumed).toBe(true);
+    // The authenticated checkpoint surfaces immediately: haveBlocks 2, seed digest covering
+    // the persisted prefix — before any new block arrives.
+    const resume = wrapper.resumeStateFor?.(m);
+    expect(resume?.transferId).toBe(TRANSFER_ID);
+    expect(resume?.files.get(0)?.haveBlocks).toBe(2);
+  });
+
+  it('wrong expected transfer id refuses reuse of that journal', async () => {
+    const h = await harness();
+    const m = manifest([['a.bin', 24]]);
+    await journalFor(h.store, h.files, [['a.bin', 24]], [2], m);
+    h.advance(DURABLE_LEASE_TTL_MS + 1);
+    const wrapper = createBrowserDestination({ kind: 'auto' }, h.digest, {
+      files: h.files,
+      store: h.store,
+      now: h.now,
+      renewMs: 0,
+      ensureSpace: async () => {},
+    });
+    // The user selected a DIFFERENT interrupted transfer; authorization for it must not
+    // authorize this journal's progress.
+    wrapper.expectResumeFor?.('f'.repeat(32));
+    wrapper.authorizeResume?.();
+    // The session authenticated continuity with the SELECTED journal only; this journal's
+    // verified progress is never reused.
+    await expect(wrapper.prepare(m)).rejects.toThrow(/requires authenticated resume/);
+    expect((await h.store.loadJournal(TRANSFER_ID)).kind).toBe('ok');
+  });
+
+  it('fresh journal remains ordinary — no auth, no resume state, resume hooks inert', async () => {
+    const h = await harness();
+    const m = manifest([['a.bin', 24]]);
+    const wrapper = createBrowserDestination({ kind: 'auto' }, h.digest, {
+      files: h.files,
+      store: h.store,
+      now: h.now,
+      renewMs: 0,
+      ensureSpace: async () => {},
+    });
+    // No resume attempt armed: a fresh receive must not need authorization or a seed.
+    await wrapper.prepare(m);
+    expect(wrapper.durableMeta?.()?.resumed).toBe(false);
+    expect(wrapper.resumeStateFor?.(m)).toBeUndefined();
+    expect((await h.store.loadJournal(TRANSFER_ID)).kind).toBe('ok');
+  });
+
+  it('authorization cannot leak to another destination/transfer', async () => {
+    const h = await harness();
+    const m = manifest([['a.bin', 24]]);
+    await journalFor(h.store, h.files, [['a.bin', 24]], [2], m);
+    h.advance(DURABLE_LEASE_TTL_MS + 1);
+    const authorized = createBrowserDestination({ kind: 'auto' }, h.digest, {
+      files: h.files,
+      store: h.store,
+      now: h.now,
+      renewMs: 0,
+      ensureSpace: async () => {},
+    });
+    authorized.expectResumeFor?.(TRANSFER_ID);
+    authorized.authorizeResume?.();
+    await authorized.prepare(m); // this session authenticated → reuses the checkpoint
+    // Let the authorized session's lease lapse (its renew timer is disabled).
+    h.advance(DURABLE_LEASE_TTL_MS + 1);
+    // A SECOND wrapper for the same journal, in a fresh (unauthorized) session, must still
+    // refuse — authorization is per-destination/session, never global storage state.
+    const fresh = createBrowserDestination({ kind: 'auto' }, h.digest, {
+      files: h.files,
+      store: h.store,
+      now: h.now,
+      renewMs: 0,
+      ensureSpace: async () => {},
+    });
+    fresh.expectResumeFor?.(TRANSFER_ID);
+    await expect(fresh.prepare(m)).rejects.toThrow(/not authenticated/);
+  });
+
+  it('an armed journal resume cannot silently target a direct-file or direct-directory save', async () => {
+    const h = await harness();
+    const m = manifest([['a.bin', 24]]);
+    const fileWrapper = createBrowserDestination(
+      { kind: 'direct-file', handle: {} as FileSystemFileHandle },
+      h.digest,
+    );
+    fileWrapper.expectResumeFor?.(TRANSFER_ID);
+    await expect(fileWrapper.prepare(m)).rejects.toThrow(/cannot target a single-file save/);
+    const dirWrapper = createBrowserDestination(
+      { kind: 'direct-directory', handle: {} as FileSystemDirectoryHandle },
+      h.digest,
+    );
+    dirWrapper.expectResumeFor?.(TRANSFER_ID);
+    await expect(dirWrapper.prepare(m)).rejects.toThrow(/cannot target a folder save/);
+    // Nothing was written or deleted.
+    expect(h.store.journals.size).toBe(0);
+    expect(h.files.data.size).toBe(0);
   });
 });

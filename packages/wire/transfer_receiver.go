@@ -58,9 +58,14 @@ type ReceiverOptions struct {
 	// OnProgress reports bytes only after verify-and-sink.
 	OnProgress     func(acknowledgedBytes int64)
 	OnFileProgress func(fileIdx int, fileBytes, acknowledgedBytes int64)
-	OnStateChange  func(TransferState)
-	OnManifestSet  func(manifest Manifest) error
-	OnManifest     func(file FileEntry) error
+	// OnResume reports the verified baseline reused from the authenticated durable
+	// checkpoint (the persisted haveBlocks claim) once the resume seed is applied, invoked
+	// ONCE before the first new block is acknowledged. The host anchors its session rate on
+	// this baseline: sessionBytes = acknowledged - reused.
+	OnResume      func(reusedBytes int64)
+	OnStateChange func(TransferState)
+	OnManifestSet func(manifest Manifest) error
+	OnManifest    func(file FileEntry) error
 	// Resume restores a reloaded receiver's progress. When the arriving manifest carries a matching
 	// TransferID, each file restarts at its HaveBlocks high-water mark and the sender is asked to
 	// stream only the missing blocks. Nil (or a TransferID mismatch) means a fresh receive.
@@ -292,6 +297,29 @@ func (r *Receiver) applyManifest(payload []byte) error {
 				return NewTransferError(FailSinkError, err.Error())
 			}
 			r.activeResume = r.o.Resume
+			// V13-PR08 progress contract: surface the verified baseline reused from the
+			// authenticated checkpoint immediately — before the first new block is
+			// acknowledged — so the host anchors its session rate on it.
+			if r.o.OnResume != nil && r.activeResume != nil {
+				reusedTotal := int64(0)
+				for _, file := range validated.Files {
+					have := 0
+					if p, ok := r.activeResume.Files[file.Idx]; ok {
+						have = p.HaveBlocks
+					}
+					if have <= 0 {
+						continue
+					}
+					if have >= file.Blocks {
+						reusedTotal += file.Size
+					} else {
+						reusedTotal += int64(have) * int64(file.BlockSize)
+					}
+				}
+				if reusedTotal > 0 {
+					r.o.OnResume(reusedTotal)
+				}
+			}
 		}
 		if err := r.sendResumeState(&validated); err != nil {
 			return err

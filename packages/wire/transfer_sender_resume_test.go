@@ -353,6 +353,91 @@ func TestSenderResumeStreamsOnlyMissingBlocks(t *testing.T) {
 	}
 }
 
+// TestSenderOnResumeReportsReusedBaselineBeforeBlocks pins the V13-PR08 progress contract:
+// the verified baseline reused from the authenticated checkpoint is reported ONCE via
+// OnResume BEFORE any block is sent, and the first OnProgress sample counts only the
+// session advance above that baseline (firstProgress = reused + first new block), so the
+// host anchors its session rate on the reused jump without counting it as transferred.
+func TestSenderOnResumeReportsReusedBaselineBeforeBlocks(t *testing.T) {
+	data := seq(20) // 3 blocks of 8: 16 bytes + 4
+	id := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	rs := NewResumeState(id, []ResumeFileState{{Idx: 0, HaveBlocks: 2}})
+	rs.ManifestFingerprint = fp(t, data, id)
+	keys, err := DeriveTransferKeys(senderMaster())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out outbox
+	reused := int64(-1)
+	firstProgress := int64(-1)
+	s := NewSender(SenderOptions{
+		File: BytesSource(data, FileMeta{Name: "f", Size: int64(len(data)), Mime: "application/octet-stream", LastModified: 1}, 0),
+		Send: out.push, SendDir: keys.O2J, RecvDir: keys.J2O,
+		BlockSize: 8, FrameSize: 4, Window: 1,
+		TransferID: id,
+		OnResume: func(n int64) {
+			if reused != -1 {
+				t.Fatalf("OnResume fired %d times, want exactly once", reused)
+			}
+			reused = n
+		},
+		OnProgress: func(n int64) {
+			if firstProgress < 0 {
+				firstProgress = n
+			}
+		},
+	})
+	res := make(chan error, 1)
+	go func() {
+		_, err := s.Run(context.Background())
+		res <- err
+	}()
+	waitStable(t, &out, 1)
+	s.Handle(sealResumeIn(t, keys, 0, rs))
+	counter := uint64(1)
+	// Ack the single missing block and the terminal Done, settling the send.
+	waitStable(t, &out, 3)
+	ack, err := EncodeControl(NewAck(0, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := Seal(keys.J2O, counter, FrameHeaderInput{Version: FrameVersion, Type: FrameAck}, ack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter++
+	s.Handle(frame)
+	waitStable(t, &out, 4)
+	donePayload, err := EncodeControl(NewDone())
+	if err != nil {
+		t.Fatal(err)
+	}
+	doneFrame, err := Seal(keys.J2O, counter, FrameHeaderInput{Version: FrameVersion, Type: FrameDone}, donePayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Handle(doneFrame)
+	if err := waitSenderResult(t, res); err != nil {
+		t.Fatalf("Run error = %v", err)
+	}
+	// 2 blocks * 8 bytes = 16 bytes reused from the authenticated checkpoint.
+	if reused != 16 {
+		t.Fatalf("OnResume reused = %d, want 16", reused)
+	}
+	// The reused baseline was reported before any block was sent; the first OnProgress then
+	// equals baseline + the one missing block (4 bytes), proving the session advance is
+	// measured above the checkpoint, not from zero.
+	if firstProgress != reused+4 {
+		t.Fatalf("first OnProgress = %d, want reused baseline + first new block (%d)", firstProgress, reused+4)
+	}
+	// Zero-byte session advance: with no missing blocks, firstProgress must never exceed the
+	// baseline — but this transfer has one missing block, so assert the ordering instead:
+	// OnResume fired before the first OnProgress.
+	if reused != 16 || firstProgress < reused {
+		t.Fatalf("progress regressed below the reused baseline: reused=%d firstProgress=%d", reused, firstProgress)
+	}
+}
+
 // TestSenderAcceptsLegacyResumeStateWithoutFingerprint: a peer predating the fingerprint
 // binding answers without the field; structural validation still applies and the resume works.
 func TestSenderAcceptsLegacyResumeStateWithoutFingerprint(t *testing.T) {

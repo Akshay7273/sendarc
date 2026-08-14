@@ -418,6 +418,9 @@ function run(
             return;
           case 'progress':
             progress.update(msg.bytes);
+            // V13-PR08: anchor the verified baseline reused from the authenticated
+            // checkpoint (reported before the first new block).
+            if (msg.reusedBytes !== undefined) progress.setReused(msg.reusedBytes);
             return;
           case 'manifest':
             total = msg.totalSize;

@@ -178,7 +178,23 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
         let recvDir = msg.recvDir;
         let sendCounter = msg.sendCounter;
         let recvCounter = msg.recvCounter;
+        // V13-PR08 progress contract: verified baseline reused from the authenticated
+        // checkpoint, anchored by the engine's onResume before any new block is ACKed.
+        let reusedBaseline = 0;
+        const progressMsg = (bytes: number): WorkerToHost => ({
+          kind: 'progress',
+          bytes,
+          ...(reusedBaseline > 0 ? { reusedBytes: reusedBaseline } : {}),
+        });
         if (msg.resumeAttempt !== undefined) {
+          // V13-PR08 role binding: a sender resume attempt must carry the offerer role; a
+          // mismatched persisted/host role is a hard failure, never silently ignored.
+          if (msg.resumeAttempt.role !== 'offerer') {
+            throw new TransferError(
+              'integrity',
+              'a sender resume attempt must carry the offerer role',
+            );
+          }
           const resumed = await runResumePreamble(msg, send, (p) => (preamble = p));
           sendDir = resumed.sendDir;
           recvDir = resumed.recvDir;
@@ -206,7 +222,12 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
           // journal/fingerprint the peer authenticated. Omitting it would mint a NEW id and
           // silently abandon the interrupted transfer's durable state.
           ...(transferId !== '' ? { transferId } : {}),
-          onProgress: (bytes) => post({ kind: 'progress', bytes }),
+          onResume: (reused) => {
+            reusedBaseline = reused;
+            // Surface the verified checkpoint immediately — before the first new block.
+            post(progressMsg(reused));
+          },
+          onProgress: (bytes) => post(progressMsg(bytes)),
           onManifest: async (manifest) => {
             manifestFiles = manifest.files;
             const store = deps.senderRecords;
@@ -261,7 +282,23 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
         let recvDir = _msg.recvDir;
         let sendCounter = _msg.sendCounter;
         let recvCounter = _msg.recvCounter;
+        // V13-PR08 progress contract: verified baseline reused from the authenticated
+        // checkpoint, anchored by the engine's onResume before any new block is ACKed.
+        let reusedBaseline = 0;
+        const progressMsg = (bytes: number): WorkerToHost => ({
+          kind: 'progress',
+          bytes,
+          ...(reusedBaseline > 0 ? { reusedBytes: reusedBaseline } : {}),
+        });
         if (_msg.resumeAttempt !== undefined) {
+          // V13-PR08 role binding: a receiver resume attempt must carry the joiner role; a
+          // mismatched persisted/host role is a hard failure, never silently ignored.
+          if (_msg.resumeAttempt.role !== 'joiner') {
+            throw new TransferError(
+              'integrity',
+              'a receiver resume attempt must carry the joiner role',
+            );
+          }
           // The user pre-selected this interrupted journal locally; its verified progress
           // may be reused only after resume-auth succeeds in this session.
           if (isBrowserDestination(destination) && destination.expectResumeFor) {
@@ -288,7 +325,12 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
           recvCounterStart: recvCounter,
           createDigest: deps.createDigest,
           destination,
-          onProgress: (bytes) => post({ kind: 'progress', bytes }),
+          onResume: (reused) => {
+            reusedBaseline = reused;
+            // Surface the verified checkpoint immediately — before the first new block.
+            post(progressMsg(reused));
+          },
+          onProgress: (bytes) => post(progressMsg(bytes)),
           onStateChange: (state) => post({ kind: 'state', state }),
           onManifestSet: async (manifest) => {
             post({

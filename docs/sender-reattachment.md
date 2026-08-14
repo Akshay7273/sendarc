@@ -125,8 +125,12 @@ before its frame, so the receiver never sees an inconsistent id. Nothing was sen
 
 PR08 builds on the record: on a sender restart the user _reopens_ the interrupted send
 (the record's persisted path/handle or an explicit reselection — PR04 stays mandatory),
-the source is revalidated (canonical identity + exact fingerprint against the record),
-and only then is the transfer resumed with the peer.
+and the source is revalidated before any progress is reused. The cheap pre-check — the
+canonical source identity (count, names, sizes, mtimes in canonical order) against the
+record — runs before the fresh rendezvous is dialed; the EXACT manifest fingerprint is
+recomputed from the validated manifest and compared with the record strictly before the
+manifest frame is transmitted (after resume-auth, before any verified progress is reused
+or any data is sent under the resumed transfer).
 
 The record's PR07 `resumeSecret` is the difference between a **durable resume** and a
 **restart**:
@@ -142,8 +146,10 @@ The record's PR07 `resumeSecret` is the difference between a **durable resume** 
   never deleted without explicit discard.
 
 A valid `resumeSecret` is NOT authorization to change the source: the source
-revalidation ordering (reopen → recompute identity + fingerprint → compare with the
-record) runs before any resume-auth, and a mismatch is a hard refusal.
+revalidation ordering is (1) cheap pre-check (canonical identity — count, names, sizes,
+mtimes) before dialing, (2) resume-auth, (3) exact manifest fingerprint recomputed and
+compared with the record strictly before the manifest frame is transmitted, and a
+mismatch at either stage is a hard refusal.
 
 Errors are distinct: interrupted transfer not found, source changed, receiver state
 missing/corrupt, resume credential unavailable, peer does not support authenticated
