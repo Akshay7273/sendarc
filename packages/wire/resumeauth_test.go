@@ -602,3 +602,251 @@ func TestResumeAuthNegotiation(t *testing.T) {
 		t.Fatal("no capabilities must not negotiate")
 	}
 }
+
+// TestResumeDecodeBounds covers BLOCKER 3: the payload ceiling is enforced before any JSON
+// parsing, and every 32-byte nonce/proof's canonical base64url length is enforced before any
+// base64 decoding — no attacker-controlled unbounded allocations.
+func TestResumeDecodeBounds(t *testing.T) {
+	nonce43 := strings.Repeat("A", 43) // canonical base64url of 32 zero bytes
+	base := func() []byte {
+		return encodeMsg(t, &ResumeMessage{Type: ResumeMsgInit, Version: 1, Role: RoleOfferer, Nonce: nonce43})
+	}
+
+	// A valid message at/inside the ceiling decodes.
+	if _, err := DecodeResumeMessage(base()); err != nil {
+		t.Fatalf("canonical message must decode: %v", err)
+	}
+
+	// Oversized payload is rejected BEFORE JSON parsing (no allocation of its contents).
+	oversized := bytes.Repeat([]byte{'x'}, MaxResumeAuthMessageBytes+1)
+	if _, err := DecodeResumeMessage(oversized); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized payload = %v, want pre-decode ceiling rejection", err)
+	}
+	// A payload exactly at the ceiling is still rejected at the per-field length checks if
+	// its fields are malformed, but the ceiling itself admits it. Build a valid JSON that
+	// happens to be big via a large unknown field: unknown fields fail closed regardless.
+	atBound := append([]byte(`{"type":"resume_init","version":1,"role":"offerer",`), []byte(`"nonce":"`+nonce43+`","padding":"`)...)
+	atBound = append(atBound, bytes.Repeat([]byte{'a'}, MaxResumeAuthMessageBytes-len(atBound)-8)...)
+	atBound = append(atBound, []byte(`"}`)...)
+	if len(atBound) <= MaxResumeAuthMessageBytes {
+		// The ceiling admits the payload: the rejection must come from the unknown-field
+		// rule, NOT from a size rejection.
+		if _, err := DecodeResumeMessage(atBound); err == nil || strings.Contains(err.Error(), "exceeds") {
+			t.Fatalf("at-bound unknown field = %v, want field rejection (not a size rejection)", err)
+		}
+	}
+
+	// Canonical 43-char values decode; 42/44-char and padded/non-canonical are rejected
+	// before decoding (length first), and invalid characters are rejected by the alphabet
+	// check during decode. Raw JSON is used because EncodeResumeMessage validates fields
+	// before encoding — the decoder is what must reject these.
+	nonce42 := strings.Repeat("A", 42)
+	nonce44 := strings.Repeat("A", 44)
+	noncePadded := nonce43 + "="
+	nonceBogus := strings.Repeat("!", 43)
+	for name, nonce := range map[string]string{
+		"42 chars":    nonce42,
+		"44 chars":    nonce44,
+		"padded":      noncePadded,
+		"bogus chars": nonceBogus,
+	} {
+		raw := []byte(`{"type":"resume_init","version":1,"role":"offerer","nonce":"` + nonce + `"}`)
+		if _, err := DecodeResumeMessage(raw); err == nil {
+			t.Fatalf("nonce with %s must be rejected", name)
+		}
+	}
+
+	// Huge nonce/proof strings (far beyond 43 chars) are rejected at the length check.
+	// The payloads are built as raw JSON because EncodeResumeMessage validates fields
+	// before encoding — the decoder is exactly what must reject them first.
+	huge := strings.Repeat("A", 10_000)
+	rawHugeNonce := []byte(`{"type":"resume_init","version":1,"role":"offerer","nonce":"` + huge + `"}`)
+	if _, err := DecodeResumeMessage(rawHugeNonce); err == nil {
+		t.Fatal("huge nonce must be rejected")
+	}
+	rawHugeProof := []byte(`{"type":"resume_challenge","version":1,"role":"joiner","nonce":"` +
+		nonce43 + `","proof":"` + huge + `"}`)
+	if _, err := DecodeResumeMessage(rawHugeProof); err == nil {
+		t.Fatal("huge proof must be rejected")
+	}
+}
+
+// TestResumeAuthInputHygiene covers the CRYPTO API INPUT HYGIENE fix: the original master
+// and the resume root must be exactly 32 bytes, not merely non-empty.
+func TestResumeAuthInputHygiene(t *testing.T) {
+	for name, master := range map[string][]byte{
+		"empty":     {},
+		"too short": bytes.Repeat([]byte{1}, 31),
+		"too long":  bytes.Repeat([]byte{1}, 33),
+	} {
+		if _, err := ResumeRoot(master); err == nil || !strings.Contains(err.Error(), "must be 32 bytes") {
+			t.Fatalf("ResumeRoot with %s master = %v, want 32-byte rejection", name, err)
+		}
+	}
+	root, err := ResumeRoot(resumeTestMaster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, r := range map[string][]byte{
+		"empty":     {},
+		"too short": bytes.Repeat([]byte{1}, 31),
+		"too long":  bytes.Repeat([]byte{1}, 33),
+	} {
+		if _, err := ResumeSecret(r, ResumeAuthVersion, resumeVectorTransfer, resumeVectorFinger); err == nil ||
+			!strings.Contains(err.Error(), "resume root must be 32 bytes") {
+			t.Fatalf("ResumeSecret with %s root = %v, want 32-byte rejection", name, err)
+		}
+	}
+	// Valid 32-byte inputs still produce the pinned vector secret (outputs unchanged).
+	want, err := ResumeSecret(root, ResumeAuthVersion, resumeVectorTransfer, resumeVectorFinger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(want, resumeTestSecret) {
+		t.Fatal("valid-input derivation changed; vectors must stay byte-identical")
+	}
+}
+
+// TestResumeAuthVersionZeroExplicit covers PARITY FIX A: version 0 is an explicit rejection
+// in both implementations — no implicit promotion to v1.
+func TestResumeAuthVersionZeroExplicit(t *testing.T) {
+	ctx := resumeTestContext(RoleOfferer, func(c *ResumeAuthContext) { c.Version = 0 })
+	if _, err := NewResumeAuthSession(ctx); err == nil {
+		t.Fatal("version 0 must be rejected explicitly")
+	}
+	ctx2 := resumeTestContext(RoleJoiner, func(c *ResumeAuthContext) { c.Version = 0 })
+	if _, err := NewResumeAuthSession(ctx2); err == nil {
+		t.Fatal("version 0 must be rejected explicitly on the joiner too")
+	}
+}
+
+// TestResumeTerminalDuplicateSemantics covers PARITY/STATE FIX B: the offerer snapshots the
+// accepted ready, so after done an exact duplicate ready is a settled no-op and a different
+// ready is a conflicting duplicate that fails; the joiner's accepted confirm stays
+// idempotently retryable the same way.
+func TestResumeTerminalDuplicateSemantics(t *testing.T) {
+	ctx := func(role Role, over func(*ResumeAuthContext)) ResumeAuthContext {
+		return resumeTestContext(role, over)
+	}
+
+	// Exact ready duplicate after settlement: settled no-op, same result.
+	offerer, err := NewResumeAuthSession(ctx(RoleOfferer, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	joiner, err := NewResumeAuthSession(ctx(RoleJoiner, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	init, err := offerer.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge, _, err := joiner.Handle(encodeMsg(t, init))
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirm, _, err := offerer.Handle(encodeMsg(t, challenge))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready, _, err := joiner.Handle(encodeMsg(t, confirm))
+	if err != nil {
+		t.Fatal(err)
+	}
+	readyBytes := encodeMsg(t, ready)
+	_, offererResult, err := offerer.Handle(readyBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exact duplicate ready: idempotent no-op with the same settled result.
+	_, dup, err := offerer.Handle(readyBytes)
+	if err != nil {
+		t.Fatalf("exact duplicate ready after done = %v, want settled no-op", err)
+	}
+	if dup == nil || dup.TransferID != offererResult.TransferID {
+		t.Fatal("exact duplicate ready must return the same settled result")
+	}
+
+	// Conflicting ready (different bytes) after done fails closed.
+	otherJoiner, err := NewResumeAuthSession(ctx(RoleJoiner,
+		func(c *ResumeAuthContext) { c.NonceSource = fixedNonce(bytesRange(0x80, 0xA0)) }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	off2, err := NewResumeAuthSession(ctx(RoleOfferer,
+		func(c *ResumeAuthContext) { c.NonceSource = fixedNonce(bytesRange(0x60, 0x80)) }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	init2, err := off2.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge2, _, err := otherJoiner.Handle(encodeMsg(t, init2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirm2, _, err := off2.Handle(encodeMsg(t, challenge2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready2, _, err := otherJoiner.Handle(encodeMsg(t, confirm2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := off2.Handle(encodeMsg(t, ready2)); err != nil {
+		t.Fatal(err)
+	}
+	// A different valid ready (from the same joiner context but a mutated transcript is not
+	// possible here, so craft a conflicting message: re-handle with a different nonce is
+	// covered by replay tests; here prove a conflicting READY shape fails after done).
+	conflictingReady := &ResumeMessage{Type: ResumeMsgReady, Version: 1, Role: RoleJoiner,
+		Proof: strings.Repeat("A", 43)}
+	if _, _, err := off2.Handle(encodeMsg(t, conflictingReady)); err == nil {
+		t.Fatal("conflicting ready after done must fail closed")
+	}
+
+	// Joiner: exact confirm duplicate after settlement re-answers the SAME ready snapshot
+	// with the same result; a conflicting confirm fails.
+	j2, err := NewResumeAuthSession(ctx(RoleJoiner, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o3, err := NewResumeAuthSession(ctx(RoleOfferer, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	init3, err := o3.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge3, _, err := j2.Handle(encodeMsg(t, init3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirm3, _, err := o3.Handle(encodeMsg(t, challenge3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready3, jResult, err := j2.Handle(encodeMsg(t, confirm3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmBytes := encodeMsg(t, confirm3)
+	readyDup, dupResult, err := j2.Handle(confirmBytes)
+	if err != nil {
+		t.Fatalf("exact duplicate confirm after done = %v, want snapshot re-answer", err)
+	}
+	if !bytes.Equal(encodeMsg(t, readyDup), encodeMsg(t, ready3)) {
+		t.Fatal("duplicate confirm must re-answer with the identical ready")
+	}
+	if dupResult == nil || dupResult.TransferID != jResult.TransferID {
+		t.Fatal("duplicate confirm must return the same settled result")
+	}
+	conflictingConfirm := &ResumeMessage{Type: ResumeMsgConfirm, Version: 1, Role: RoleOfferer,
+		Proof: strings.Repeat("A", 43)}
+	if _, _, err := j2.Handle(encodeMsg(t, conflictingConfirm)); err == nil {
+		t.Fatal("conflicting confirm after done must fail closed")
+	}
+}

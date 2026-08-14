@@ -212,8 +212,13 @@ export class DurableDestination implements BrowserDestination {
   /**
    * Derive the transfer-scoped resume credential from the original session resume root and
    * persist it into the receive journal (V13-PR07). Runs only after the authenticated
-   * manifest validated and bound to the journal; a journal that already carries the
-   * original-session credential is never re-derived or replaced.
+   * manifest validated and bound to the journal.
+   *
+   * Provenance (V13-PR07 security review, Blocker 1): the credential may be derived only
+   * for a journal created during THIS manifest/session (`prepare` did not load one). A
+   * journal loaded as existing/resumed state must NEVER receive a credential fabricated
+   * from a later session master: an existing credential is preserved exactly, a missing one
+   * stays missing.
    */
   async attachResumeSecret(manifest: Manifest, resumeRoot: Uint8Array): Promise<void> {
     const journal = this.journal;
@@ -235,17 +240,26 @@ export class DurableDestination implements BrowserDestination {
     if (journal.resumeSecret !== undefined) {
       return; // original-session credential already persisted; never replace it
     }
+    if (this.resumed) {
+      // The journal predates this session (loaded, not created): a missing credential stays
+      // missing — never fabricated from a later session master. Old partials are never
+      // deleted and the journal remains usable for its existing capabilities.
+      return;
+    }
     const secret = await deriveResumeSecret(
       resumeRoot,
       RESUME_AUTH_VERSION,
       journal.transferId,
       fingerprint,
     );
-    const next: DurableJournal = {
-      ...journal,
-      resumeSecret: encodeResumeSecretEnvelope(secret),
-    };
-    this.journal = await this.store.saveJournal(next);
+    // The lease-guarded store operation re-loads the CURRENT journal in one transaction,
+    // preserves committed progress, and fails closed if this receiver lost the lease.
+    this.journal = await this.store.attachResumeSecret(
+      journal.transferId,
+      encodeResumeSecretEnvelope(secret),
+      this.ownerId,
+      this.now(),
+    );
   }
 
   async open(file: FileEntry): Promise<Sink> {

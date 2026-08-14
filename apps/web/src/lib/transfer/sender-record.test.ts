@@ -266,4 +266,106 @@ describe('sender-record', () => {
     const tamperedLoad = await store.load('ff'.repeat(16));
     expect(tamperedLoad.kind).toBe('corrupt');
   });
+
+  it('rejects malicious v1 records whose checksum is VALID for their bad body (BLOCKER 5)', async () => {
+    const { sha256, bytesToHex, utf8 } = await import('@sendbeam/protocol');
+    const manifest = testManifest();
+    const v2 = await newSenderRecord(manifest, { kind: 'reselection' }, 1_234);
+
+    // Build a v1 fixture with a correctly recomputed v1 checksum for whatever body is given:
+    // the checksum is corruption detection, not a trust anchor, so structural validation must
+    // still reject the migrated record (Go keeps the same parity).
+    const v1With = async (mutate: (r: Record<string, unknown>) => void): Promise<unknown> => {
+      const legacy = structuredClone(v2) as unknown as Record<string, unknown>;
+      delete (legacy as { resumeSecret?: unknown }).resumeSecret;
+      legacy.schemaVersion = 1;
+      legacy.checksum = '';
+      mutate(legacy);
+      const core = JSON.stringify({
+        schemaVersion: 1,
+        transferId: legacy.transferId,
+        manifestFingerprint: legacy.manifestFingerprint,
+        protocolVersion: legacy.protocolVersion,
+        createdAt: legacy.createdAt,
+        updatedAt: legacy.updatedAt,
+        files: (legacy.files as Array<Record<string, unknown>>).map((f) => ({
+          name: f.name,
+          size: f.size,
+          mime: f.mime,
+          lastModified: f.lastModified,
+        })),
+        reattachment: { kind: 'reselection' },
+      });
+      legacy.checksum = bytesToHex(await sha256(utf8(core)));
+      return legacy;
+    };
+
+    const cases: Array<{ name: string; mutate: (r: Record<string, unknown>) => void }> = [
+      {
+        name: 'malformed transferId (uppercase hex)',
+        mutate: (r) => {
+          r.transferId = 'A'.repeat(32);
+        },
+      },
+      {
+        name: 'transferId wrong length',
+        mutate: (r) => {
+          r.transferId = 'a'.repeat(31);
+        },
+      },
+      {
+        name: 'bad protocolVersion',
+        mutate: (r) => {
+          r.protocolVersion = 'sendbeam/0';
+        },
+      },
+      {
+        name: 'negative file size',
+        mutate: (r) => {
+          (r.files as Array<Record<string, unknown>>)[0]!.size = -1;
+        },
+      },
+      {
+        name: 'non-integer file size',
+        mutate: (r) => {
+          (r.files as Array<Record<string, unknown>>)[0]!.size = 1.5;
+        },
+      },
+      {
+        name: 'invalid timestamp',
+        mutate: (r) => {
+          r.createdAt = -5;
+        },
+      },
+      {
+        name: 'malformed reattachment kind',
+        mutate: (r) => {
+          r.reattachment = { kind: 'bogus' };
+        },
+      },
+      {
+        name: 'empty files',
+        mutate: (r) => {
+          r.files = [];
+        },
+      },
+      {
+        name: 'malformed manifest fingerprint (not lowercase hex)',
+        mutate: (r) => {
+          r.manifestFingerprint = 'z'.repeat(64);
+        },
+      },
+    ];
+
+    for (const c of cases) {
+      const store = memorySenderRecordStore();
+      const entry = await v1With(c.mutate);
+      await (store as unknown as { entries: Map<string, unknown> }).entries.set(
+        'aa'.repeat(16),
+        entry,
+      );
+      const loaded = await store.load('aa'.repeat(16));
+      expect(loaded.kind, c.name).toBe('corrupt');
+    }
+  });
 });

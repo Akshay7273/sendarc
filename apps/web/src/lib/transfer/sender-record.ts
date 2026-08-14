@@ -545,7 +545,13 @@ async function migrateSenderRecordV1(record: unknown): Promise<SenderRecord> {
     checksum: '',
   } as unknown as SenderRecord;
   migrated.checksum = await senderRecordChecksum(migrated);
-  return migrated;
+  // The v1 checksum is corruption detection, NOT a trust anchor (a local attacker/user can
+  // recompute it). Run the CURRENT structural validation over the migrated object and
+  // return only the validated result, so a malicious-but-checksum-valid v1 body (bad
+  // transferId, negative size, invalid timestamp, empty files, malformed reattachment,
+  // unsupported protocol version, ...) still fails closed (Blocker 5). No recursion: this
+  // path never calls migrate again.
+  return validateSenderRecord(migrated);
 }
 
 // ---------------------------------------------------------------------------

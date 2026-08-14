@@ -332,3 +332,13 @@ capability-stripping cannot downgrade to an unauthenticated resume (absence of t
 capability or of a matching credential simply makes cross-session resume unavailable);
 old traffic keys/counters are never restored or reused; and the server cannot forge a
 resume authentication. Same-session resume (`resume_state` above) is unchanged.
+
+Decoder bounds: one resume-auth message is limited to **1024 bytes** (checked before any
+JSON parsing), every nonce/proof must be exactly the canonical 43-char unpadded base64url
+of 32 bytes (length checked before any base64 decoding), characters outside the base64url
+alphabet and padded or non-canonical spellings are rejected, and there is no implicit
+version — `version` must be exactly 1. The capability is included in the resume decision;
+PR08 owns the discovery path that obtains authenticated capability state for a
+cross-session attempt, and this protocol only guarantees the fail-closed side: capability
+absent, stripped, or untrusted ⇒ cross-session resume unavailable, never an unauthenticated
+resume.

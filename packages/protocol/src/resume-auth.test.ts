@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  MAX_RESUME_AUTH_MESSAGE_BYTES,
   RESUME_AUTH_CAPABILITY,
   RESUME_AUTH_VERSION,
   RESUME_PROOF_BYTES,
@@ -33,7 +34,7 @@ import {
   type ResumeAuthOutcome,
   type ResumeMessage,
 } from './resume-auth.js';
-import { bytesToHex, hexToBytes, utf8 } from './bytes.js';
+import { bytesToBase64url, bytesToHex, hexToBytes, utf8 } from './bytes.js';
 import { deriveTransferKeys } from './keyschedule.js';
 import { randomBytes } from './webcrypto.js';
 
@@ -291,6 +292,219 @@ describe('resume-auth message codec', () => {
     // Trailing garbage is rejected.
     const valid = new TextDecoder().decode(encodeResumeMessage(init));
     expect(() => decodeResumeMessage(utf8(valid + '{}'))).toThrow();
+  });
+});
+
+describe('resume-auth input hygiene and bounds (review fixes)', () => {
+  it('requires an exactly-32-byte master and resume root (crypto input hygiene)', async () => {
+    await expect(deriveResumeRoot(new Uint8Array(0))).rejects.toThrow(/must be 32 bytes/);
+    await expect(deriveResumeRoot(new Uint8Array(31))).rejects.toThrow(/must be 32 bytes/);
+    await expect(deriveResumeRoot(new Uint8Array(33))).rejects.toThrow(/must be 32 bytes/);
+    const root = await deriveResumeRoot(VECTOR_MASTER);
+    await expect(
+      deriveResumeSecret(
+        new Uint8Array(0),
+        RESUME_AUTH_VERSION,
+        VECTOR_TRANSFER_ID,
+        VECTOR_FINGERPRINT,
+      ),
+    ).rejects.toThrow(/resume root must be 32 bytes/);
+    await expect(
+      deriveResumeSecret(
+        new Uint8Array(31),
+        RESUME_AUTH_VERSION,
+        VECTOR_TRANSFER_ID,
+        VECTOR_FINGERPRINT,
+      ),
+    ).rejects.toThrow(/resume root must be 32 bytes/);
+    // Valid inputs still produce the pinned vector secret (outputs unchanged).
+    const secret = await deriveResumeSecret(
+      root,
+      RESUME_AUTH_VERSION,
+      VECTOR_TRANSFER_ID,
+      VECTOR_FINGERPRINT,
+    );
+    expect(bytesToHex(secret)).toBe(VECTOR_SECRET);
+  });
+
+  it('rejects version 0 explicitly (parity fix A)', () => {
+    expect(() => new ResumeAuthSession(context('offerer', { version: 0 }))).toThrow(
+      /unsupported resume-auth version 0/,
+    );
+    expect(() => new ResumeAuthSession(context('joiner', { version: 0 }))).toThrow(
+      /unsupported resume-auth version 0/,
+    );
+  });
+
+  it('bounds the payload BEFORE parsing and the base64url fields BEFORE decoding (BLOCKER 3)', () => {
+    // Oversized payload: rejected before JSON parsing.
+    expect(() => decodeResumeMessage(new Uint8Array(MAX_RESUME_AUTH_MESSAGE_BYTES + 1))).toThrow(
+      /exceeds 1024 bytes/,
+    );
+    // A canonical message decodes.
+    expect(
+      decodeResumeMessage(
+        encodeResumeMessage({
+          type: RESUME_MSG_INIT,
+          version: 1,
+          role: 'offerer',
+          nonce: 'A'.repeat(43),
+        }),
+      ).type,
+    ).toBe(RESUME_MSG_INIT);
+    // 42/44-char, padded, invalid-char, and huge fields are rejected at the length/alphabet
+    // checks before any base64 decode.
+    const badNonces: Array<[string, string]> = [
+      ['42 chars', 'A'.repeat(42)],
+      ['44 chars', 'A'.repeat(44)],
+      ['padded', 'A'.repeat(43) + '='],
+      ['invalid chars', '!'.repeat(43)],
+      ['huge', 'A'.repeat(10_000)],
+    ];
+    for (const [name, nonce] of badNonces) {
+      expect(
+        () =>
+          decodeResumeMessage(
+            utf8(JSON.stringify({ type: RESUME_MSG_INIT, version: 1, role: 'offerer', nonce })),
+          ),
+        name,
+      ).toThrow();
+    }
+    expect(() =>
+      decodeResumeMessage(
+        utf8(
+          JSON.stringify({
+            type: RESUME_MSG_CHALLENGE,
+            version: 1,
+            role: 'joiner',
+            nonce: 'A'.repeat(43),
+            proof: 'A'.repeat(10_000),
+          }),
+        ),
+      ),
+    ).toThrow();
+  });
+
+  it('snapshots the accepted ready: exact duplicate after done is settled, conflicting fails (parity fix B)', async () => {
+    const offerer = new ResumeAuthSession(context('offerer'));
+    const joiner = new ResumeAuthSession(context('joiner'));
+    const init = offerer.start();
+    const challenge = await joiner.handle(encodeResumeMessage(init));
+    const confirm = await offerer.handle(encodeResumeMessage(challenge.out!));
+    const ready = await joiner.handle(encodeResumeMessage(confirm.out!));
+    const readyBytes = encodeResumeMessage(ready.out!);
+    const final = await offerer.handle(readyBytes);
+    expect(final.result).toBeDefined();
+    // Exact duplicate ready: idempotent settled no-op with the same result.
+    const dup = await offerer.handle(readyBytes);
+    expect(dup.result?.transferId).toBe(final.result?.transferId);
+    // A conflicting ready after done fails closed.
+    const otherJoiner = new ResumeAuthSession(context('joiner'));
+    const off2 = new ResumeAuthSession(context('offerer'));
+    const init2 = off2.start();
+    const ch2 = await otherJoiner.handle(encodeResumeMessage(init2));
+    const conf2 = await off2.handle(encodeResumeMessage(ch2.out!));
+    const ready2 = await otherJoiner.handle(encodeResumeMessage(conf2.out!));
+    await off2.handle(encodeResumeMessage(ready2.out!));
+    await expect(
+      off2.handle(
+        utf8(
+          JSON.stringify({
+            type: RESUME_MSG_READY,
+            version: 1,
+            role: 'joiner',
+            proof: 'A'.repeat(43),
+          }),
+        ),
+      ),
+    ).rejects.toThrow(/conflicting duplicate resume_ready|unexpected resume_ready/);
+
+    // Joiner: exact confirm duplicate after settlement re-answers the SAME ready snapshot
+    // with the same result; a conflicting confirm fails.
+    const j2 = new ResumeAuthSession(context('joiner'));
+    const o3 = new ResumeAuthSession(context('offerer'));
+    const init3 = o3.start();
+    const ch3 = await j2.handle(encodeResumeMessage(init3));
+    const conf3 = await o3.handle(encodeResumeMessage(ch3.out!));
+    const confirmBytes = encodeResumeMessage(conf3.out!);
+    const ready3 = await j2.handle(confirmBytes);
+    const dupConfirm = await j2.handle(confirmBytes);
+    expect(dupConfirm.out).toEqual(ready3.out);
+    expect(dupConfirm.result?.transferId).toBe(ready3.result?.transferId);
+    await expect(
+      j2.handle(
+        utf8(
+          JSON.stringify({
+            type: RESUME_MSG_CONFIRM,
+            version: 1,
+            role: 'offerer',
+            proof: 'A'.repeat(43),
+          }),
+        ),
+      ),
+    ).rejects.toThrow(/conflicting duplicate resume_confirm/);
+  });
+
+  it('serializes concurrent handle() calls in arrival order (BLOCKER 4)', async () => {
+    // Two concurrent identical inits must produce the SAME snapshotted challenge (one
+    // joiner nonce), not two different nonces from a race.
+    const nonces: Uint8Array[] = [];
+    const joiner = new ResumeAuthSession(
+      context('joiner', {
+        nonceSource: (n) => {
+          const b = new Uint8Array(n);
+          b.fill(0x40 + nonces.length);
+          nonces.push(b);
+          return b;
+        },
+      }),
+    );
+    const init = {
+      type: RESUME_MSG_INIT,
+      version: 1,
+      role: 'offerer',
+      nonce: bytesToBase64url(VECTOR_OFFERER_NONCE),
+    };
+    const payload = encodeResumeMessage(init);
+    const [a, b] = await Promise.all([joiner.handle(payload), joiner.handle(payload)]);
+    expect(a.out).toEqual(b.out);
+    expect(nonces).toHaveLength(1); // exactly one joiner nonce minted
+
+    // Two concurrent identical challenges on the offerer get the SAME confirm snapshot.
+    const offerer = new ResumeAuthSession(context('offerer'));
+    const start = offerer.start();
+    await joiner.handle(payload); // settle joiner's accepted init
+    const challenge = (await joiner.handle(encodeResumeMessage(start))).out!;
+    const challengeBytes = encodeResumeMessage(challenge);
+    const [c1, c2] = await Promise.all([
+      offerer.handle(challengeBytes),
+      offerer.handle(challengeBytes),
+    ]);
+    expect(c1.out).toEqual(c2.out);
+
+    // A proof failure is terminal: a message queued behind it cannot resurrect the session.
+    const failing = new ResumeAuthSession(context('offerer'));
+    failing.start();
+    const badChallenge = utf8(
+      JSON.stringify({
+        type: RESUME_MSG_CHALLENGE,
+        version: 1,
+        role: 'joiner',
+        nonce: 'A'.repeat(43),
+        proof: 'A'.repeat(43),
+      }),
+    );
+    const [e1, e2] = await Promise.allSettled([
+      failing.handle(badChallenge),
+      failing.handle(badChallenge),
+    ]);
+    expect(e1.status).toBe('rejected');
+    expect(e2.status).toBe('rejected');
+    // Both rejections carry the same terminal error (no resurrection, no unhandled leak).
+    if (e1.status === 'rejected' && e2.status === 'rejected') {
+      expect(String(e1.reason)).toContain('verification failed');
+      expect(String(e2.reason)).toContain('verification failed');
+    }
   });
 });
 

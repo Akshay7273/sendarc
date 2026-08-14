@@ -25,6 +25,7 @@ import {
   type FrameHeaderInput,
   type JournalDigestCheckpoint,
   type Manifest,
+  type ResumeSecretEnvelope,
 } from '@sendbeam/protocol';
 import { createSha256DigestFactory, type Sha256DigestFactory } from './digest.js';
 import { DurableDestination } from './durable-destination.js';
@@ -57,6 +58,7 @@ class MemoryStore implements DurableJournalStore {
   failCommit = false;
   failCreate = false;
   failDiscard = false;
+  failAttach = false;
 
   async loadJournal(transferId: string): Promise<JournalLoad> {
     const bytes = this.journals.get(transferId);
@@ -107,9 +109,38 @@ class MemoryStore implements DurableJournalStore {
     return next;
   }
 
-  async saveJournal(journal: DurableJournal): Promise<DurableJournal> {
-    this.journals.set(journal.transferId, await encodeJournal(journal));
-    return journal;
+  async attachResumeSecret(
+    transferId: string,
+    envelope: ResumeSecretEnvelope,
+    ownerId: string,
+    nowMs: number,
+  ): Promise<DurableJournal> {
+    if (this.failAttach) throw new Error('journal attach failed');
+    const lease = this.leases.get(transferId);
+    if (!lease || lease.ownerId !== ownerId) {
+      throw new TransferError(
+        'sink_error',
+        'durable lease lost; another receiver owns this transfer — cannot attach the resume credential',
+      );
+    }
+    const bytes = this.journals.get(transferId);
+    if (bytes === undefined) {
+      throw new TransferError(
+        'sink_error',
+        'durable journal missing; cannot attach the resume credential',
+      );
+    }
+    const current = await decodeJournal(bytes);
+    const next: DurableJournal = {
+      ...current,
+      resumeSecret: current.resumeSecret ?? envelope,
+    };
+    this.journals.set(transferId, await encodeJournal(next));
+    this.leases.set(transferId, {
+      ...lease,
+      expiresAt: nowMs + DURABLE_LEASE_TTL_MS,
+    });
+    return next;
   }
 
   async acquireLease(transferId: string, ownerId: string, nowMs: number): Promise<LeaseOutcome> {
@@ -1239,6 +1270,40 @@ describe('DurableDestination', () => {
     const after = JSON.parse(new TextDecoder().decode(h.store.journals.get(TRANSFER_ID)!));
     expect(after.resumeSecret).toEqual(before.resumeSecret);
     await d.abort();
+  });
+
+  it('never fabricates a credential for a resumed (pre-existing) journal, but a fresh journal gets one (BLOCKER 1)', async () => {
+    const h = await harness();
+    const m = manifest([['a.bin', 8]]);
+    // Session 1: a fresh journal is created for this transfer (no credential yet).
+    const first = h.makeDestination();
+    await first.prepare(m);
+    expect(first.durableMeta()?.resumed).toBe(false);
+    await first.abort();
+
+    // Session 2: a later receive loads the journal as existing/resumed state and attaches
+    // with a DIFFERENT resume root. It must leave the journal without a credential.
+    const second = h.makeDestination();
+    await second.prepare(m);
+    expect(second.durableMeta()?.resumed).toBe(true);
+    await second.attachResumeSecret(m, new Uint8Array(32).fill(0x42));
+    const loaded = await h.store.loadJournal(TRANSFER_ID);
+    expect(loaded.kind).toBe('ok');
+    if (loaded.kind !== 'ok') return;
+    expect(loaded.journal.resumeSecret).toBeUndefined();
+    await second.abort();
+
+    // Session 3: a fresh journal (created in THIS session) MAY receive the credential.
+    const fresh = h.makeDestination();
+    const freshId = 'b'.repeat(32);
+    const fm = { ...m, transferId: freshId };
+    await fresh.prepare(fm);
+    await fresh.attachResumeSecret(fm, new Uint8Array(32).fill(0x42));
+    const freshLoaded = await h.store.loadJournal(freshId);
+    expect(freshLoaded.kind).toBe('ok');
+    if (freshLoaded.kind !== 'ok') return;
+    expect(freshLoaded.journal.resumeSecret).toBeDefined();
+    await fresh.abort();
   });
 
   it('refuses to attach a resume credential to a journal that does not match the manifest (V13-PR07)', async () => {

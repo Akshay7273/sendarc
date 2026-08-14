@@ -89,7 +89,13 @@ func writeDurableBlocks(t *testing.T, sink wire.Sink, blockSize int, data []byte
 // journalOnDisk reloads the journal for one transfer from the store.
 func journalOnDisk(t *testing.T, dest *DurableDestination) wire.DurableJournal {
 	t.Helper()
-	j, ok, err := dest.Store().LoadJournal(durableTestID)
+	return journalOnDiskFor(t, dest, durableTestID)
+}
+
+// journalOnDiskFor reloads the journal for the given transfer id from the store.
+func journalOnDiskFor(t *testing.T, dest *DurableDestination, transferID string) wire.DurableJournal {
+	t.Helper()
+	j, ok, err := dest.Store().LoadJournal(transferID)
 	if err != nil {
 		t.Fatalf("reload journal: %v", err)
 	}
@@ -1537,6 +1543,75 @@ func TestDurableAttachResumeSecretPersistsOnceAndNeverReplaces(t *testing.T) {
 	}
 	if _, ok, err := dest.Store().LoadJournal(durableTestID); err != nil || ok {
 		t.Fatalf("journal still present after discard: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestDurableAttachResumeSecretResumedJournalNeverGetsFabricatedSecret covers BLOCKER 1 on
+// the receiver: a journal loaded as existing/resumed state (no credential, e.g. pre-PR07 or
+// a crash before the original attach) must NEVER receive a credential fabricated from a
+// later session master — cross-session authenticated resume is simply unavailable. A fresh
+// journal created during this session may receive one.
+func TestDurableAttachResumeSecretResumedJournalNeverGetsFabricatedSecret(t *testing.T) {
+	dir := t.TempDir()
+	blockSize := 1024
+	content := durableTestData(blockSize)
+	manifest := durableTestManifest(t, durableTestID, blockSize, map[string][]byte{"f.bin": content})
+
+	// Session 1: a fresh journal is created for this transfer (no credential yet).
+	first, err := NewDurableDestination(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Prepare(manifest); err != nil {
+		t.Fatal(err)
+	}
+	if first.resumed {
+		t.Fatal("fresh journal marked resumed")
+	}
+
+	// Session 2: a later receive loads the journal as existing/resumed state and attaches
+	// with a DIFFERENT session root. It must leave the journal without a credential.
+	second, err := NewDurableDestination(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Prepare(manifest); err != nil {
+		t.Fatal(err)
+	}
+	if !second.resumed {
+		t.Fatal("loaded journal not marked resumed")
+	}
+	if err := second.AttachResumeSecret(manifest, bytes.Repeat([]byte{0x42}, 32)); err != nil {
+		t.Fatalf("attach on resumed journal: %v", err)
+	}
+	j := journalOnDisk(t, second)
+	if j.ResumeSecret != nil {
+		t.Fatal("a later session fabricated a resume secret for a resumed no-secret journal")
+	}
+
+	// Session 3: a fresh journal (this session created it) MAY receive the credential.
+	freshID := strings.Repeat("ab", 16)
+	freshManifest := durableTestManifest(t, freshID, blockSize, map[string][]byte{"g.bin": content})
+	third, err := NewDurableDestination(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := third.Prepare(freshManifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := third.AttachResumeSecret(freshManifest, bytes.Repeat([]byte{0x42}, 32)); err != nil {
+		t.Fatalf("attach on fresh journal: %v", err)
+	}
+	freshJournal := journalOnDiskFor(t, third, freshID)
+	if freshJournal.ResumeSecret == nil {
+		t.Fatal("fresh journal did not receive the credential")
+	}
+
+	// Discard both journals (cleanup).
+	for _, id := range []string{durableTestID, freshID} {
+		if err := third.Store().Discard(id); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

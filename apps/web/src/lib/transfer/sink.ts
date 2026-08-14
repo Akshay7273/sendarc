@@ -77,11 +77,14 @@ export function createBrowserDestination(
     abort: (reason) => get().abort(reason),
     result: () => inner?.result(),
     durableMeta: () => inner?.durableMeta?.(),
+    // Credential attachment is meaningful ONLY for a durable journal-backed destination.
+    // Direct-file/direct-directory/legacy OPFS/archive destinations do not implement it, and
+    // the seam is genuinely absent for them: the resume root being present must never make an
+    // ordinary receive fail (V13-PR07 review, Blocker 2). Only the durable destination
+    // actually persists anything.
     attachResumeSecret: (manifest, resumeRoot) => {
-      const target = get();
-      if (!target.attachResumeSecret) {
-        throw new TransferError('sink_error', 'destination does not support resume credentials');
-      }
+      const target = inner;
+      if (!target?.attachResumeSecret) return Promise.resolve();
       return target.attachResumeSecret(manifest, resumeRoot);
     },
   };

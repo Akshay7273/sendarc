@@ -49,7 +49,25 @@ const (
 	resumeProofBytes = 32
 	// resumeSecretBytes is the derived transfer-scoped credential length (256 bits).
 	resumeSecretBytes = 32
+	// masterBytes is the authenticated session master length (the SendBeam handshake
+	// always derives a 32-byte master; ResumeRoot refuses anything else).
+	masterBytes = 32
+	// MaxResumeAuthMessageBytes is the shared semantic ceiling for one resume-auth wire
+	// message, mirrored in TypeScript. The largest legitimate message is resume_challenge:
+	// ~two 43-char base64url fields plus JSON framing, well under 256 bytes. 1024 bounds
+	// attacker-controlled payloads before any JSON/base64 allocation while leaving ample
+	// headroom for future versioned fields.
+	MaxResumeAuthMessageBytes = 1024
 )
+
+// b64urlLen is the canonical unpadded base64url length of n bytes: 4*ceil(n/3) minus the
+// padding that unpadded encoding omits. For 32 bytes that is exactly 43 ASCII chars; a
+// nonce/proof string of any other length is rejected before any base64 decoding.
+func b64urlLen(n int) int {
+	groups := (n + 2) / 3
+	pad := (3 - n%3) % 3
+	return 4*groups - pad
+}
 
 // Domain-separated HKDF info strings for the resume protocol (ADR 0005 §3/§6.4/§7).
 const (
@@ -77,8 +95,11 @@ const (
 // cannot be recovered from it (HKDF one-wayness), which is what lets a browser pass the
 // root into the transfer worker without leaking the session master.
 func ResumeRoot(master []byte) ([]byte, error) {
-	if len(master) == 0 {
-		return nil, Errorf(CodeAuth, "resume: original session master is empty")
+	// The SendBeam handshake master is exactly 32 bytes (DeriveMaster outLen). Anything
+	// else is a miswired caller, not a valid master: reject it rather than derive a
+	// low-entropy or wrong-length root from it.
+	if len(master) != masterBytes {
+		return nil, Errorf(CodeAuth, "resume: original session master must be %d bytes, got %d", masterBytes, len(master))
 	}
 	return hkdfSHA256(master, nil, []byte(infoResumeRoot), resumeSecretBytes)
 }
@@ -94,6 +115,11 @@ func ResumeRoot(master []byte) ([]byte, error) {
 // transfer id, and the manifest fingerprint are bound with explicit fixed-width binary
 // fields (no ambiguous delimiters, no ad-hoc string concatenation).
 func ResumeSecret(resumeRoot []byte, version int, transferID, manifestFingerprint string) ([]byte, error) {
+	// The resume root is the 32-byte output of ResumeRoot; a different length means the
+	// caller passed something else (a raw master, a string, an empty slice).
+	if len(resumeRoot) != resumeSecretBytes {
+		return nil, Errorf(CodeAuth, "resume: resume root must be %d bytes, got %d", resumeSecretBytes, len(resumeRoot))
+	}
 	if version != ResumeAuthVersion {
 		return nil, Errorf(CodeCompat, "resume: unsupported resume-auth version %d", version)
 	}
@@ -342,8 +368,12 @@ func validateResumeMessage(m *ResumeMessage) error {
 // DecodeResumeMessage strictly decodes one resume-auth message, rejecting unknown fields,
 // missing fields, wrong types, invalid versions/roles, non-canonical or malformed encodings,
 // wrong nonce/proof lengths, and trailing data. There are no attacker-controlled unbounded
-// allocations: every binary field is length-bounded before it is decoded.
+// allocations: the payload ceiling is enforced BEFORE any JSON parsing, and every binary
+// field's canonical base64url length is enforced before any base64 decoding.
 func DecodeResumeMessage(payload []byte) (*ResumeMessage, error) {
+	if len(payload) > MaxResumeAuthMessageBytes {
+		return nil, Errorf(CodeProtocol, "resume: message exceeds %d bytes", MaxResumeAuthMessageBytes)
+	}
 	var raw resumeRawMessage
 	if err := unmarshalStrict(payload, &raw); err != nil {
 		return nil, Errorf(CodeProtocol, "resume: malformed message: %v", err)
@@ -367,24 +397,20 @@ func DecodeResumeMessage(payload []byte) (*ResumeMessage, error) {
 	if raw.Proof != nil {
 		m.Proof = *raw.Proof
 	}
+	// validateResumeMessage already enforced the exact canonical base64url length (via
+	// validB64Len) for every nonce/proof, so no further decoding happens here.
 	if err := validateResumeMessage(m); err != nil {
 		return nil, err
-	}
-	// Reject non-canonical encodings: a nonce/proof that does not round-trip through its
-	// canonical base64url form is rejected, so a message cannot be re-encoded differently.
-	if m.Nonce != "" && base64.RawURLEncoding.EncodeToString(mustB64(m.Nonce)) != m.Nonce {
-		return nil, Errorf(CodeProtocol, "resume: non-canonical nonce encoding")
-	}
-	if m.Proof != "" && base64.RawURLEncoding.EncodeToString(mustB64(m.Proof)) != m.Proof {
-		return nil, Errorf(CodeProtocol, "resume: non-canonical proof encoding")
 	}
 	return m, nil
 }
 
 // validB64Len reports whether s is the canonical base64url (no padding) encoding of exactly
-// n bytes.
+// n bytes. The expected string length is checked FIRST — before any base64 decoding — so a
+// huge nonce/proof string is rejected without allocation; then the string is decoded,
+// length-checked, and re-encoded to reject padded or otherwise non-canonical spellings.
 func validB64Len(s string, n int) bool {
-	if s == "" {
+	if len(s) != b64urlLen(n) {
 		return false
 	}
 	decoded, err := base64.RawURLEncoding.DecodeString(s)
@@ -392,11 +418,6 @@ func validB64Len(s string, n int) bool {
 		return false
 	}
 	return base64.RawURLEncoding.EncodeToString(decoded) == s
-}
-
-func mustB64(s string) []byte {
-	decoded, _ := base64.RawURLEncoding.DecodeString(s)
-	return decoded
 }
 
 func b64enc(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
@@ -468,22 +489,28 @@ type ResumeAuthSession struct {
 	transcript []byte
 	// result is the fresh keys once mutual authentication completes.
 	result *ResumeAuthResult
-	// accepted is the canonical encoding of the inbound message that advanced the current
-	// state; an exact duplicate is idempotently re-answered with the snapshot response.
-	accepted []byte
-	// responded is the exact outbound snapshot generated for accepted (same nonce/proof on
-	// every retransmission — never a fresh nonce for a retry).
-	responded []byte
+	// steps is a small fixed snapshot per handshake step: the canonical encoding of each
+	// accepted inbound message plus the exact outbound snapshot generated for it (nil when
+	// the accepted message had no response). An exact duplicate of any accepted message is
+	// idempotently re-answered with the SAME snapshot for the rest of the session (including
+	// after done) — never a fresh nonce/proof for a retry; any other message of a type that
+	// was already accepted is a conflicting duplicate and fails closed.
+	steps []acceptedStep
 	// settledErr is the terminal failure, if any.
 	settledErr error
+}
+
+// acceptedStep is one handshake step's idempotency snapshot.
+type acceptedStep struct {
+	accepted  []byte // canonical encoding of the accepted inbound message
+	responded []byte // canonical outbound snapshot (nil when the step produced no response)
 }
 
 // NewResumeAuthSession builds a session for one attempt. The context must carry the
 // transfer-scoped resume secret; a missing/invalid secret is rejected up front.
 func NewResumeAuthSession(ctx ResumeAuthContext) (*ResumeAuthSession, error) {
-	if ctx.Version == 0 {
-		ctx.Version = ResumeAuthVersion
-	}
+	// No implicit version: a security protocol must be explicit. Version 0 (the zero
+	// value) fails exactly like any other wrong version in both Go and TypeScript.
 	if ctx.Version != ResumeAuthVersion {
 		return nil, Errorf(CodeCompat, "resume: unsupported resume-auth version %d", ctx.Version)
 	}
@@ -539,6 +566,22 @@ func (s *ResumeAuthSession) Handle(payload []byte) (*ResumeMessage, *ResumeAuthR
 		s.failLocked(err)
 		return nil, nil, err
 	}
+	// Idempotent replay first: an exact duplicate of ANY accepted message (current or
+	// settled step) is re-answered with the SAME snapshot for the rest of the session —
+	// including after done — so a lost response is retransmitted identically, never with a
+	// fresh nonce/proof. A snapshot with no response (offerer's accepted ready) is a
+	// settled no-op; a snapshot that produced a response re-answers it with the same bytes.
+	if step, ok := s.findStep(payload); ok {
+		if step.responded == nil {
+			return nil, s.result, nil
+		}
+		out, err := DecodeResumeMessage(step.responded)
+		if err != nil {
+			s.failLocked(err)
+			return nil, nil, err
+		}
+		return out, s.result, nil
+	}
 	switch s.ctx.Role {
 	case RoleOfferer:
 		return s.handleOfferer(msg, payload)
@@ -547,56 +590,49 @@ func (s *ResumeAuthSession) Handle(payload []byte) (*ResumeMessage, *ResumeAuthR
 	}
 }
 
+// findStep returns the snapshot of the accepted message whose canonical encoding exactly
+// equals payload, if any.
+func (s *ResumeAuthSession) findStep(payload []byte) (acceptedStep, bool) {
+	for _, step := range s.steps {
+		if bytes.Equal(payload, step.accepted) {
+			return step, true
+		}
+	}
+	return acceptedStep{}, false
+}
+
 // handleOfferer processes an inbound message on the offerer side.
 func (s *ResumeAuthSession) handleOfferer(msg *ResumeMessage, payload []byte) (*ResumeMessage, *ResumeAuthResult, error) {
 	switch msg.Type {
 	case ResumeMsgChallenge:
-		switch s.state {
-		case resumeStateAwaitChallenge, resumeStateAwaitReady:
-			// Idempotency: an exact duplicate of the accepted challenge is re-answered with
-			// the same snapshot confirm (a lost confirm is retransmitted identically — same
-			// proof, never a fresh nonce).
-			if bytes.Equal(payload, s.accepted) && s.responded != nil {
-				out, err := DecodeResumeMessage(s.responded)
-				if err != nil {
-					s.failLocked(err)
-					return nil, nil, err
-				}
-				return out, nil, nil
-			}
-			if s.state == resumeStateAwaitReady {
-				s.failLocked(Errorf(CodeAuth, "resume: conflicting duplicate resume_challenge"))
-				return nil, nil, s.settledErr
-			}
-			return s.acceptChallenge(msg, payload)
-		default:
-			s.failLocked(Errorf(CodeProtocol, "resume: unexpected resume_challenge in state %d", s.state))
+		// A challenge that is not an exact duplicate of the accepted one is a conflicting
+		// duplicate (challenge replacement after proof is forbidden).
+		if s.state != resumeStateAwaitChallenge {
+			s.failLocked(Errorf(CodeAuth, "resume: conflicting duplicate resume_challenge"))
 			return nil, nil, s.settledErr
 		}
+		return s.acceptChallenge(msg, payload)
 	case ResumeMsgReady:
-		switch s.state {
-		case resumeStateAwaitReady:
-			proof, _ := base64.RawURLEncoding.DecodeString(msg.Proof)
-			if !verifyResumeProof(proof, s.ctx.ResumeSecret, s.transcript, resumeProofTagReady, infoResumeProofJoiner) {
-				s.failLocked(Errorf(CodeAuth, "resume: joiner ready proof verification failed"))
-				return nil, nil, s.settledErr
-			}
-			s.state = resumeStateDone
-			result, err := s.buildResult()
-			if err != nil {
-				s.failLocked(err)
-				return nil, nil, err
-			}
-			s.result = result
-			return nil, s.result, nil
-		case resumeStateDone:
-			// The offerer sends nothing after ready; a duplicate ready after settlement is
-			// ignored rather than failing a completed handshake.
-			return nil, nil, nil
-		default:
+		if s.state != resumeStateAwaitReady {
 			s.failLocked(Errorf(CodeProtocol, "resume: unexpected resume_ready in state %d", s.state))
 			return nil, nil, s.settledErr
 		}
+		proof, _ := base64.RawURLEncoding.DecodeString(msg.Proof)
+		if !verifyResumeProof(proof, s.ctx.ResumeSecret, s.transcript, resumeProofTagReady, infoResumeProofJoiner) {
+			s.failLocked(Errorf(CodeAuth, "resume: joiner ready proof verification failed"))
+			return nil, nil, s.settledErr
+		}
+		// Snapshot the accepted ready (no outbound response): an exact duplicate after
+		// done is a settled no-op; a different ready is a conflicting duplicate that fails.
+		s.steps = append(s.steps, acceptedStep{accepted: append([]byte(nil), payload...)})
+		s.state = resumeStateDone
+		result, err := s.buildResult()
+		if err != nil {
+			s.failLocked(err)
+			return nil, nil, err
+		}
+		s.result = result
+		return nil, s.result, nil
 	default:
 		s.failLocked(Errorf(CodeProtocol, "resume: offerer received unexpected %q", msg.Type))
 		return nil, nil, s.settledErr
@@ -630,8 +666,10 @@ func (s *ResumeAuthSession) acceptChallenge(msg *ResumeMessage, payload []byte) 
 	confirm := &ResumeMessage{Type: ResumeMsgConfirm, Version: ResumeAuthVersion, Role: RoleOfferer, Proof: b64enc(offererProof)}
 	// Snapshot both the accepted challenge and the generated confirm so a retransmission is
 	// re-answered with the SAME proof (never a fresh nonce/proof).
-	s.accepted = append([]byte(nil), payload...)
-	s.responded = mustEncodeMessage(confirm)
+	s.steps = append(s.steps, acceptedStep{
+		accepted:  append([]byte(nil), payload...),
+		responded: mustEncodeMessage(confirm),
+	})
 	s.state = resumeStateAwaitReady
 	return confirm, nil, nil
 }
@@ -640,69 +678,44 @@ func (s *ResumeAuthSession) acceptChallenge(msg *ResumeMessage, payload []byte) 
 func (s *ResumeAuthSession) handleJoiner(msg *ResumeMessage, payload []byte) (*ResumeMessage, *ResumeAuthResult, error) {
 	switch msg.Type {
 	case ResumeMsgInit:
-		switch s.state {
-		case resumeStateIdle, resumeStateAwaitConfirm, resumeStateDone:
-			// Idempotency: an exact duplicate of the accepted init is re-answered with the
-			// same snapshot challenge (a lost challenge is retransmitted identically — same
-			// nonce and proof, never a fresh nonce for a retry).
-			if bytes.Equal(payload, s.accepted) && s.responded != nil {
-				out, err := DecodeResumeMessage(s.responded)
-				if err != nil {
-					s.failLocked(err)
-					return nil, nil, err
-				}
-				return out, nil, nil
-			}
-			if s.state != resumeStateIdle {
-				s.failLocked(Errorf(CodeAuth, "resume: conflicting duplicate resume_init"))
-				return nil, nil, s.settledErr
-			}
-			return s.acceptInit(msg, payload)
-		default:
-			s.failLocked(Errorf(CodeProtocol, "resume: unexpected resume_init in state %d", s.state))
+		// A second, different init (challenge replacement after proof is forbidden) is a
+		// conflicting duplicate; an exact duplicate was already re-answered above.
+		if s.state != resumeStateIdle {
+			s.failLocked(Errorf(CodeAuth, "resume: conflicting duplicate resume_init"))
 			return nil, nil, s.settledErr
 		}
+		return s.acceptInit(msg, payload)
 	case ResumeMsgConfirm:
-		switch s.state {
-		case resumeStateAwaitConfirm:
-			proof, _ := base64.RawURLEncoding.DecodeString(msg.Proof)
-			if !verifyResumeProof(proof, s.ctx.ResumeSecret, s.transcript, resumeProofTagOfferer, infoResumeProofOfferer) {
-				s.failLocked(Errorf(CodeAuth, "resume: offerer proof verification failed"))
-				return nil, nil, s.settledErr
-			}
-			readyProof, err := ResumeReadyProof(s.ctx.ResumeSecret, s.transcript)
-			if err != nil {
-				s.failLocked(err)
-				return nil, nil, err
-			}
-			ready := &ResumeMessage{Type: ResumeMsgReady, Version: ResumeAuthVersion, Role: RoleJoiner, Proof: b64enc(readyProof)}
-			s.accepted = append([]byte(nil), payload...)
-			s.responded = mustEncodeMessage(ready)
-			s.state = resumeStateDone
-			result, err := s.buildResult()
-			if err != nil {
-				s.failLocked(err)
-				return nil, nil, err
-			}
-			s.result = result
-			return ready, s.result, nil
-		case resumeStateDone:
-			// Idempotency: the settled joiner re-answers a duplicate confirm with the SAME
-			// ready snapshot so a lost ready never stalls the offerer.
-			if bytes.Equal(payload, s.accepted) && s.responded != nil {
-				out, err := DecodeResumeMessage(s.responded)
-				if err != nil {
-					s.failLocked(err)
-					return nil, nil, err
-				}
-				return out, s.result, nil
-			}
+		if s.state != resumeStateAwaitConfirm {
 			s.failLocked(Errorf(CodeAuth, "resume: conflicting duplicate resume_confirm"))
 			return nil, nil, s.settledErr
-		default:
-			s.failLocked(Errorf(CodeProtocol, "resume: unexpected resume_confirm in state %d", s.state))
+		}
+		proof, _ := base64.RawURLEncoding.DecodeString(msg.Proof)
+		if !verifyResumeProof(proof, s.ctx.ResumeSecret, s.transcript, resumeProofTagOfferer, infoResumeProofOfferer) {
+			s.failLocked(Errorf(CodeAuth, "resume: offerer proof verification failed"))
 			return nil, nil, s.settledErr
 		}
+		readyProof, err := ResumeReadyProof(s.ctx.ResumeSecret, s.transcript)
+		if err != nil {
+			s.failLocked(err)
+			return nil, nil, err
+		}
+		ready := &ResumeMessage{Type: ResumeMsgReady, Version: ResumeAuthVersion, Role: RoleJoiner, Proof: b64enc(readyProof)}
+		// Snapshot the accepted confirm and its ready response: the settled joiner re-answers
+		// an exact duplicate confirm with the SAME ready (a lost ready never stalls the
+		// offerer); a different confirm is a conflicting duplicate that fails.
+		s.steps = append(s.steps, acceptedStep{
+			accepted:  append([]byte(nil), payload...),
+			responded: mustEncodeMessage(ready),
+		})
+		s.state = resumeStateDone
+		result, err := s.buildResult()
+		if err != nil {
+			s.failLocked(err)
+			return nil, nil, err
+		}
+		s.result = result
+		return ready, s.result, nil
 	default:
 		s.failLocked(Errorf(CodeProtocol, "resume: joiner received unexpected %q", msg.Type))
 		return nil, nil, s.settledErr
@@ -739,8 +752,10 @@ func (s *ResumeAuthSession) acceptInit(msg *ResumeMessage, payload []byte) (*Res
 		Type: ResumeMsgChallenge, Version: ResumeAuthVersion, Role: RoleJoiner,
 		Nonce: b64enc(nonce), Proof: b64enc(joinerProof),
 	}
-	s.accepted = append([]byte(nil), payload...)
-	s.responded = mustEncodeMessage(challenge)
+	s.steps = append(s.steps, acceptedStep{
+		accepted:  append([]byte(nil), payload...),
+		responded: mustEncodeMessage(challenge),
+	})
 	s.state = resumeStateAwaitConfirm
 	return challenge, nil, nil
 }
@@ -812,10 +827,11 @@ func mustEncodeMessage(m *ResumeMessage) []byte {
 }
 
 // NegotiateResumeAuth reports whether both peers advertised the resume-auth-v1 capability.
-// Negotiation participates in the resume decision and is itself authenticated by the
-// session's key confirmation (the caps exchange), so a malicious server stripping the
-// capability yields "no capability" — cross-session resume unavailable — never an
-// unauthenticated resume.
+// The security invariant that MUST hold (ADR 0005 §2/§9) is: capability absent, stripped,
+// or otherwise untrusted => authenticated cross-session resume is UNAVAILABLE — never a
+// fallback to unauthenticated durable progress reuse. PR08 owns the discovery path that
+// obtains the authenticated capability state for a cross-session attempt; this predicate
+// only computes the boolean from whatever features are presented.
 func NegotiateResumeAuth(localFeatures, remoteFeatures []string) bool {
 	return containsFeature(localFeatures, ResumeAuthCapability) && containsFeature(remoteFeatures, ResumeAuthCapability)
 }

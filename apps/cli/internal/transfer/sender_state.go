@@ -418,11 +418,16 @@ func (s *SenderStore) verifyHook(rec SenderRecord) func(wire.Manifest) error {
 
 // AttachResumeSecret derives the transfer-scoped resume credential from the resume root of
 // the ORIGINAL authenticated session and persists it into the record — strictly before the
-// manifest frame is transmitted (the driver composes this after the record exists). On a
-// restart the record already carries the credential from the original session and it is
-// NEVER re-derived or overwritten: a fresh session's master would derive a different secret
-// and break the original-session binding.
-func (s *SenderStore) AttachResumeSecret(manifest wire.Manifest, resumeRoot []byte) error {
+// manifest frame is transmitted (the driver composes this after the record exists).
+//
+// Provenance (V13-PR07 security review, Blocker 1): `fresh` must be true ONLY when the
+// record was created during THIS original session (PrepareSender returned reused=false). A
+// pre-existing record — a reused current-schema record or a migrated pre-PR07 v1 record —
+// must NEVER receive a credential fabricated from a later session master: a missing
+// credential on pre-existing durable state means cross-session authenticated resume is
+// unavailable, never "derive one now". An existing credential is always preserved exactly;
+// a fresh record with no credential may receive one. The driver passes `!reused`.
+func (s *SenderStore) AttachResumeSecret(manifest wire.Manifest, resumeRoot []byte, fresh bool) error {
 	validated, err := wire.ValidateManifest(manifest)
 	if err != nil {
 		return err
@@ -448,6 +453,11 @@ func (s *SenderStore) AttachResumeSecret(manifest wire.Manifest, resumeRoot []by
 		return wire.Errorf(wire.CodeStorage,
 			"sender: record %s does not match the authenticated manifest; refusing to attach a resume credential",
 			validated.TransferID)
+	}
+	if !fresh {
+		// Pre-existing state: preserve an existing credential exactly; a missing one stays
+		// missing (never fabricated from a later session master).
+		return nil
 	}
 	if rec.ResumeSecret != nil {
 		return nil // original-session credential already persisted; never replace it

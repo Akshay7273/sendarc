@@ -58,11 +58,14 @@ Proof that `sendbeam/1` stays safe:
 
 - Ordinary transfers are byte-for-byte unchanged. The resume-auth messages are new message
   shapes; a legacy peer that never advertises `resume-auth-v1` never receives them.
-- The resume-auth protocol runs **only after** both peers agree on the capability in a
-  session whose own key confirmation already authenticates the caps exchange. Stripping the
-  capability therefore cannot cause a downgrade: absence of the capability means
-  cross-session resume is **unavailable** (fresh transfer or explicit restart), never an
-  unauthenticated resume.
+- The security invariant that MUST hold: capability absent, stripped, or otherwise
+  **untrusted** ⇒ authenticated cross-session resume is **unavailable** (fresh transfer or
+  explicit restart) — never a fallback to unauthenticated durable progress reuse. PR08 owns
+  the discovery path that obtains the authenticated capability state for a cross-session
+  attempt; this PR deliberately does not claim a specific authenticated-capability channel
+  that does not exist yet. What is fixed here: `negotiateResumeAuth` computes the boolean
+  from whatever features are presented, and no code path ever resumes old progress across
+  sessions without mutual resume authentication.
 - The resume secret lives in **local** state (journal / sender record), which carries no
   wire-version implication (ADR 0004 §3).
 
@@ -151,6 +154,25 @@ with a fresh master. The secret must stay bound to the **original** session, so 
 keeps the already-persisted secret and never overwrites it with one derived from the new
 master.
 
+**Provenance (Blocker 1):** a missing credential on PRE-EXISTING durable state means
+cross-session authenticated resume is unavailable — it must NEVER mean "derive one now
+from whatever session master happens to be active". Concretely:
+
+- **CLI sender:** only a sender record created during THIS original session
+  (`PrepareSender` returned `reused=false`) may receive the credential
+  (`AttachResumeSecret(..., fresh=true)`); a reused record keeps exactly what it already
+  has — an existing credential is preserved, a missing one stays missing. The driver passes
+  `!reused`.
+- **CLI/web receiver:** only a journal created during THIS manifest/session (`Prepare` did
+  not load one) may receive the credential; a journal loaded as existing/resumed state
+  preserves an existing credential and leaves a missing one missing.
+- A crash between record/journal creation and credential attach leaves a no-credential
+  record; a later attempt treats it as pre-existing state and never backfills it. Old
+  partials/records are never deleted merely because they lack a credential.
+
+Never fabricate a credential from public values (transferId, fingerprint, file digests,
+sender paths, journal checksums) — see §9.
+
 ## 6. Resume-auth handshake (mutual authentication)
 
 A small transport-agnostic state machine. PR08 owns peer discovery/reconnection; the engine
@@ -166,6 +188,33 @@ JSON, canonical field order, `base64url` (no padding) for binary fields. All dec
 strict and bounded: exact version, exact role per message type, nonce exactly 32 bytes,
 proof exactly 32 bytes, no unknown fields, no trailing data, no attacker-controlled
 allocations.
+
+**Message ceiling (Blocker 3):** one resume-auth message is bounded to
+`MAX_RESUME_AUTH_MESSAGE_BYTES = 1024` bytes (Go `MaxResumeAuthMessageBytes`, TS
+`MAX_RESUME_AUTH_MESSAGE_BYTES`), mirrored in both implementations. The largest legitimate
+message (`resume_challenge`, two 43-char base64url fields plus JSON framing) is well under
+256 bytes, so 1024 bounds attacker-controlled payloads before any JSON parsing or base64
+decoding while leaving ample headroom for future versioned fields.
+
+**Order of checks (pre-decode, no unbounded allocations):**
+
+1. `payload.length > 1024` ⇒ reject BEFORE any JSON parsing.
+2. For every 32-byte nonce/proof: canonical unpadded base64url length is exactly **43**
+   ASCII chars ⇒ reject any other string length BEFORE base64 decoding.
+3. Reject characters outside the base64url alphabet (this also rejects padded `=`
+   spellings) before decoding.
+4. Decode ⇒ require exactly 32 bytes.
+5. Re-encode ⇒ require canonical equality (non-canonical spellings of the same bytes are
+   rejected).
+
+**Version (Parity fix A):** there is no implicit version. `version` must be exactly 1 in
+both the session context and every message; version 0 is rejected explicitly in both Go and
+TypeScript.
+
+**Input hygiene:** `ResumeRoot`/`deriveResumeRoot` require the original session master to be
+exactly 32 bytes (the SendBeam handshake master length), and `ResumeSecret`/
+`deriveResumeSecret` require the resume root to be exactly 32 bytes — anything else is
+rejected before derivation (miswired/low-entropy caller input never reaches HKDF).
 
 | Step | Direction        | Type               | Fields                                                         |
 | ---- | ---------------- | ------------------ | -------------------------------------------------------------- |
@@ -232,13 +281,28 @@ joiner:   idle ──valid init──► awaitConfirm ──valid confirm──�
 
 - Any message out of state, conflicting duplicate, version/role/nonce/proof mismatch fails
   closed (typed error; see §8).
-- **Idempotency:** an exact duplicate of the message that advanced the current state is
-  re-answered with the **same** previously-generated snapshot (nonce/proof) — e.g. a
-  retransmitted `resume_init` is re-answered with the identical `resume_challenge`, a
-  retransmitted `resume_challenge` with the identical `resume_confirm`, a retransmitted
-  `resume_confirm` with the identical `resume_ready`. No fresh nonce is generated for a
-  retry. A different message in the same position is a conflicting duplicate and fails
-  closed. No challenge replacement after a proof, no nonce/proof/role/version mutation.
+- **Idempotency (fixed snapshots):** each accepted message is snapshotted as a small fixed
+  step (`accepted` + the exact outbound response it produced, if any). An exact duplicate
+  of ANY accepted message — including after `done` — is re-answered with the **same**
+  snapshot for the rest of the session: a retransmitted `resume_init` is re-answered with
+  the identical `resume_challenge`, a retransmitted `resume_challenge` with the identical
+  `resume_confirm`, a retransmitted `resume_confirm` with the identical `resume_ready`, and
+  a retransmitted `resume_ready` (offerer, which produced no response) is a settled no-op
+  that returns the same result. No fresh nonce/proof is ever generated for a retry.
+- **Terminal duplicates (Parity/State fix B):** after `done`, an exact duplicate of the
+  last accepted message stays idempotent (same snapshot / same settled result); a
+  DIFFERENT message of a type that was already accepted is a conflicting duplicate and
+  fails closed. There is no unbounded transcript history — at most one snapshot per
+  handshake step.
+- **Concurrency (Blocker 4):** in TypeScript, ALL inbound `handle()` processing is
+  serialized in arrival order through a private promise chain (WebCrypto awaits inside
+  `acceptInit`/`acceptChallenge` would otherwise race: two concurrent `handle(sameInit)`
+  could both observe `idle` and mint different joiner nonces). Exactly one inbound message
+  mutates state at a time; an exact duplicate concurrent message gets the SAME snapshotted
+  response; a conflicting concurrent duplicate fails closed deterministically; a failure is
+  terminal and later queued work cannot resurrect or overwrite the failed state; no
+  unhandled rejection leaks. Go serializes `Handle` with a mutex (equivalent semantics).
+- No challenge replacement after a proof, no nonce/proof/role/version mutation.
 
 ## 7. Fresh resumed traffic keys
 
@@ -283,9 +347,11 @@ master. Tests log secrets only inside fixed published KAT vectors.
   transfer or an explicit restart — never reusing a stable transferId to trust old
   `resume_state` progress. Same-session PR06 behavior inside a still-authenticated session
   is unchanged.
-- Capability negotiation is authenticated by the session's own key confirmation and the
-  capability is included in the decision; a malicious server stripping `resume-auth-v1`
-  yields "no capability" ⇒ unavailable, never an unauthenticated resume.
+- The capability is included in the resume decision; a malicious server stripping
+  `resume-auth-v1` (or the absence of the capability for any reason) yields "no
+  capability" ⇒ cross-session resume unavailable, never an unauthenticated resume. The
+  exact authenticated-capability acquisition path for a cross-session attempt is owned by
+  PR08; this PR only guarantees the fail-closed side of the invariant.
 - No secret is fabricated from public values (transferId, fingerprint, file digests, sender
   paths, journal checksums).
 - Old sender records (pre-PR07) and old journals (no secret) remain structurally valid and
@@ -326,6 +392,30 @@ PR07 (this PR) delivers: the design, the crypto + state machine in Go and TS, th
 vectors, the persisted-credential seams (sender records + receiver journals), the
 capability constant + negotiation tests, and the fail-closed compatibility behavior.
 Automatic product use is **not enabled**.
+
+**Browser journal mutation is lease-guarded (Blocker 6):** the only way a resume credential
+enters a browser journal is the narrow `attachResumeSecret(transferId, envelope, ownerId,
+nowMs)` store operation, which re-loads the CURRENT journal in a transaction over journals
+
+- leases, verifies the caller still owns the lease at write time, preserves every committed
+  block/digest checkpoint, adds the credential only if absent, preserves an existing
+  credential exactly, renews the lease, and fails closed if lease ownership was lost (another
+  tab took over). There is deliberately no generic "write any journal without a lease" API,
+  so a stale owner can never overwrite a taken-over journal with an older snapshot.
+
+**Non-durable browser receives never fail on credential attachment (Blocker 2):** the
+resume root being present must not make an ordinary receive fail. Credential attachment is
+meaningful only for a durable journal-backed destination; direct-file,
+direct-directory, legacy single-file OPFS, and archive destinations expose the optional
+seam as genuinely absent (a no-op), so ordinary new↔old `sendbeam/1` transfers are
+unaffected.
+
+**Migrated web v1 sender records are structurally validated (Blocker 5):** the v1 checksum
+is corruption detection, not a trust anchor. A migrated schema-v1 record is run through the
+CURRENT structural validation (exact keys, transferId format, protocol version,
+timestamps, non-negative integer file sizes, non-empty files, reattachment shape,
+fingerprint format) before it is accepted; a malicious body with a correctly recomputed
+v1 checksum still fails closed. Go keeps the same parity.
 
 PR08 owns: peer discovery/reconnection, Interrupted Transfers UX, the final CLI resume
 command workflow, full browser resume orchestration, the 100+ GiB restart/crash campaign,

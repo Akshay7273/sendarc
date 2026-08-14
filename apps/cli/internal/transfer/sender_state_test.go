@@ -405,8 +405,9 @@ func TestAttachResumeSecretPersistsOnceAndNeverReplaces(t *testing.T) {
 	}
 
 	// Attach: the secret is derived from the resume root + transfer id + fingerprint and
-	// persisted as the exact v1 envelope; nothing else appears in the record.
-	if err := store.AttachResumeSecret(manifest, resumeRoot); err != nil {
+	// persisted as the exact v1 envelope; nothing else appears in the record. `fresh=true`
+	// because this record was created during the original session.
+	if err := store.AttachResumeSecret(manifest, resumeRoot, true); err != nil {
 		t.Fatalf("AttachResumeSecret: %v", err)
 	}
 	stored, ok, err := store.Load(rec.TransferID)
@@ -431,7 +432,7 @@ func TestAttachResumeSecretPersistsOnceAndNeverReplaces(t *testing.T) {
 	// A second attach (a restart with a DIFFERENT session root) never replaces the
 	// original-session credential.
 	otherRoot := bytes.Repeat([]byte{0x99}, 32)
-	if err := store.AttachResumeSecret(manifest, otherRoot); err != nil {
+	if err := store.AttachResumeSecret(manifest, otherRoot, true); err != nil {
 		t.Fatalf("re-attach: %v", err)
 	}
 	after, _, err := store.Load(rec.TransferID)
@@ -450,7 +451,7 @@ func TestAttachResumeSecretPersistsOnceAndNeverReplaces(t *testing.T) {
 	missingManifest := wire.Manifest{
 		TransferID: strings.Repeat("44", 16), Files: testManifestFiles(t), TotalSize: 3072,
 	}
-	if err := store.AttachResumeSecret(missingManifest, resumeRoot); err == nil {
+	if err := store.AttachResumeSecret(missingManifest, resumeRoot, true); err == nil {
 		t.Fatal("attach to a missing record succeeded")
 	}
 
@@ -461,6 +462,52 @@ func TestAttachResumeSecretPersistsOnceAndNeverReplaces(t *testing.T) {
 	if _, ok, err := store.Load(rec.TransferID); err != nil || ok {
 		t.Fatalf("record still present after discard: ok=%v err=%v", ok, err)
 	}
+}
+
+func TestAttachResumeSecretReusedRecordNeverGetsFabricatedSecret(t *testing.T) {
+	// A current-schema (v2) record that predates PR07 — or lost its credential — is reused
+	// by a later authenticated session. BLOCKER 1: a missing credential on pre-existing
+	// state means cross-session authenticated resume is unavailable; it must NOT be
+	// fabricated from the later session master.
+	store := testSenderStore(t)
+	rec := SenderRecord{
+		SchemaVersion:   senderSchemaVersion,
+		TransferID:      strings.Repeat("66", 16),
+		ProtocolVersion: wire.ProtocolVersion,
+		CreatedAt:       1,
+		UpdatedAt:       2,
+		Paths:           []string{"/tmp/d"},
+		Files:           fileStatesFromManifest(testManifestFiles(t)),
+	}
+	fp, err := wire.ManifestFingerprint(wire.Manifest{
+		TransferID: rec.TransferID, Files: testManifestFiles(t), TotalSize: 3072,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.ManifestFingerprint = fp
+	if err := store.Save(rec); err != nil {
+		t.Fatal(err)
+	}
+
+	// A later session (reused=true → fresh=false) must leave the record exactly as it is.
+	manifest := wire.Manifest{
+		TransferID: rec.TransferID, Files: testManifestFiles(t), TotalSize: 3072,
+	}
+	laterRoot := bytes.Repeat([]byte{0x42}, 32)
+	if err := store.AttachResumeSecret(manifest, laterRoot, false); err != nil {
+		t.Fatalf("attach on reused record: %v", err)
+	}
+	kept, ok, err := store.Load(rec.TransferID)
+	if err != nil || !ok {
+		t.Fatalf("load after attach: ok=%v err=%v", ok, err)
+	}
+	if kept.ResumeSecret != nil {
+		t.Fatal("a later session fabricated a resume secret for a reused no-secret record")
+	}
+
+	// A fresh record (created during THIS session) may receive the secret — the happy path
+	// is covered by TestAttachResumeSecretPersistsOnceAndNeverReplaces.
 }
 
 func TestSenderRecordV1MigrationCarriesNoResumeSecret(t *testing.T) {
@@ -518,6 +565,29 @@ func TestSenderRecordV1MigrationCarriesNoResumeSecret(t *testing.T) {
 	}
 	if rec.ResumeSecret != nil {
 		t.Fatal("migrated record fabricated a resume secret")
+	}
+
+	// BLOCKER 1: a LATER authenticated session must never fabricate a credential for the
+	// migrated pre-PR07 record. The migrated record is pre-existing state (reused, not
+	// created in this session), so AttachResumeSecret(fresh=false) leaves it without one
+	// even though a fresh session master is available.
+	store := testSenderStore(t)
+	if err := store.Save(rec); err != nil {
+		t.Fatal(err)
+	}
+	laterManifest := wire.Manifest{
+		TransferID: rec.TransferID, Files: testManifestFiles(t), TotalSize: 3072,
+	}
+	laterRoot := bytes.Repeat([]byte{0x77}, 32)
+	if err := store.AttachResumeSecret(laterManifest, laterRoot, false); err != nil {
+		t.Fatalf("attach on migrated record: %v", err)
+	}
+	kept, ok, err := store.Load(rec.TransferID)
+	if err != nil || !ok {
+		t.Fatalf("load after attach: ok=%v err=%v", ok, err)
+	}
+	if kept.ResumeSecret != nil {
+		t.Fatal("a later session fabricated a resume secret for a migrated pre-PR07 record")
 	}
 
 	// A tampered v1 body (checksum over the true body) fails closed.

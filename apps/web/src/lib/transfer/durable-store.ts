@@ -30,6 +30,7 @@ import {
   type JournalDigestCheckpoint,
   type JournalIdentity,
   type Manifest,
+  type ResumeSecretEnvelope,
 } from '@sendbeam/protocol';
 
 /** OPFS root namespace for durable receive data. */
@@ -144,8 +145,22 @@ export interface DurableJournalStore {
     ownerId: string,
     digestCheckpoint?: JournalDigestCheckpoint,
   ): Promise<DurableJournal>;
-  /** Re-encode and persist a journal as-is (V13-PR07: the resume-secret envelope attach). */
-  saveJournal(journal: DurableJournal): Promise<DurableJournal>;
+  /**
+   * Lease-guarded resume-secret attach (V13-PR07): add the transfer-scoped credential to
+   * the journal ONLY while the caller still owns the lease, in ONE readwrite transaction
+   * over journals + leases. It re-loads the CURRENT journal (never blindly overwrites a
+   * stale snapshot), preserves every committed block/digest checkpoint, adds the secret
+   * only if absent, preserves an existing secret exactly, renews the lease, and fails
+   * closed if lease ownership was lost (another tab took over). This is deliberately the
+   * ONLY way a resume credential enters a journal — no generic unguarded journal write
+   * exists.
+   */
+  attachResumeSecret(
+    transferId: string,
+    envelope: ResumeSecretEnvelope,
+    ownerId: string,
+    nowMs: number,
+  ): Promise<DurableJournal>;
   /** Atomic test-and-set acquire with TTL; stale records are taken over. */
   acquireLease(transferId: string, ownerId: string, nowMs: number): Promise<LeaseOutcome>;
   renewLease(transferId: string, ownerId: string, nowMs: number): Promise<void>;
@@ -319,9 +334,92 @@ class IndexedDbDurableStore implements DurableJournalStore {
     return next;
   }
 
-  async saveJournal(journal: DurableJournal): Promise<DurableJournal> {
-    await this.putJournal(journal);
-    return journal;
+  async attachResumeSecret(
+    transferId: string,
+    envelope: ResumeSecretEnvelope,
+    ownerId: string,
+    nowMs: number,
+  ): Promise<DurableJournal> {
+    const db = await this.db();
+    // Pass 1 (readonly): load + validate the CURRENT journal (never blindly overwrite a
+    // stale in-memory snapshot) and confirm the caller currently owns the lease. Async
+    // decode/encode must happen OUTSIDE any IndexedDB transaction — a real IDB transaction
+    // auto-commits when the event loop yields with no pending requests. The completion
+    // promise is created BEFORE issuing the requests so the oncomplete handler is
+    // registered before the transaction can complete.
+    let current: DurableJournal;
+    const loadTx = db.transaction([DURABLE_JOURNALS_STORE, DURABLE_LEASES_STORE], 'readonly');
+    const loadDone = transactionDone(loadTx);
+    const loadLeaseReq = loadTx.objectStore(DURABLE_LEASES_STORE).get(transferId);
+    const loadJournalReq = loadTx.objectStore(DURABLE_JOURNALS_STORE).get(transferId);
+    const [loadLease, storedJournal] = await Promise.all([
+      requestResult(loadLeaseReq),
+      requestResult(loadJournalReq),
+    ]);
+    await loadDone;
+    const lease = loadLease as LeaseRecord | undefined;
+    if (!lease || lease.ownerId !== ownerId) {
+      throw new TransferError(
+        'sink_error',
+        'durable lease lost; another receiver owns this transfer — cannot attach the resume credential',
+      );
+    }
+    try {
+      const bytes =
+        storedJournal instanceof Uint8Array
+          ? storedJournal
+          : new Uint8Array(
+              (storedJournal as { buffer?: ArrayBuffer }).buffer ?? (storedJournal as ArrayBuffer),
+            );
+      current = await decodeJournal(bytes);
+    } catch {
+      throw new TransferError(
+        'sink_error',
+        `durable journal ${transferId} is unusable; cannot attach the resume credential`,
+      );
+    }
+    if (current.transferId !== transferId) {
+      throw new TransferError('sink_error', 'durable journal key mismatch');
+    }
+    // Preserve every committed block/digest checkpoint; add the credential only if absent;
+    // preserve an existing credential exactly.
+    const next: DurableJournal = {
+      ...current,
+      resumeSecret: current.resumeSecret ?? envelope,
+    };
+    const encoded = await encodeJournal(next);
+
+    // Pass 2 (readwrite, one transaction over journals + leases): re-verify lease ownership
+    // AT WRITE TIME and write journal + lease renewal atomically. If the lease was taken
+    // over between the passes, the write aborts and the new owner's progress is untouched.
+    return new Promise<DurableJournal>((resolve, reject) => {
+      const tx = db.transaction([DURABLE_JOURNALS_STORE, DURABLE_LEASES_STORE], 'readwrite');
+      const journals = tx.objectStore(DURABLE_JOURNALS_STORE);
+      const leases = tx.objectStore(DURABLE_LEASES_STORE);
+      const leaseReq = leases.get(transferId);
+      leaseReq.onsuccess = () => {
+        const leaseNow = leaseReq.result as LeaseRecord | undefined;
+        if (!leaseNow || leaseNow.ownerId !== ownerId) {
+          tx.abort();
+          reject(
+            new TransferError(
+              'sink_error',
+              'durable lease lost; another receiver owns this transfer — cannot attach the resume credential',
+            ),
+          );
+          return;
+        }
+        journals.put(encoded, transferId);
+        leases.put({ transferId, ownerId, expiresAt: nowMs + DURABLE_LEASE_TTL_MS }, transferId);
+        tx.oncomplete = () => resolve(next);
+      };
+      leaseReq.onerror = () => {
+        tx.abort();
+        reject(new Error('durable lease read failed'));
+      };
+      tx.onerror = () => reject(new Error('durable journal attach failed'));
+      tx.onabort = () => reject(new Error('durable journal attach aborted'));
+    });
   }
 
   async acquireLease(transferId: string, ownerId: string, nowMs: number): Promise<LeaseOutcome> {

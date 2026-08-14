@@ -731,9 +731,13 @@ func (d *DurableDestination) commitBlocks(fileIdx, blocks int, digestState []byt
 // AttachResumeSecret derives the transfer-scoped resume credential from the resume root of
 // the ORIGINAL authenticated session and persists it into the receive journal (V13-PR07).
 // It runs only after the manifest has been validated and bound to the journal, strictly
-// before that credential can authorize a future cross-session resume; on a journal that
-// already carries the original-session credential it is NEVER re-derived or replaced. A
-// non-resumable transfer (no journal) simply has nothing to attach.
+// before that credential can authorize a future cross-session resume.
+//
+// Provenance (V13-PR07 security review, Blocker 1): the credential may be derived only for
+// a journal created during THIS manifest/session (`Prepare` did not load one). A journal
+// loaded as existing/resumed state must NEVER receive a credential fabricated from a later
+// session master: an existing credential is preserved exactly, a missing one stays missing.
+// A non-resumable transfer (no journal) simply has nothing to attach.
 func (d *DurableDestination) AttachResumeSecret(manifest wire.Manifest, resumeRoot []byte) error {
 	validated, err := wire.ValidateManifest(manifest)
 	if err != nil {
@@ -761,6 +765,12 @@ func (d *DurableDestination) AttachResumeSecret(manifest wire.Manifest, resumeRo
 	}
 	if d.journal.ResumeSecret != nil {
 		return nil // original-session credential already persisted; never replace it
+	}
+	if d.resumed {
+		// The journal predates this session (loaded, not created): a missing credential
+		// stays missing — never fabricated from a later session master. Old partials are
+		// never deleted and the journal remains usable for its existing capabilities.
+		return nil
 	}
 	secret, err := wire.ResumeSecret(resumeRoot, wire.ResumeAuthVersion, validated.TransferID, fp)
 	if err != nil {

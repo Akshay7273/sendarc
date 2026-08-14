@@ -53,6 +53,24 @@ export const RESUME_NONCE_BYTES = 32;
 export const RESUME_PROOF_BYTES = 32;
 /** Derived transfer-scoped credential length (256 bits). */
 export const RESUME_SECRET_BYTES = 32;
+/** The authenticated session master length (the SendBeam handshake always derives 32). */
+export const RESUME_MASTER_BYTES = 32;
+
+/**
+ * Shared semantic ceiling for one resume-auth wire message, mirrored in Go
+ * (MaxResumeAuthMessageBytes). The largest legitimate message is resume_challenge: ~two
+ * 43-char base64url fields plus JSON framing, well under 256 bytes. 1024 bounds
+ * attacker-controlled payloads before any JSON/base64 allocation while leaving ample
+ * headroom for future versioned fields.
+ */
+export const MAX_RESUME_AUTH_MESSAGE_BYTES = 1024;
+
+/** Canonical unpadded base64url length of n bytes (4*ceil(n/3) minus omitted padding). */
+function b64urlLen(n: number): number {
+  const groups = Math.ceil(n / 3);
+  const pad = (3 - (n % 3)) % 3;
+  return 4 * groups - pad;
+}
 
 /** Domain-separated HKDF info strings (ADR 0005 §3/§6.4/§7). */
 const INFO_RESUME_ROOT = `${PROTOCOL_VERSION} resume root`;
@@ -86,7 +104,14 @@ function u32be(n: number): Uint8Array {
  * thread pass the root into the transfer worker without leaking the session master.
  */
 export async function deriveResumeRoot(master: Uint8Array): Promise<Uint8Array> {
-  if (master.length === 0) throw new Error('resume: original session master is empty');
+  // The SendBeam handshake master is exactly 32 bytes (deriveMaster outLen). Anything else
+  // is a miswired caller, not a valid master: reject it rather than derive a low-entropy or
+  // wrong-length root from it.
+  if (master.length !== RESUME_MASTER_BYTES) {
+    throw new Error(
+      `resume: original session master must be ${RESUME_MASTER_BYTES} bytes, got ${master.length}`,
+    );
+  }
   return hkdfSha256(master, new Uint8Array(0), utf8(INFO_RESUME_ROOT), RESUME_SECRET_BYTES);
 }
 
@@ -106,6 +131,13 @@ export async function deriveResumeSecret(
   transferId: string,
   manifestFingerprint: string,
 ): Promise<Uint8Array> {
+  // The resume root is the 32-byte output of deriveResumeRoot; a different length means the
+  // caller passed something else (a raw master, a string, an empty slice).
+  if (resumeRoot.length !== RESUME_SECRET_BYTES) {
+    throw new Error(
+      `resume: resume root must be ${RESUME_SECRET_BYTES} bytes, got ${resumeRoot.length}`,
+    );
+  }
   if (version !== RESUME_AUTH_VERSION) {
     throw new Error(`resume: unsupported resume-auth version ${version}`);
   }
@@ -326,17 +358,33 @@ function validateResumeMessage(m: ResumeMessage): void {
 
 function requireB64Len(s: string | undefined, n: number, what: string): void {
   if (s === undefined) throw new Error(`resume: missing ${what}`);
+  // The canonical unpadded base64url length is checked FIRST — before any base64 decoding —
+  // so a huge nonce/proof string is rejected without allocation.
+  if (s.length !== b64urlLen(n)) {
+    throw new Error(`resume: ${what} must be ${n} bytes`);
+  }
+  // Reject any character outside the base64url alphabet before decoding (padded '=' spellings
+  // are caught here as well, since '=' is not in the alphabet).
+  if (!/^[A-Za-z0-9_-]+$/.test(s)) {
+    throw new Error(`resume: non-base64url ${what} encoding`);
+  }
   const decoded = base64urlToBytes(s);
   if (decoded.length !== n) throw new Error(`resume: ${what} must be ${n} bytes`);
+  // Re-encode to reject non-canonical spellings of the same bytes.
   if (bytesToBase64url(decoded) !== s) throw new Error(`resume: non-canonical ${what} encoding`);
 }
 
 /**
  * Strictly decode one resume-auth message: unknown fields, missing fields, wrong types,
  * invalid versions/roles, non-canonical encodings, wrong nonce/proof lengths, and trailing
- * data are all rejected. Binary fields are length-bounded before any allocation.
+ * data are all rejected. The payload ceiling is enforced BEFORE any JSON parsing, and every
+ * binary field's canonical base64url length is enforced before any base64 decoding, so there
+ * are no attacker-controlled unbounded allocations.
  */
 export function decodeResumeMessage(payload: Uint8Array): ResumeMessage {
+  if (payload.length > MAX_RESUME_AUTH_MESSAGE_BYTES) {
+    throw new Error(`resume: message exceeds ${MAX_RESUME_AUTH_MESSAGE_BYTES} bytes`);
+  }
   let obj: unknown;
   try {
     obj = JSON.parse(new TextDecoder().decode(payload));
@@ -438,9 +486,26 @@ export class ResumeAuthSession {
   private joinerNonce: Uint8Array | undefined;
   private transcript: Uint8Array | undefined;
   private result: ResumeAuthResult | undefined;
-  private accepted: Uint8Array | undefined;
-  private responded: Uint8Array | undefined;
+  /**
+   * A small fixed snapshot per handshake step: the canonical encoding of each accepted
+   * inbound message plus the exact outbound snapshot generated for it (undefined when the
+   * accepted message had no response). An exact duplicate of any accepted message is
+   * idempotently re-answered with the SAME snapshot for the rest of the session (including
+   * after done) — never a fresh nonce/proof for a retry; any other message of a type that
+   * was already accepted is a conflicting duplicate and fails closed.
+   */
+  private steps: { accepted: Uint8Array; responded: Uint8Array | undefined }[] = [];
   private settledErr: Error | undefined;
+  /**
+   * Serializes ALL inbound handshake processing in arrival order (Blocker 4): WebCrypto
+   * awaits inside acceptInit/acceptChallenge make bare async handlers racy — two concurrent
+   * handle(sameInit) calls could both observe idle and mint different joiner nonces. The
+   * promise chain guarantees exactly one inbound message mutates state at a time, that an
+   * exact duplicate concurrent message receives the SAME snapshotted response, that a
+   * conflicting concurrent duplicate fails closed deterministically, and that a failure is
+   * terminal (later queued work sees `failed` and cannot resurrect the session).
+   */
+  private queue: Promise<void> = Promise.resolve();
 
   constructor(ctx: ResumeAuthContext) {
     if (ctx.version !== RESUME_AUTH_VERSION) {
@@ -484,51 +549,75 @@ export class ResumeAuthSession {
   /**
    * Feed one inbound message. Returns the outbound message to send (if any) and, when mutual
    * authentication completes, the fresh resumed keys. A message from an impossible state, a
-   * conflicting duplicate, or a failed proof settles the session failed.
+   * conflicting duplicate, or a failed proof settles the session failed. All inbound
+   * processing is serialized in arrival order (see {@link queue}); failures are terminal and
+   * later queued work cannot resurrect or overwrite the failed state.
    */
   async handle(payload: Uint8Array): Promise<ResumeAuthOutcome> {
+    const run = this.queue.then(() => this.handleSerialized(payload));
+    // The chain always continues: a rejection is delivered to the caller of `run` and the
+    // queue swallows it so no unhandled rejection leaks and later queued work still runs
+    // (it will observe the terminal `failed` state and fail closed itself).
+    this.queue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private async handleSerialized(payload: Uint8Array): Promise<ResumeAuthOutcome> {
     if (this.state === 'failed') throw this.settledErr;
     const msg = decodeResumeMessage(payload);
+    // Idempotent replay first: an exact duplicate of ANY accepted message (current or
+    // settled step) is re-answered with the SAME snapshot for the rest of the session —
+    // including after done — so a lost response is retransmitted identically, never with a
+    // fresh nonce/proof. A snapshot with no response (offerer's accepted ready) is a settled
+    // no-op; a snapshot that produced a response re-answers it with the same bytes.
+    const step = this.steps.find((s) => bytesEqual(payload, s.accepted));
+    if (step) {
+      if (step.responded === undefined) {
+        return this.result === undefined ? {} : { result: this.result };
+      }
+      const out = decodeResumeMessage(step.responded);
+      return this.result === undefined ? { out } : { out, result: this.result };
+    }
     if (this.ctx.role === 'offerer') return this.handleOfferer(msg, payload);
     return this.handleJoiner(msg, payload);
   }
+
   private async handleOfferer(msg: ResumeMessage, payload: Uint8Array): Promise<ResumeAuthOutcome> {
     switch (msg.type) {
       case RESUME_MSG_CHALLENGE: {
-        if (this.state !== 'await-challenge' && this.state !== 'await-ready') {
-          throw this.fail(new Error(`resume: unexpected resume_challenge in state ${this.state}`));
-        }
-        // Idempotency: an exact duplicate of the accepted challenge is re-answered with the
-        // same snapshot confirm (same proof, never a fresh nonce).
-        if (this.accepted && bytesEqual(payload, this.accepted) && this.responded) {
-          return { out: decodeResumeMessage(this.responded) };
-        }
-        if (this.state === 'await-ready') {
+        // A challenge that is not an exact duplicate of the accepted one is a conflicting
+        // duplicate (challenge replacement after proof is forbidden).
+        if (this.state !== 'await-challenge') {
           throw this.fail(new Error('resume: conflicting duplicate resume_challenge'));
         }
         return this.acceptChallenge(msg, payload);
       }
       case RESUME_MSG_READY: {
-        if (this.state === 'await-ready') {
-          const proof = base64urlToBytes(msg.proof!);
-          if (
-            !(await verifyProof(
-              proof,
-              this.ctx.resumeSecret,
-              this.transcript!,
-              RESUME_PROOF_TAG_READY,
-              INFO_RESUME_PROOF_JOINER,
-            ))
-          ) {
-            throw this.fail(new Error('resume: joiner ready proof verification failed'));
-          }
-          this.state = 'done';
-          const result = await this.buildResult();
-          this.result = result;
-          return { result };
+        if (this.state !== 'await-ready') {
+          throw this.fail(new Error(`resume: unexpected resume_ready in state ${this.state}`));
         }
-        if (this.state === 'done') return {};
-        throw this.fail(new Error(`resume: unexpected resume_ready in state ${this.state}`));
+        const proof = base64urlToBytes(msg.proof!);
+        if (
+          !(await verifyProof(
+            proof,
+            this.ctx.resumeSecret,
+            this.transcript!,
+            RESUME_PROOF_TAG_READY,
+            INFO_RESUME_PROOF_JOINER,
+          ))
+        ) {
+          throw this.fail(new Error('resume: joiner ready proof verification failed'));
+        }
+        // Snapshot the accepted ready (no outbound response): an exact duplicate after done
+        // is a settled no-op; a different ready is a conflicting duplicate that fails.
+        this.steps.push({ accepted: payload.slice(), responded: undefined });
+        this.state = 'done';
+        const result = await this.buildResult();
+        this.result = result;
+        return { result };
       }
       default:
         throw this.fail(new Error(`resume: offerer received unexpected ${msg.type}`));
@@ -566,8 +655,9 @@ export class ResumeAuthSession {
       role: 'offerer',
       proof: bytesToBase64url(offererProof),
     };
-    this.accepted = payload.slice();
-    this.responded = encodeResumeMessage(confirm);
+    // Snapshot both the accepted challenge and the generated confirm so a retransmission is
+    // re-answered with the SAME proof (never a fresh nonce/proof).
+    this.steps.push({ accepted: payload.slice(), responded: encodeResumeMessage(confirm) });
     this.state = 'await-ready';
     return { out: confirm };
   }
@@ -575,61 +665,44 @@ export class ResumeAuthSession {
   private async handleJoiner(msg: ResumeMessage, payload: Uint8Array): Promise<ResumeAuthOutcome> {
     switch (msg.type) {
       case RESUME_MSG_INIT: {
-        if (this.state !== 'idle' && this.state !== 'await-confirm' && this.state !== 'done') {
-          throw this.fail(new Error(`resume: unexpected resume_init in state ${this.state}`));
-        }
-        // Idempotency: an exact duplicate of the accepted init is re-answered with the same
-        // snapshot challenge (same nonce and proof, never a fresh nonce for a retry).
-        if (this.accepted && bytesEqual(payload, this.accepted) && this.responded) {
-          return { out: decodeResumeMessage(this.responded) };
-        }
+        // A second, different init (challenge replacement after proof is forbidden) is a
+        // conflicting duplicate; an exact duplicate was already re-answered above.
         if (this.state !== 'idle') {
           throw this.fail(new Error('resume: conflicting duplicate resume_init'));
         }
         return this.acceptInit(msg, payload);
       }
       case RESUME_MSG_CONFIRM: {
-        if (this.state === 'await-confirm') {
-          const proof = base64urlToBytes(msg.proof!);
-          if (
-            !(await verifyProof(
-              proof,
-              this.ctx.resumeSecret,
-              this.transcript!,
-              RESUME_PROOF_TAG_OFFERER,
-              INFO_RESUME_PROOF_OFFERER,
-            ))
-          ) {
-            throw this.fail(new Error('resume: offerer proof verification failed'));
-          }
-          const readyProof = await resumeReadyProof(this.ctx.resumeSecret, this.transcript!);
-          const ready: ResumeMessage = {
-            type: RESUME_MSG_READY,
-            version: RESUME_AUTH_VERSION,
-            role: 'joiner',
-            proof: bytesToBase64url(readyProof),
-          };
-          this.accepted = payload.slice();
-          this.responded = encodeResumeMessage(ready);
-          this.state = 'done';
-          const result = await this.buildResult();
-          this.result = result;
-          return { out: ready, result };
-        }
-        if (this.state === 'done') {
-          // Idempotency: the settled joiner re-answers a duplicate confirm with the SAME
-          // ready snapshot so a lost ready never stalls the offerer.
-          if (
-            this.accepted &&
-            bytesEqual(payload, this.accepted) &&
-            this.responded &&
-            this.result
-          ) {
-            return { out: decodeResumeMessage(this.responded), result: this.result };
-          }
+        if (this.state !== 'await-confirm') {
           throw this.fail(new Error('resume: conflicting duplicate resume_confirm'));
         }
-        throw this.fail(new Error(`resume: unexpected resume_confirm in state ${this.state}`));
+        const proof = base64urlToBytes(msg.proof!);
+        if (
+          !(await verifyProof(
+            proof,
+            this.ctx.resumeSecret,
+            this.transcript!,
+            RESUME_PROOF_TAG_OFFERER,
+            INFO_RESUME_PROOF_OFFERER,
+          ))
+        ) {
+          throw this.fail(new Error('resume: offerer proof verification failed'));
+        }
+        const readyProof = await resumeReadyProof(this.ctx.resumeSecret, this.transcript!);
+        const ready: ResumeMessage = {
+          type: RESUME_MSG_READY,
+          version: RESUME_AUTH_VERSION,
+          role: 'joiner',
+          proof: bytesToBase64url(readyProof),
+        };
+        // Snapshot the accepted confirm and its ready response: the settled joiner re-answers
+        // an exact duplicate confirm with the SAME ready (a lost ready never stalls the
+        // offerer); a different confirm is a conflicting duplicate that fails.
+        this.steps.push({ accepted: payload.slice(), responded: encodeResumeMessage(ready) });
+        this.state = 'done';
+        const result = await this.buildResult();
+        this.result = result;
+        return { out: ready, result };
       }
       default:
         throw this.fail(new Error(`resume: joiner received unexpected ${msg.type}`));
@@ -655,8 +728,7 @@ export class ResumeAuthSession {
       nonce: bytesToBase64url(nonce),
       proof: bytesToBase64url(joinerProof),
     };
-    this.accepted = payload.slice();
-    this.responded = encodeResumeMessage(challenge);
+    this.steps.push({ accepted: payload.slice(), responded: encodeResumeMessage(challenge) });
     this.state = 'await-confirm';
     return { out: challenge };
   }
@@ -699,10 +771,12 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 }
 
 /**
- * Whether both peers advertised the resume-auth-v1 capability. Negotiation participates in
- * the resume decision and is itself authenticated by the session's key confirmation (the
- * caps exchange), so a malicious server stripping the capability yields "no capability" —
- * cross-session resume unavailable — never an unauthenticated resume.
+ * Whether both peers advertised the resume-auth-v1 capability. The security invariant that
+ * MUST hold (ADR 0005 §2/§9) is: capability absent, stripped, or otherwise untrusted =>
+ * authenticated cross-session resume is UNAVAILABLE — never a fallback to unauthenticated
+ * durable progress reuse. PR08 owns the discovery path that obtains the authenticated
+ * capability state for a cross-session attempt; this predicate only computes the boolean
+ * from whatever features are presented.
  */
 export function negotiateResumeAuth(
   localFeatures: readonly string[],
