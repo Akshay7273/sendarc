@@ -300,10 +300,21 @@ design, derivation formulas, state machine, and security analysis live in
 `docs/adr/0005-cross-session-resume.md`; this section summarizes the wire-visible shape.
 
 The capability is named **`resume-auth-v1`** (Go `wire.ResumeAuthCapability`, TS
-`RESUME_AUTH_CAPABILITY`). It is a `features` entry announced in caps like any other feature;
-it is **not** advertised in production defaults and the product flow is disabled until
-PR08/lead approval. Ordinary transfers are byte-for-byte unchanged, and legacy peers that
-never advertise the capability never receive resume-auth messages.
+`RESUME_AUTH_CAPABILITY`). It is a `features` entry announced in caps like any other feature.
+PR08 integrates it into the CLI and browser flows: a host advertises it only when its local
+integration can really load a valid resume credential, run resume-auth, derive fresh
+transfer keys, and enforce the no-downgrade behavior. Ordinary transfers are byte-for-byte
+unchanged, and legacy peers that never advertise the capability never receive resume-auth
+messages.
+
+The host integration ordering for a cross-session durable resume is: local interrupted
+state selected → source/destination revalidated → fresh signaling/rendezvous created →
+peer capability checked → ResumeAuthSession completes mutually → fresh traffic keys
+available → transfer sender/receiver constructed under the NEW key epoch → authenticated
+Manifest → fingerprint-bound resume_state → sender validates the durable claim → missing
+blocks only → whole-file verification. No Manifest/ResumeState/BlockData/Complete from a
+resumed transfer is sent or trusted before resume-auth completes, and the normal transfer
+protocol never runs under provisional resume-auth keys.
 
 When both peers agree on `resume-auth-v1` and both hold the transfer's local resume
 credential, the peers run the resume-auth handshake over the (abstract) transport. Message
@@ -337,8 +348,10 @@ Decoder bounds: one resume-auth message is limited to **1024 bytes** (checked be
 JSON parsing), every nonce/proof must be exactly the canonical 43-char unpadded base64url
 of 32 bytes (length checked before any base64 decoding), characters outside the base64url
 alphabet and padded or non-canonical spellings are rejected, and there is no implicit
-version — `version` must be exactly 1. The capability is included in the resume decision;
+version — `version` must be exactly 1. The capability is included in the resume decision.
 PR08 owns the discovery path that obtains authenticated capability state for a
-cross-session attempt, and this protocol only guarantees the fail-closed side: capability
+cross-session attempt, and the protocol guarantees the fail-closed side: capability
 absent, stripped, or untrusted ⇒ cross-session resume unavailable, never an unauthenticated
-resume.
+resume. Same-session path recovery (direct↔relay cutover) never re-runs resume-auth — the
+fresh resumed key epoch is per resumed process/session, and a path change within the same
+epoch follows the existing same-session counter/path semantics.

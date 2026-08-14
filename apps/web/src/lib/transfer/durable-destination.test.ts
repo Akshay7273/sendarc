@@ -70,6 +70,34 @@ class MemoryStore implements DurableJournalStore {
     }
   }
 
+  async listJournals(): Promise<
+    Array<{
+      transferId: string;
+      kind: 'ok' | 'corrupt';
+      journal?: DurableJournal;
+      error?: string;
+    }>
+  > {
+    const out: Array<{
+      transferId: string;
+      kind: 'ok' | 'corrupt';
+      journal?: DurableJournal;
+      error?: string;
+    }> = [];
+    for (const [transferId, bytes] of this.journals) {
+      try {
+        out.push({ transferId, kind: 'ok', journal: await decodeJournal(bytes) });
+      } catch (e) {
+        out.push({
+          transferId,
+          kind: 'corrupt',
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+    return out;
+  }
+
   async createJournal(
     transferId: string,
     manifest: Manifest,
@@ -384,6 +412,18 @@ function committed(journal: DurableJournal | undefined, fileIdx: number): number
   return journal?.files[fileIdx]?.committedBlocks ?? -1;
 }
 
+/**
+ * V13-PR08: arm an explicit authenticated-resume attempt the way the driver does — the
+ * user pre-selects the interrupted journal (expectResumeFor) and the resume preamble runs
+ * to mutual success (authorizeResume) strictly before `prepare` may reuse its progress.
+ * Tests that exercise the reload-resume mechanics call this before a resumed prepare.
+ */
+function armAuth(d: DurableDestination): DurableDestination {
+  d.expectResumeFor(TRANSFER_ID);
+  d.authorizeResume();
+  return d;
+}
+
 /** Serialized digest state covering exactly `bytes` — what the receiver feeds before each write. */
 function digestStateFor(h: Harness, bytes: Uint8Array): Uint8Array {
   const d = h.digest();
@@ -524,8 +564,9 @@ describe('DurableDestination', () => {
     // Tab crash: the first destination is abandoned (lease lives on via its TTL).
 
     // Reloaded receiver in the same room: same storage, expired lease → stale takeover.
+    // The driver arms an authenticated-resume attempt before prepare reuses the checkpoint.
     h.advance(DURABLE_LEASE_TTL_MS + 1);
-    const second = h.makeDestination();
+    const second = armAuth(h.makeDestination());
     await second.prepare(m);
     expect(second.durableMeta()?.resumed).toBe(true);
 
@@ -580,7 +621,7 @@ describe('DurableDestination', () => {
     expect(cp?.state).toMatch(/^[0-9a-f]{232}$/); // 116-byte hash-wasm state
 
     h.advance(DURABLE_LEASE_TTL_MS + 1);
-    const second = h.makeDestination();
+    const second = armAuth(h.makeDestination());
     await second.prepare(m);
     expect(second.durableMeta()?.resumed).toBe(true);
 
@@ -610,7 +651,7 @@ describe('DurableDestination', () => {
     await journalWithCheckpoint(h.store, j, foreign);
 
     h.advance(DURABLE_LEASE_TTL_MS + 1);
-    const d = h.makeDestination();
+    const d = armAuth(h.makeDestination());
     await d.prepare(m);
     const file = d.resumeStateFor()?.files.get(0);
     expect(file?.haveBlocks).toBe(2);
@@ -628,7 +669,7 @@ describe('DurableDestination', () => {
     const j2 = await journalFor(h.store, h.files, [['b.bin', 24]], [2]);
     await journalWithCheckpoint(h.store, j2, undecodable);
     h.advance(DURABLE_LEASE_TTL_MS + 1);
-    const d2 = h.makeDestination();
+    const d2 = armAuth(h.makeDestination());
     await d2.prepare(manifest([['b.bin', 24]]));
     const file2 = d2.resumeStateFor()?.files.get(0);
     expect(await file2?.seedDigest.hexDigest()).toBe(bytesToHex(await sha256(persisted)));
@@ -651,7 +692,7 @@ describe('DurableDestination', () => {
     await journalWithCheckpoint(h.store, j, cp);
 
     h.advance(DURABLE_LEASE_TTL_MS + 1);
-    const d = h.makeDestination();
+    const d = armAuth(h.makeDestination());
     await d.prepare(manifest([['a.bin', 24]]));
     const file = d.resumeStateFor()?.files.get(0);
     // The seed covers the checkpointed state's bytes — trusted, never guessed. The
@@ -680,7 +721,7 @@ describe('DurableDestination', () => {
     h.files.data.set('b.bin', bPrefix);
 
     h.advance(DURABLE_LEASE_TTL_MS + 1);
-    const d = h.makeDestination();
+    const d = armAuth(h.makeDestination());
     await d.prepare(
       manifest([
         ['a.bin', 24],
@@ -736,7 +777,7 @@ describe('DurableDestination', () => {
     h.files.data.set('a.bin', new Uint8Array(16).fill(0xff));
 
     h.advance(DURABLE_LEASE_TTL_MS + 1);
-    const d = h.makeDestination();
+    const d = armAuth(h.makeDestination());
     await d.prepare(
       manifest([
         ['a.bin', 24],
@@ -781,7 +822,7 @@ describe('DurableDestination', () => {
     });
 
     h.advance(DURABLE_LEASE_TTL_MS + 1);
-    const d = h.makeDestination();
+    const d = armAuth(h.makeDestination());
     await d.prepare(
       manifest([
         ['a.bin', 24],
@@ -822,7 +863,7 @@ describe('DurableDestination', () => {
     );
 
     h.advance(DURABLE_LEASE_TTL_MS + 1);
-    const d = h.makeDestination();
+    const d = armAuth(h.makeDestination());
     await d.prepare(
       manifest([
         ['a.bin', 24],
@@ -894,7 +935,7 @@ describe('DurableDestination', () => {
     h.store.journals.set(TRANSFER_ID, await encodeJournal(advanced));
 
     h.advance(DURABLE_LEASE_TTL_MS + 1);
-    const d = h.makeDestination();
+    const d = armAuth(h.makeDestination());
 
     const keys = await deriveTransferKeys(new Uint8Array(32).fill(7));
     const frames: Uint8Array[] = [];
@@ -992,7 +1033,7 @@ describe('DurableDestination', () => {
     h.files.data.set('a.bin', new Uint8Array(16).fill(9));
 
     h.advance(DURABLE_LEASE_TTL_MS + 1);
-    const d = h.makeDestination();
+    const d = armAuth(h.makeDestination());
     const m = manifest([['a.bin', 24]]);
     await d.prepare(m);
     expect(d.resumeStateFor()?.files.get(0)?.haveBlocks).toBe(1);
@@ -1011,7 +1052,7 @@ describe('DurableDestination', () => {
     h.files.data.delete('a.bin'); // evicted
 
     h.advance(DURABLE_LEASE_TTL_MS + 1);
-    const d = h.makeDestination();
+    const d = armAuth(h.makeDestination());
     await expect(d.prepare(manifest([['a.bin', 24]]))).rejects.toThrow(/missing or truncated/);
     // Nothing was deleted.
     expect((await h.store.loadJournal(TRANSFER_ID)).kind).toBe('ok');
@@ -1020,8 +1061,36 @@ describe('DurableDestination', () => {
     await journalFor(h.store, h.files, [['a.bin', 24]], [2]);
     h.files.data.set('a.bin', new Uint8Array(4));
     h.advance(DURABLE_LEASE_TTL_MS + 1);
-    const d2 = h.makeDestination();
+    const d2 = armAuth(h.makeDestination());
     await expect(d2.prepare(manifest([['a.bin', 24]]))).rejects.toThrow(/missing or truncated/);
+  });
+
+  it('fresh session cannot skip verified blocks merely because transferId + fingerprint match (V13-PR08)', async () => {
+    const h = await harness();
+    // An interrupted transfer leaves a journal with verified committed progress.
+    await journalFor(h.store, h.files, [['a.bin', 24]], [2]);
+    h.advance(DURABLE_LEASE_TTL_MS + 1);
+
+    // A FRESH session (no resumeAttempt, no preamble) presents the SAME transferId and
+    // the SAME manifest fingerprint. The gate must fail closed: nothing received, nothing
+    // deleted, the journal untouched — old verified progress is never reused.
+    const fresh = h.makeDestination();
+    await expect(fresh.prepare(manifest([['a.bin', 24]]))).rejects.toThrow(
+      /requires authenticated resume/,
+    );
+    expect((await h.store.loadJournal(TRANSFER_ID)).kind).toBe('ok');
+    expect(h.files.data.get('a.bin')?.length).toBe(16); // verified prefix intact
+    expect(fresh.durableMeta()?.resumed).toBe(true);
+
+    // The gate does NOT fire for a genuinely fresh transfer (no journal for that id): a
+    // brand-new id is a fresh sender, and its fresh journal has no verified progress at
+    // risk — matching the driver's fresh-path semantics.
+    const otherId = 'b'.repeat(32);
+    const freshM: Manifest = { ...manifest([['a.bin', 24]]), transferId: otherId };
+    const freshTransfer = h.makeDestination();
+    await freshTransfer.prepare(freshM);
+    expect(freshTransfer.durableMeta()?.resumed).toBe(false);
+    await freshTransfer.abort();
   });
 
   it('concurrent tabs: the second receiver fails closed while the lease is held', async () => {
@@ -1054,8 +1123,9 @@ describe('DurableDestination', () => {
     expect(h.files.data.get('a.bin')?.length).toBe(8);
     expect(h.store.leases.has(TRANSFER_ID)).toBe(false);
 
-    // A retry (same or another tab) acquires immediately and resumes from the checkpoint.
-    const retry = h.makeDestination();
+    // A retry (same or another tab) acquires immediately and resumes from the checkpoint;
+    // the driver arms an authenticated-resume attempt for the interrupted journal.
+    const retry = armAuth(h.makeDestination());
     await retry.prepare(m);
     expect(retry.durableMeta()?.resumed).toBe(true);
     await retry.abort();
@@ -1097,7 +1167,7 @@ describe('DurableDestination', () => {
     // flow's abort releases it, mirror that here so the next attempt can acquire.
     await low.abort();
 
-    const d = h.makeDestination();
+    const d = armAuth(h.makeDestination());
     await d.prepare(m);
     h.files.quotaOnWrite = true;
     const sink = await d.open(m.files[0]!);
@@ -1282,8 +1352,9 @@ describe('DurableDestination', () => {
     await first.abort();
 
     // Session 2: a later receive loads the journal as existing/resumed state and attaches
-    // with a DIFFERENT resume root. It must leave the journal without a credential.
-    const second = h.makeDestination();
+    // with a DIFFERENT resume root. It must leave the journal without a credential. The
+    // driver arms an authenticated-resume attempt before prepare may reuse the journal.
+    const second = armAuth(h.makeDestination());
     await second.prepare(m);
     expect(second.durableMeta()?.resumed).toBe(true);
     await second.attachResumeSecret(m, new Uint8Array(32).fill(0x42));
@@ -1351,8 +1422,9 @@ describe('DurableDestination', () => {
     // The active lease was released promptly instead of lingering for the 120s stale TTL.
     expect(h.store.leases.has(TRANSFER_ID)).toBe(false);
 
-    // A retry acquires immediately and finalizes successfully.
-    const retry = h.makeDestination();
+    // A retry acquires immediately and finalizes successfully (authenticated resume armed
+    // by the driver for the interrupted journal).
+    const retry = armAuth(h.makeDestination());
     await retry.prepare(m);
     expect(retry.durableMeta()?.resumed).toBe(true);
     const ra = await retry.open(m.files[0]!);
@@ -1390,8 +1462,9 @@ describe('DurableDestination', () => {
     expect(h.files.data.size).toBe(2);
     expect(h.store.leases.has(TRANSFER_ID)).toBe(false);
 
-    // Immediate retry acquires and completes finalization idempotently.
-    const retry = h.makeDestination();
+    // Immediate retry acquires and completes finalization idempotently (authenticated
+    // resume armed by the driver for the interrupted journal).
+    const retry = armAuth(h.makeDestination());
     await retry.prepare(m);
     expect(retry.durableMeta()?.resumed).toBe(true);
     const ra = await retry.open(m.files[0]!);
@@ -1421,7 +1494,8 @@ describe('DurableDestination', () => {
     expect(h.store.leases.has(TRANSFER_ID)).toBe(false);
 
     // Immediate retry: acquire, finalize, and the resume metadata (journal + lease) is gone.
-    const retry = h.makeDestination();
+    // (Authenticated resume armed by the driver for the interrupted journal.)
+    const retry = armAuth(h.makeDestination());
     await retry.prepare(m);
     expect(retry.durableMeta()?.resumed).toBe(true);
     const resumed = await retry.open(m.files[0]!);

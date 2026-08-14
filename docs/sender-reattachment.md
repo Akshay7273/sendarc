@@ -121,14 +121,43 @@ A same-size, same-mtime edit is the hard case: the cheap pre-check passes, the
 fingerprint check does not — the manifest about to be advertised is refused at the hook,
 before its frame, so the receiver never sees an inconsistent id. Nothing was sent.
 
+## Cross-session authenticated resume (v1.3 PR08)
+
+PR08 builds on the record: on a sender restart the user _reopens_ the interrupted send
+(the record's persisted path/handle or an explicit reselection — PR04 stays mandatory),
+the source is revalidated (canonical identity + exact fingerprint against the record),
+and only then is the transfer resumed with the peer.
+
+The record's PR07 `resumeSecret` is the difference between a **durable resume** and a
+**restart**:
+
+- **Durable resume** — both peers possess the matching transfer-scoped credential. The
+  sender starts a FRESH temporary rendezvous (fresh invite code, never persisted, never
+  derived from the secret), the receiver selects the matching interrupted journal, both
+  run resume-auth-v1, and only after mutual success is the verified checkpoint reused
+  under a brand-new key epoch.
+- **Restart / legacy** — a pre-PR07 record has no credential; nothing is fabricated for
+  it. Durable data may remain locally, authenticated cross-session resume is
+  unavailable, and an explicit fresh restart/discard is the only path. Old partials are
+  never deleted without explicit discard.
+
+A valid `resumeSecret` is NOT authorization to change the source: the source
+revalidation ordering (reopen → recompute identity + fingerprint → compare with the
+record) runs before any resume-auth, and a mismatch is a hard refusal.
+
+Errors are distinct: interrupted transfer not found, source changed, receiver state
+missing/corrupt, resume credential unavailable, peer does not support authenticated
+resume, resume authentication failed, or fresh restart required/available. No secret
+material is ever printed.
+
 ## Limits (deferred)
 
-- **Cross-session authenticated resume (PR05+)**: today a restart re-uses the same
-  rendezvous; resuming across new rooms/sessions with authentication is future work.
 - Browser restarts depend on the same browser + origin (the handle and record are
   origin-scoped); there is no cross-device resume.
 - The record keeps the last successful manifest; it does not archive earlier versions,
   and there is no quota management beyond the per-record removal.
+- Persistent server-side presence, inboxes, accounts, cloud backup/history, and
+  trusted-device pairing remain OUT of scope — resume is account-free and purely local.
 
 ## CLI storage contract
 

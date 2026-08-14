@@ -96,6 +96,10 @@ export class DurableDestination implements BrowserDestination {
   private journal: DurableJournal | undefined;
   private transferId = '';
   private resumed = false;
+  // V13-PR08: an explicit authenticated-resume attempt pre-selects its interrupted journal;
+  // until resume-auth succeeds in THIS session, that journal's progress is never trusted.
+  private expectResume = '';
+  private resumeAuthorized = false;
   private sync = true;
   private readonly sinks = new Map<number, DurableFileSink>();
   private renewTimer: ReturnType<typeof setInterval> | undefined;
@@ -110,6 +114,24 @@ export class DurableDestination implements BrowserDestination {
     this.renewMs = options.renewMs ?? DURABLE_LEASE_RENEW_MS;
     this.ensureSpace =
       options.ensureSpace ?? ((required: number) => ensureSpaceInBrowser(required));
+  }
+
+  /**
+   * V13-PR08: mark this receive as an explicit authenticated-resume attempt for the
+   * interrupted journal `transferId` (the user pre-selected it locally). Until resume-auth
+   * succeeds in this session, the journal's verified progress is never reused.
+   */
+  expectResumeFor(transferId: string): void {
+    this.expectResume = transferId;
+  }
+
+  /**
+   * V13-PR08: records that mutual resume-auth completed in THIS session; only then may the
+   * pre-selected interrupted journal's verified progress be reused. A fresh receive without
+   * a pre-selected journal never needs it.
+   */
+  authorizeResume(): void {
+    this.resumeAuthorized = true;
   }
 
   /** Revalidate the manifest, load/create the journal, acquire the lease, build the resume seed. */
@@ -176,12 +198,37 @@ export class DurableDestination implements BrowserDestination {
     }
 
     // Atomic test-and-set lease: concurrent tabs and stale holders fail closed; an expired
-    // lease is taken over deterministically.
+    // lease is taken over deterministically. Checked BEFORE the resume-auth gate so a live
+    // concurrent receiver reports the true conflict instead of a misleading auth error; both
+    // paths fail closed and never reuse verified progress.
     const lease = await this.store.acquireLease(this.transferId, this.ownerId, this.now());
     if (lease.kind === 'contended') {
       throw new TransferError(
         'sink_error',
         'another window is already receiving this transfer; close it before retrying',
+      );
+    }
+
+    // V13-PR08: an interrupted journal's verified progress may be reused ONLY after
+    // successful resume-auth in this session. A fresh rendezvous authenticates the NEW
+    // session only; it does not prove continuity with the original transfer peer. Failing
+    // closed here is what makes a fresh session unable to skip old blocks merely because
+    // the transfer id + fingerprint match. The gate protects the PRE-SELECTED journal only:
+    // a manifest whose id differs from the expected resume id is a genuinely fresh sender,
+    // and its fresh journal has no verified progress at risk.
+    if (this.resumed && !this.resumeAuthorized) {
+      // The lease acquired above must not linger for a stale TTL after a fail-closed gate;
+      // release it so a later authenticated resume attempt can acquire immediately.
+      await this.store.releaseLease(this.transferId, this.ownerId).catch(() => {});
+      if (this.expectResume !== '' && this.expectResume === this.transferId) {
+        throw new TransferError(
+          'sink_error',
+          `resume of ${this.transferId} was not authenticated in this session; refusing to reuse its verified progress — nothing was received or deleted. Start an authenticated resume so both peers authenticate first`,
+        );
+      }
+      throw new TransferError(
+        'sink_error',
+        `transfer ${this.transferId} has verified partial data kept from an interrupted transfer; resuming it requires authenticated resume — nothing was received or deleted`,
       );
     }
 

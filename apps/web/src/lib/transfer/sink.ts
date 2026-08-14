@@ -35,6 +35,17 @@ export interface BrowserDestination extends Destination {
    * transient root derived by the main thread — never the session master.
    */
   attachResumeSecret?(manifest: Manifest, resumeRoot: Uint8Array): Promise<void>;
+  /**
+   * V13-PR08: mark this receive as an explicit authenticated-resume attempt for the
+   * interrupted journal `transferId`. Until resume-auth succeeds in THIS session, the
+   * journal's verified progress is never trusted.
+   */
+  expectResumeFor?(transferId: string): void;
+  /**
+   * V13-PR08: record that mutual resume-auth completed in this session; only then may the
+   * pre-selected interrupted journal's verified progress be reused.
+   */
+  authorizeResume?(): void;
 }
 
 /**

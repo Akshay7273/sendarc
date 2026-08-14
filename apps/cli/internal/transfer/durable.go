@@ -170,6 +170,25 @@ func (s *DurableStore) SaveJournal(j wire.DurableJournal) error {
 	return nil
 }
 
+// partialsBackCheckpoint reports whether every committed file's .part is present and at
+// least as long as its checkpoint claims (cheap Lstat; the authoritative check runs at
+// resume time in Inspect/Prepare).
+func (s *DurableStore) partialsBackCheckpoint(j *wire.DurableJournal) bool {
+	for i, f := range j.Files {
+		if f.CommittedBlocks == 0 {
+			continue
+		}
+		want, err := j.CommittedBytes(i)
+		if err != nil {
+			return false
+		}
+		if err := checkSafePartial(s.PartialPath(j.TransferID, f.Name), want); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
 // committedBytesTotal sums every file's durable byte claim (whole committed blocks,
 // final block capped at file size).
 func (s *DurableStore) committedBytesTotal(j *wire.DurableJournal) (int64, error) {
@@ -208,6 +227,13 @@ type DurableEntry struct {
 	Orphaned bool
 	// Fingerprint is the journal's manifest fingerprint ("" for orphans/unreadable).
 	Fingerprint string
+	// HasResumeSecret is true when the journal carries the transfer-scoped resume
+	// credential (V13-PR07); without it, authenticated cross-session resume is unavailable
+	// (legacy pre-PR07 state). Never printed as a value.
+	HasResumeSecret bool
+	// PartialOK is true when every committed file's .part backs its checkpoint (cheap
+	// Lstat check; the authoritative check runs on resume).
+	PartialOK bool
 	// Files / TotalSize / CommittedBytes / UpdatedAt summarize a valid journal.
 	Files          int
 	TotalSize      int64
@@ -248,13 +274,15 @@ func (s *DurableStore) List() ([]DurableEntry, error) {
 			total += f.Size
 		}
 		entries = append(entries, DurableEntry{
-			TransferID:     id,
-			JournalOK:      true,
-			Fingerprint:    j.ManifestFingerprint,
-			Files:          len(j.Files),
-			TotalSize:      total,
-			CommittedBytes: committed,
-			UpdatedAt:      j.UpdatedAt,
+			TransferID:      id,
+			JournalOK:       true,
+			Fingerprint:     j.ManifestFingerprint,
+			HasResumeSecret: j.ResumeSecret != nil,
+			PartialOK:       s.partialsBackCheckpoint(&j),
+			Files:           len(j.Files),
+			TotalSize:       total,
+			CommittedBytes:  committed,
+			UpdatedAt:       j.UpdatedAt,
 		})
 	}
 	// Orphaned partial trees: a partials/<name> directory with no journal. They are
@@ -418,6 +446,13 @@ type DurableDestination struct {
 	journal    *wire.DurableJournal
 	transferID string
 	resumed    bool
+	// expectResume is set by the driver when this receive is an explicit authenticated-resume
+	// attempt for a specific interrupted journal (V13-PR08: `sendbeam transfers resume`).
+	// Until resume-auth succeeds in THIS session, that journal's progress is never trusted.
+	expectResume string
+	// resumeAuthorized records that mutual resume-auth completed in this session; only then
+	// may a pre-existing journal's verified progress be reused.
+	resumeAuthorized bool
 	// sinks, finalPaths, partPaths key by manifest file index.
 	sinks      map[int]*DurableFileSink
 	finalPaths map[int]string
@@ -452,10 +487,34 @@ func NewDurableDestination(outDir string) (*DurableDestination, error) {
 // Store exposes the underlying storage area (management surfaces use it directly).
 func (d *DurableDestination) Store() *DurableStore { return d.store }
 
+// ExpectResume marks this receive as an explicit authenticated-resume attempt for the
+// interrupted journal `transferID` (the user pre-selected it locally). Until resume-auth
+// succeeds in this session, the journal's verified progress is never trusted.
+func (d *DurableDestination) ExpectResume(transferID string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.expectResume = transferID
+}
+
+// SetResumeAuthorized records that mutual resume-auth completed in THIS session; only then
+// may the pre-selected interrupted journal's verified progress be reused (V13-PR08
+// invariant). A fresh receive without a pre-selected journal never needs it.
+func (d *DurableDestination) SetResumeAuthorized() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.resumeAuthorized = true
+}
+
 // Prepare validates the manifest and establishes the journal: it loads and revalidates an
 // existing journal for the manifest's transfer id (fail closed on corrupt, foreign, or
 // mismatched state), or creates a fresh one. Transfers whose manifest carries no transfer
 // id never opt into resumption and get no journal.
+//
+// V13-PR08 fail-closed gating: an existing journal's verified progress is reused ONLY when
+// this session authenticated a resume for it (ExpectResume + SetResumeAuthorized). A plain
+// receive that meets an interrupted journal — or an explicit resume attempt whose
+// authentication never completed — fails closed with guidance; nothing is deleted and
+// nothing is silently resumed.
 func (d *DurableDestination) Prepare(manifest wire.Manifest) error {
 	validated, err := wire.ValidateManifest(manifest)
 	if err != nil {
@@ -518,6 +577,24 @@ func (d *DurableDestination) Prepare(manifest wire.Manifest) error {
 		return wire.Errorf(wire.CodeStorage,
 			"transfer: journal %s does not match the authenticated manifest (fingerprint mismatch); refusing to guess — run \"sendbeam transfers inspect %s\" or discard it",
 			validated.TransferID, validated.TransferID)
+	}
+	// V13-PR08: an interrupted journal's verified progress may be reused ONLY after
+	// successful resume-auth in this session. A fresh rendezvous authenticates the NEW
+	// session only; it does not prove continuity with the original transfer peer. Failing
+	// closed here is what makes a fresh session unable to skip old blocks merely because
+	// the transfer id + fingerprint match.
+	if !d.resumeAuthorized {
+		// The pre-selected-journal branch fires only when the incoming manifest IS the
+		// interrupted journal the user chose; a different id means a fresh sender and is
+		// handled by the generic branch below (its journal, if any, still fails closed).
+		if d.expectResume != "" && d.expectResume == validated.TransferID {
+			return wire.Errorf(wire.CodeStorage,
+				"transfer: resume of %s was not authenticated in this session; refusing to reuse its verified progress — nothing was received or deleted. Re-run \"sendbeam transfers resume %s --code <fresh code>\" so both peers authenticate first",
+				validated.TransferID, validated.TransferID)
+		}
+		return wire.Errorf(wire.CodeStorage,
+			"transfer: transfer %s has verified partial data kept from an interrupted transfer; resuming it requires authenticated resume. Run \"sendbeam transfers resume %s --code <fresh code>\" (the sender re-runs its send for a fresh code), or discard the state with \"sendbeam transfers discard %s --out %s\" to receive fresh — nothing was received or deleted",
+			validated.TransferID, validated.TransferID, validated.TransferID, d.outRoot)
 	}
 	wantDest, err := destinationIdentity(d.outRoot)
 	if err != nil {
@@ -790,12 +867,26 @@ func (d *DurableDestination) AttachResumeSecret(manifest wire.Manifest, resumeRo
 // the wire receiver's resume seed: per-file high-water marks plus a digest re-hashed from
 // the persisted prefix. Missing or truncated partials fail closed (never guessed, never
 // deleted). Returns nil when the transfer is not resumable (no journal).
+//
+// V13-PR08: the seed may only be advertised after resume-auth succeeded in this session
+// (Prepare already fails closed otherwise; this is defense in depth).
 func (d *DurableDestination) ResumeStateFor(manifest wire.Manifest) (*wire.ReceiverResume, error) {
 	d.mu.Lock()
 	journal := d.journal
+	authorized := d.resumeAuthorized
+	expected := d.expectResume
 	d.mu.Unlock()
 	if journal == nil {
 		return nil, nil
+	}
+	// The gate protects the PRE-SELECTED interrupted journal only: a manifest whose id
+	// differs from the expected resume id is a genuinely fresh sender, and its fresh
+	// journal has no verified progress at risk. Expected must equal the journal's id for
+	// this to be the interrupted transfer the user chose.
+	if !authorized && expected != "" && expected == journal.TransferID {
+		return nil, wire.Errorf(wire.CodeStorage,
+			"transfer: refusing to advertise verified progress for %s before resume authentication completed",
+			journal.TransferID)
 	}
 	fp, err := wire.ManifestFingerprint(manifest)
 	if err != nil {
@@ -1022,7 +1113,11 @@ func (d *DurableDestination) Abort(reason string) error {
 	for _, sink := range sinks {
 		_ = sink.Abort(reason)
 	}
-	if journal == nil {
+	// Only a non-resumable transfer's OWN temp partial tree is removed. partialID is ""
+	// when the manifest never arrived (e.g. the sender died during resume auth): PartialDir("")
+	// would resolve to the shared partials ROOT, so removing it would destroy EVERY
+	// transfer's partial data. Never touch anything in that state.
+	if journal == nil && partialID != "" {
 		_ = os.RemoveAll(d.store.PartialDir(partialID))
 	}
 	return nil

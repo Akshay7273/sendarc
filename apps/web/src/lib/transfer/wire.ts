@@ -16,11 +16,34 @@ export interface SessionCrypto {
   recvCounter: number;
 }
 
+/**
+ * V13-PR08: the LOCAL resume context for an explicit cross-session resume attempt. The user
+ * chose the interrupted transfer locally; the peer must prove continuity with the original
+ * session via resume-auth-v1 before any durable progress is reused. Only the decoded secret
+ * crosses into the worker (the envelope is decoded by the host); it is never printed.
+ */
+export interface ResumeAttempt {
+  /** Stable id of the interrupted transfer being resumed. */
+  transferId: string;
+  /** Canonical manifest fingerprint of the interrupted transfer. */
+  manifestFingerprint: string;
+  /** This peer's stable role: offerer (sender) or joiner (receiver). */
+  role: 'offerer' | 'joiner';
+  /** Decoded 32-byte transfer-scoped resume credential from the local record/journal. */
+  resumeSecret: Uint8Array;
+}
+
 export interface StartSendMsg extends SessionCrypto {
   kind: 'start-send';
   files: File[];
   /** Reuse a stable transfer id from an interrupted send (worker re-verifies the source). */
   transferId?: string;
+  /**
+   * V13-PR08: explicit cross-session resume attempt. The worker runs resume-auth-v1 with the
+   * peer strictly before the transfer engine starts; only a successful mutual authentication
+   * reuses the record's verified progress under a FRESH resumed key epoch.
+   */
+  resumeAttempt?: ResumeAttempt;
   /**
    * The transient resume root derived by the MAIN THREAD from the original session master
    * (V13-PR07) — never the master itself. The worker uses it to derive the transfer-scoped
@@ -47,6 +70,12 @@ export interface StartRecvMsg extends SessionCrypto {
    * validates; it is never persisted, logged, or returned to UI.
    */
   resumeRoot?: Uint8Array;
+  /**
+   * V13-PR08: explicit cross-session resume attempt. The worker runs resume-auth-v1 with the
+   * peer strictly before the transfer engine starts; only after mutual authentication may
+   * the pre-selected interrupted journal's verified progress be advertised.
+   */
+  resumeAttempt?: ResumeAttempt;
 }
 export type ReceiveDestinationSpec =
   | { kind: 'auto' }

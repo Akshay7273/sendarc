@@ -5,6 +5,7 @@ import {
   bytesToHex,
   MemorySink,
   FrameType,
+  manifestFingerprint,
   type Manifest,
 } from '@sendbeam/protocol';
 import { runTransferCore, type TransferCoreDeps } from './transfer-core.js';
@@ -415,6 +416,178 @@ describe('sender-record seam (V13-PR04)', () => {
     expect(record.updatedAt).toBeGreaterThan(1_000);
     // ...and removed after verified success.
     await expect(store.list()).resolves.toEqual([]);
+  });
+
+  it('runs resume-auth-v1 through the worker protocol before reusing the interrupted id (V13-PR08)', async () => {
+    const keys = await deriveTransferKeys(new Uint8Array(32).fill(23));
+    const bytes = new Uint8Array(50 * 1024).map((_, i) => (i * 29) & 0xff);
+    const file = new File([bytes], 'resumed.bin', { type: 'application/octet-stream' });
+    const id = 'ff'.repeat(16);
+    // Both peers hold the SAME persisted transfer-scoped credential from the interrupted
+    // session; the attempt binds transferId + manifest fingerprint + secret.
+    const secret = new Uint8Array(32).fill(0x42);
+    const manifest: Manifest = {
+      type: FrameType.Manifest,
+      transferId: id,
+      files: [
+        {
+          idx: 0,
+          name: 'resumed.bin',
+          size: file.size,
+          mime: 'application/octet-stream',
+          lastModified: 0,
+          blockSize: 64 * 1024,
+          blocks: Math.ceil(file.size / (64 * 1024)),
+          fileDigest: bytesToHex(await sha256(bytes)),
+        },
+      ],
+      totalSize: file.size,
+    };
+    const fingerprint = await manifestFingerprint(manifest);
+
+    const sendPort = new FakePort();
+    const recvPort = new FakePort();
+    const sink = new MemorySink();
+    let manifestSeen: Extract<WorkerToHost, { kind: 'manifest' }> | undefined;
+    sendPort.onWorkerOut = (m) => {
+      if (m.kind === 'outbound-frame') recvPort.toWorker({ kind: 'inbound-frame', frame: m.frame });
+    };
+    recvPort.onWorkerOut = (m) => {
+      if (m.kind === 'outbound-frame') sendPort.toWorker({ kind: 'inbound-frame', frame: m.frame });
+      else if (m.kind === 'manifest') manifestSeen = m;
+    };
+    const recvP = runTransferCore(recvPort, {
+      createDigest: await createSha256DigestFactory(),
+      createSink: () => sink,
+      fileSource: blobFileSource,
+    });
+    const sendP = runTransferCore(sendPort, {
+      createDigest: await createSha256DigestFactory(),
+      createSink: () => {
+        throw new Error('sender has no sink');
+      },
+      fileSource: blobFileSource,
+    });
+
+    recvPort.toWorker({
+      kind: 'start-recv',
+      destination: { kind: 'auto' },
+      sendDir: keys.j2o,
+      recvDir: keys.o2j,
+      sendCounter: 1,
+      recvCounter: 1,
+      resumeAttempt: {
+        transferId: id,
+        manifestFingerprint: fingerprint,
+        role: 'joiner',
+        resumeSecret: secret,
+      },
+    });
+    sendPort.toWorker({
+      kind: 'start-send',
+      files: [file],
+      sendDir: keys.o2j,
+      recvDir: keys.j2o,
+      sendCounter: 1,
+      recvCounter: 1,
+      blockSize: 64 * 1024,
+      frameSize: 16 * 1024,
+      resumeAttempt: {
+        transferId: id,
+        manifestFingerprint: fingerprint,
+        role: 'offerer',
+        resumeSecret: secret,
+      },
+    });
+    await Promise.all([recvP, sendP]);
+
+    // The manifest carries the INTERRUPTED id (never re-minted): the preamble ran to mutual
+    // success and the transfer proceeded under the fresh resumed key epoch.
+    expect(manifestSeen?.files[0]?.name).toBe('resumed.bin');
+    expect(manifestSeen?.totalSize).toBe(bytes.length);
+    expect(sink.bytes()).toEqual(bytes);
+  });
+
+  it('fails closed when the resumed peer holds a different credential (V13-PR08)', async () => {
+    const keys = await deriveTransferKeys(new Uint8Array(32).fill(31));
+    const bytes = new Uint8Array(10 * 1024).map((_, i) => (i * 3) & 0xff);
+    const file = new File([bytes], 'x.bin');
+    const id = 'ab'.repeat(16);
+    const fingerprint = 'a'.repeat(64);
+
+    const sendPort = new FakePort();
+    const recvPort = new FakePort();
+    const sink = new MemorySink();
+    sendPort.onWorkerOut = (m) => {
+      if (m.kind === 'outbound-frame') recvPort.toWorker({ kind: 'inbound-frame', frame: m.frame });
+    };
+    recvPort.onWorkerOut = (m) => {
+      if (m.kind === 'outbound-frame') sendPort.toWorker({ kind: 'inbound-frame', frame: m.frame });
+    };
+    const recvP = runTransferCore(recvPort, {
+      createDigest: await createSha256DigestFactory(),
+      createSink: () => sink,
+      fileSource: blobFileSource,
+    });
+    const sendP = runTransferCore(sendPort, {
+      createDigest: await createSha256DigestFactory(),
+      createSink: () => {
+        throw new Error('sender has no sink');
+      },
+      fileSource: blobFileSource,
+    });
+
+    recvPort.toWorker({
+      kind: 'start-recv',
+      destination: { kind: 'auto' },
+      sendDir: keys.j2o,
+      recvDir: keys.o2j,
+      sendCounter: 1,
+      recvCounter: 1,
+      resumeAttempt: {
+        transferId: id,
+        manifestFingerprint: fingerprint,
+        role: 'joiner',
+        resumeSecret: new Uint8Array(32).fill(1), // WRONG credential
+      },
+    });
+    sendPort.toWorker({
+      kind: 'start-send',
+      files: [file],
+      sendDir: keys.o2j,
+      recvDir: keys.j2o,
+      sendCounter: 1,
+      recvCounter: 1,
+      resumeAttempt: {
+        transferId: id,
+        manifestFingerprint: fingerprint,
+        role: 'offerer',
+        resumeSecret: new Uint8Array(32).fill(2), // WRONG credential
+      },
+    });
+    // One-sided failure propagates via the sealed channel teardown in production, which
+    // cancels the peer's context. The fake-port harness has no transport teardown, so mirror
+    // production: race for the first side to settle (the auth-failing side rejects), then
+    // cancel the peer so both settle deterministically instead of one waiting forever.
+    const first = await Promise.race([
+      sendP.then(
+        () => 'send' as const,
+        () => 'send' as const,
+      ),
+      recvP.then(
+        () => 'recv' as const,
+        () => 'recv' as const,
+      ),
+    ]);
+    if (first === 'send') {
+      recvPort.toWorker({ kind: 'cancel' });
+      await recvP.catch(() => {});
+    } else {
+      sendPort.toWorker({ kind: 'cancel' });
+      await sendP.catch(() => {});
+    }
+    await expect(sendP).rejects.toThrow();
+    await expect(recvP).rejects.toThrow();
   });
 
   it('rejects a resume whose source changed before any frame is sent, keeping the record', async () => {

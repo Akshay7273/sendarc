@@ -126,6 +126,27 @@ jobs:
           version: v2.12.2
           working-directory: ${{ matrix.module }}
 
+  campaign:
+    # V13-PR08 heavyweight validation: the >= 100 GiB streamed resume campaign proves a very
+    # large logical transfer resumes from a deep durable checkpoint with bounded memory and no
+    # full-file staging. Owned by CI, never the laptop (hashing 100+ GiB takes minutes).
+    name: campaign (100 GiB streamed resume)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: packages/wire/go.sum
+
+      - name: Run 100 GiB campaign
+        working-directory: packages/wire
+        # go test's default 10-minute timeout killed the stream mid-run; the campaign needs
+        # the job's full budget (hashing 100+ GiB takes tens of minutes), so raise it.
+        run: go test -tags campaign -timeout 90m -run 'TestCampaign' -v ./...
+
   branding:
     name: branding (no stale SendArc references)
     runs-on: ubuntu-latest

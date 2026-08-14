@@ -71,6 +71,15 @@ type Spec struct {
 	// the manifest frame is transmitted; a restart's already-persisted credential is never
 	// replaced.
 	OnResumeCredential func(manifest wire.Manifest, resumeRoot []byte) error
+	// Resume carries the local cross-session resume context (V13-PR08). It is set ONLY on a
+	// peer that can actually authenticate a resume for this attempt: the sender re-using an
+	// interrupted record that holds a credential, or the receiver whose user pre-selected an
+	// interrupted journal holding one. Its presence makes the peer advertise resume-auth-v1;
+	// durable progress from the previous session is reused only after the mutual
+	// resume-auth preamble succeeds and the transfer runs under a fresh key epoch.
+	Resume *ResumeContext
+	// OnResume reports the cross-session resume decision (attempted/authenticated) for UX.
+	OnResume func(ResumeResult)
 	// ICEServers overrides rtc.DefaultICEServers. An explicit empty slice uses host candidates
 	// only (loopback tests); nil takes the default STUN server.
 	ICEServers []webrtc.ICEServer
@@ -96,6 +105,31 @@ type Spec struct {
 	// breakDirectRecovery simulates the peer's recovery-failure hook firing (direct recovery
 	// failed) so the driver falls back to the relay. Test-only.
 	breakDirectRecovery <-chan struct{}
+}
+
+// ResumeContext is the local resume context of an interrupted transfer (V13-PR08). It is
+// local state only — the transfer id, the canonical manifest fingerprint, the stable role,
+// and the decoded transfer-scoped credential — and is NEVER transmitted: the resume-auth
+// transcript binds these values on both peers, so a mismatch fails closed without leaking
+// any of them. The credential is never printed, logged, or exposed.
+type ResumeContext struct {
+	TransferID          string
+	ManifestFingerprint string
+	Role                wire.Role
+	ResumeSecret        []byte
+}
+
+// ResumeResult reports the cross-session resume decision to the host for UX (V13-PR08).
+// Attempted is true when both peers advertised resume-auth-v1 and the preamble ran;
+// Authenticated is true only when mutual authentication completed and the transfer runs
+// under a fresh resumed key epoch — the only state in which old durable progress may be
+// reused. Skipped is true when the peer could not authenticate a resume (e.g. a fresh
+// sender for a receiver that pre-selected a journal) and the transfer proceeds fresh with
+// the local interrupted state untouched.
+type ResumeResult struct {
+	Attempted     bool
+	Authenticated bool
+	Skipped       bool
 }
 
 // Outcome is the result of a completed transfer.
@@ -527,15 +561,133 @@ func (d *driver) reportRecovering(rec bool) {
 // receives one. Counters continue from the handshake so the AES-GCM nonce is never reused, and
 // block/frame sizes are the min of the two peers' announced caps. Canceling ctx aborts the
 // in-flight transfer.
+//
+// V13-PR08: when both peers can authenticate a cross-session resume, the resume preamble
+// runs over the sealed session channel strictly before the engine starts — the engine is
+// then constructed with the FRESH resumed key epoch (new keys, new salts, counters 0), so
+// no Manifest/ResumeState/BlockData/Complete can flow before mutual resume authentication.
 func (d *driver) transfer(ctx context.Context, conn dataConn, sv *supervisor.Supervisor, res *rendezvous.Result) (*Outcome, error) {
 	sendDir, recvDir := directionalKeys(res)
-	if res.Role == wire.RoleOfferer {
-		return d.send(ctx, conn, sv, res, sendDir, recvDir)
+	preamble, err := d.prepareResumePreamble(conn, res, sendDir, recvDir)
+	if err != nil {
+		return nil, err
 	}
-	return d.receive(ctx, conn, sv, res, sendDir, recvDir)
+	sendStart, recvStart := res.SendCounter, res.RecvCounter
+	if res.Role == wire.RoleOfferer {
+		return d.send(ctx, conn, sv, res, sendDir, recvDir, sendStart, recvStart, preamble)
+	}
+	return d.receive(ctx, conn, sv, res, sendDir, recvDir, sendStart, recvStart, preamble)
 }
 
-func (d *driver) send(ctx context.Context, conn dataConn, sv *supervisor.Supervisor, res *rendezvous.Result, sendDir, recvDir wire.DirectionalKey) (*Outcome, error) {
+// prepareResumePreamble decides whether this session performs an authenticated cross-session
+// resume (V13-PR08). It returns a preamble to run when BOTH the local peer has resume
+// context (Spec.Resume) and the remote peer advertised resume-auth-v1. The security
+// invariant: capability absent/stripped/untrusted ⇒ the interrupted transfer id is never
+// reused — the offerer fails closed before anything is sent, and a receiver whose
+// pre-selected resume does not materialize proceeds as a fresh receive with its journal
+// untouched.
+func (d *driver) prepareResumePreamble(conn dataConn, res *rendezvous.Result, sendDir, recvDir wire.DirectionalKey) (*wire.ResumePreamble, error) {
+	if d.spec.Resume == nil {
+		return nil, nil
+	}
+	if !wire.NegotiateResumeAuth([]string{wire.ResumeAuthCapability}, res.RemoteCaps.Features) {
+		if res.Role == wire.RoleOfferer {
+			return nil, wire.Errorf(wire.CodeCompat,
+				"transfer: the receiver did not advertise authenticated resume (resume-auth-v1); the interrupted transfer id %s cannot be reused without it — nothing was sent. Have the receiver join with %q, or discard the sender record to send fresh",
+				d.spec.Resume.TransferID, "sendbeam transfers resume <id> --code <fresh-code>")
+		}
+		// The sender started a fresh transfer (no resume context): the receiver's
+		// pre-selected journal stays untouched and the receive proceeds fresh.
+		if d.spec.OnResume != nil {
+			d.spec.OnResume(ResumeResult{Skipped: true})
+		}
+		return nil, nil
+	}
+	if d.spec.OnResume != nil {
+		d.spec.OnResume(ResumeResult{Attempted: true})
+	}
+	preamble, err := wire.NewResumePreamble(wire.ResumePreambleOptions{
+		Role:         res.Role,
+		TransferID:   d.spec.Resume.TransferID,
+		Fingerprint:  d.spec.Resume.ManifestFingerprint,
+		ResumeSecret: d.spec.Resume.ResumeSecret,
+		Send:         conn.Send,
+		SendDir:      sendDir,
+		RecvDir:      recvDir,
+		SendCounter:  res.SendCounter,
+		RecvCounter:  res.RecvCounter,
+	})
+	if err != nil {
+		return nil, wire.Errorf(wire.CodeAuth, "transfer: prepare resume preamble: %v", err)
+	}
+	return preamble, nil
+}
+
+// runPreamble drives the resume preamble to completion (bounded by ctx), returning the
+// fresh resumed key epoch. It is called with the inbound router already wired to the
+// preamble, so responses flow while we wait. A failed handshake aborts the transfer before
+// the manifest.
+func runPreamble(ctx context.Context, preamble *wire.ResumePreamble) (*wire.ResumeAuthResult, error) {
+	if preamble == nil {
+		return nil, nil
+	}
+	if err := preamble.Start(); err != nil {
+		return nil, err
+	}
+	select {
+	case <-preamble.Done():
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return preamble.Result()
+}
+
+// engineRouter hands inbound frames to the resume preamble while it is in flight, then to
+// the transfer engine. Frames arriving between the preamble settling and the engine being
+// installed (the peer may send its manifest the moment its own preamble settles) are
+// queued and replayed in order, so no frame is ever dropped or misrouted.
+type engineRouter struct {
+	mu      sync.Mutex
+	pending [][]byte
+	engine  func([]byte)
+}
+
+func (r *engineRouter) route(preamble *wire.ResumePreamble, frame []byte) {
+	if preamble != nil && !preamble.Settled() {
+		preamble.Handle(frame)
+		return
+	}
+	r.mu.Lock()
+	if r.engine == nil {
+		r.pending = append(r.pending, frame)
+		r.mu.Unlock()
+		return
+	}
+	engine := r.engine
+	r.mu.Unlock()
+	engine(frame)
+}
+
+func (r *engineRouter) install(engine func([]byte)) {
+	r.mu.Lock()
+	r.engine = engine
+	pending := r.pending
+	r.pending = nil
+	r.mu.Unlock()
+	for _, frame := range pending {
+		engine(frame)
+	}
+}
+
+// resumedDirs selects the directional keys of a fresh resumed key epoch for this role.
+func resumedDirs(role wire.Role, result *wire.ResumeAuthResult) (send, recv wire.DirectionalKey) {
+	if role == wire.RoleOfferer {
+		return result.Keys.O2J, result.Keys.J2O
+	}
+	return result.Keys.J2O, result.Keys.O2J
+}
+
+func (d *driver) send(ctx context.Context, conn dataConn, sv *supervisor.Supervisor, res *rendezvous.Result, sendDir, recvDir wire.DirectionalKey, sendStart, recvStart uint64, preamble *wire.ResumePreamble) (*Outcome, error) {
 	if (d.spec.Source == nil) == (len(d.spec.Sources) == 0) {
 		return nil, errors.New("transfer: exactly one of Source or Sources is required to send")
 	}
@@ -562,13 +714,34 @@ func (d *driver) send(ctx context.Context, conn dataConn, sv *supervisor.Supervi
 	}
 	onManifest := d.spec.OnSendManifest
 	onResumeCredential := d.spec.OnResumeCredential
+	// V13-PR08: the resume preamble runs strictly before the manifest may go out. The inbound
+	// router is wired to the preamble FIRST (so challenge/ready responses flow while we
+	// wait); the engine is constructed only AFTER mutual authentication, using the fresh
+	// resumed key epoch when one was derived (never the session keys for the transfer).
+	router := &engineRouter{}
+	if sv != nil {
+		sv.OnData(func(frame []byte) { router.route(preamble, frame) })
+	} else {
+		conn.OnData(func(frame []byte) { router.route(preamble, frame) })
+	}
+	if preamble != nil {
+		result, err := runPreamble(ctx, preamble)
+		if err != nil {
+			return nil, err
+		}
+		sendDir, recvDir = resumedDirs(res.Role, result)
+		sendStart, recvStart = result.SendCounter, result.RecvCounter
+		if d.spec.OnResume != nil {
+			d.spec.OnResume(ResumeResult{Attempted: true, Authenticated: true})
+		}
+	}
 	sender := wire.NewSender(wire.SenderOptions{
 		Files:            sources,
 		Send:             conn.Send,
 		SendDir:          sendDir,
 		RecvDir:          recvDir,
-		SendCounterStart: res.SendCounter,
-		RecvCounterStart: res.RecvCounter,
+		SendCounterStart: sendStart,
+		RecvCounterStart: recvStart,
 		BlockSize:        negotiate(res.LocalCaps.BlockSize, res.RemoteCaps.BlockSize, wire.DefaultBlockBytes),
 		FrameSize:        negotiate(res.LocalCaps.MaxFrame, res.RemoteCaps.MaxFrame, wire.DefaultFrameBytes),
 		// Advertise a stable random id in the manifest so a receiver that crashes mid-file
@@ -596,10 +769,8 @@ func (d *driver) send(ctx context.Context, conn dataConn, sv *supervisor.Supervi
 	})
 	if sv != nil {
 		sv.SetOnSwitch(sender.TransportChanged)
-		sv.OnData(sender.Handle)
-	} else {
-		conn.OnData(sender.Handle)
 	}
+	router.install(sender.Handle)
 	if d.spec.OnControls != nil {
 		d.spec.OnControls(sender)
 	}
@@ -626,10 +797,38 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
-func (d *driver) receive(ctx context.Context, conn dataConn, sv *supervisor.Supervisor, res *rendezvous.Result, sendDir, recvDir wire.DirectionalKey) (*Outcome, error) {
+func (d *driver) receive(ctx context.Context, conn dataConn, sv *supervisor.Supervisor, res *rendezvous.Result, sendDir, recvDir wire.DirectionalKey, sendStart, recvStart uint64, preamble *wire.ResumePreamble) (*Outcome, error) {
 	destination, err := NewDurableDestination(d.spec.DestDir)
 	if err != nil {
 		return nil, wire.NewTransferError(wire.FailSinkError, err.Error())
+	}
+	// V13-PR08: an explicit resume attempt pre-selects its interrupted journal locally; its
+	// verified progress is reused only after resume-auth succeeds in this session.
+	if d.spec.Resume != nil {
+		destination.ExpectResume(d.spec.Resume.TransferID)
+	}
+	// The inbound router is wired BEFORE the preamble runs: the offerer's resume_init may
+	// arrive the moment its own preamble starts, and the transport buffers it until a
+	// handler is registered. Frames arriving between the preamble settling and the engine
+	// being installed (the manifest, sent once the offerer's own preamble settled) are
+	// queued by the router in order.
+	router := &engineRouter{}
+	if sv != nil {
+		sv.OnData(func(frame []byte) { router.route(preamble, frame) })
+	} else {
+		conn.OnData(func(frame []byte) { router.route(preamble, frame) })
+	}
+	if preamble != nil {
+		result, err := runPreamble(ctx, preamble)
+		if err != nil {
+			return nil, err
+		}
+		destination.SetResumeAuthorized()
+		sendDir, recvDir = resumedDirs(res.Role, result)
+		sendStart, recvStart = result.SendCounter, result.RecvCounter
+		if d.spec.OnResume != nil {
+			d.spec.OnResume(ResumeResult{Attempted: true, Authenticated: true})
+		}
 	}
 	// sharedResume is filled from OnManifestSet, before the wire layer applies the resume
 	// seed: when the authenticated manifest matches a durable journal, the driver rebuilds
@@ -641,8 +840,8 @@ func (d *driver) receive(ctx context.Context, conn dataConn, sv *supervisor.Supe
 		Send:             conn.Send,
 		SendDir:          sendDir,
 		RecvDir:          recvDir,
-		SendCounterStart: res.SendCounter,
-		RecvCounterStart: res.RecvCounter,
+		SendCounterStart: sendStart,
+		RecvCounterStart: recvStart,
 		Destination:      destination,
 		Resume:           &sharedResume,
 		OnProgress:       d.spec.OnProgress,
@@ -684,10 +883,8 @@ func (d *driver) receive(ctx context.Context, conn dataConn, sv *supervisor.Supe
 	})
 	if sv != nil {
 		sv.SetOnSwitch(receiver.TransportChanged)
-		sv.OnData(receiver.Handle)
-	} else {
-		conn.OnData(receiver.Handle)
 	}
+	router.install(receiver.Handle)
 	if d.spec.OnControls != nil {
 		d.spec.OnControls(receiver)
 	}

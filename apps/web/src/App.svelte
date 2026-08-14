@@ -1,5 +1,11 @@
 <script lang="ts">
-  import type { CapsPayload, RendezvousPhase, RendezvousResult, Role } from '@sendbeam/protocol';
+  import type {
+    CapsPayload,
+    DurableJournal,
+    RendezvousPhase,
+    RendezvousResult,
+    Role,
+  } from '@sendbeam/protocol';
   import { RendezvousError } from '@sendbeam/protocol';
 
   import { offer, join, type RendezvousController } from './lib/session/rendezvous.js';
@@ -18,6 +24,11 @@
   } from './lib/transfer/sender-record.js';
   import { baseUrl, iceServers, loadConfig } from './lib/config.js';
   import { toJSON } from './lib/transfer/diagnostics.js';
+  import {
+    discardDurableTransfer,
+    durableOpfsFiles,
+    indexedDbDurableStore,
+  } from './lib/transfer/durable-store.js';
   import QrCode from './lib/QrCode.svelte';
   import markUrl from './lib/assets/sendbeam-mark.svg';
 
@@ -45,6 +56,19 @@
 
   type Screen = 'home' | 'sending' | 'receiving' | 'done' | 'failed';
 
+  /** One locally kept interrupted receive (V13-PR08). Safe metadata only — never secrets. */
+  interface ReceiveJournalEntry {
+    transferId: string;
+    corrupt: boolean;
+    error?: string;
+    journal?: DurableJournal;
+    /** Total verified bytes across the checkpoint (durable truth). */
+    committedBytes: number;
+    totalBytes: number;
+    label: string;
+    updatedAt: number;
+  }
+
   let screen = $state<Screen>('home');
   let phase = $state<RendezvousPhase>('idle');
   let code = $state('');
@@ -65,6 +89,14 @@
   let pendingResume = $state.raw<SenderRecord | undefined>(undefined);
   let resumeHint = $state('');
   let pickError = $state('');
+  // Interrupted-receives surface (V13-PR08): locally kept receive journals with their
+  // verified checkpoint, so the user can explicitly resume (fresh rendezvous + resume-auth)
+  // or discard. Never server-side history — purely local durable state.
+  let receiveJournalList = $state.raw<ReceiveJournalEntry[]>([]);
+  // A journal selected for resume: joining a FRESH rendezvous carries this attempt so the
+  // worker authenticates the original peer before reusing the verified checkpoint.
+  let pendingReceiveResume = $state.raw<ReceiveJournalEntry | undefined>(undefined);
+  let receiveResumeHint = $state('');
   let directoryPickerAvailable = $state(false);
   directoryPickerAvailable = typeof (window as PickerWindow).showDirectoryPicker === 'function';
 
@@ -156,7 +188,14 @@
       screen = 'failed';
       return;
     }
+    // V13-PR08: joining a FRESH rendezvous while an interrupted receive is selected arms the
+    // authenticated-resume attempt — the worker runs resume-auth-v1 with the peer strictly
+    // before reusing the verified checkpoint, under a fresh key epoch.
+    const resumeAttempt = pendingReceiveResume;
     reset();
+    if (resumeAttempt !== undefined) {
+      receiveResumeHint = `Authenticated resume armed for ${resumeAttempt.label} — verified prior progress is reused only after the peer authenticates.`;
+    }
     receiveDestination = destination;
     screen = 'receiving';
     track(
@@ -234,6 +273,21 @@
             files: pickedFiles,
             transferId: pendingResume.transferId,
             reattachment: { kind: 'reselection' },
+            // V13-PR08: the record's persisted credential (when present) arms an explicit
+            // cross-session resume — the worker runs resume-auth-v1 with the peer strictly
+            // before reusing any durable progress, under a fresh key epoch. A pre-PR07
+            // record without a credential resumes as an ordinary fresh send (the old
+            // partials are never silently trusted).
+            ...(pendingResume.resumeSecret !== undefined
+              ? {
+                  resumeAttempt: {
+                    transferId: pendingResume.transferId,
+                    manifestFingerprint: pendingResume.manifestFingerprint,
+                    role: 'offerer' as const,
+                    envelope: pendingResume.resumeSecret,
+                  },
+                }
+              : {}),
             ...(ice ? { iceServers: ice } : {}),
           }),
         );
@@ -248,8 +302,24 @@
         }),
       );
     } else {
+      const resumeAttempt = pendingReceiveResume;
       beginTransfer(
-        runReceive(handshake, signaling, receiveDestination, ice ? { iceServers: ice } : {}),
+        runReceive(handshake, signaling, receiveDestination, {
+          ...(ice ? { iceServers: ice } : {}),
+          // V13-PR08: the persisted credential envelope stays on the main thread; only
+          // the decoded secret crosses into the worker, which authenticates the original
+          // peer before reusing any verified progress.
+          ...(resumeAttempt?.journal?.resumeSecret !== undefined
+            ? {
+                resumeAttempt: {
+                  transferId: resumeAttempt.transferId,
+                  manifestFingerprint: resumeAttempt.journal.manifestFingerprint,
+                  role: 'joiner' as const,
+                  envelope: resumeAttempt.journal.resumeSecret,
+                },
+              }
+            : {}),
+        }),
       );
     }
   }
@@ -341,6 +411,9 @@
     pendingResume = undefined;
     resumeHint = '';
     pickError = '';
+    receiveJournalList = [];
+    pendingReceiveResume = undefined;
+    receiveResumeHint = '';
   }
 
   async function discardDurable() {
@@ -356,6 +429,79 @@
   async function refreshSenderRecords() {
     const store = senderRecordStoreWhenAvailable();
     senderRecordList = store ? await store.list() : [];
+  }
+
+  /**
+   * Reload the locally kept interrupted-receive journals (V13-PR08). Pure local discovery —
+   * there is no server-side transfer directory or history.
+   */
+  async function refreshReceiveJournals() {
+    const store = indexedDbDurableStore();
+    let entries;
+    try {
+      entries = await store.listJournals();
+    } catch {
+      // Storage unavailable (private mode / unsupported browser): the interrupted-receives
+      // surface is a local convenience, not a critical path — hide it rather than fail.
+      receiveJournalList = [];
+      return;
+    }
+    receiveJournalList = entries.map((e) => {
+      const journal = e.journal;
+      if (e.kind !== 'ok' || journal === undefined) {
+        return {
+          transferId: e.transferId,
+          corrupt: true,
+          error: e.error ?? 'corrupt journal',
+          committedBytes: 0,
+          totalBytes: 0,
+          label: 'Unreadable interrupted receive',
+          updatedAt: 0,
+        };
+      }
+      const committed = journal.files.reduce(
+        (total, f) => total + Math.min(f.committedBlocks * f.blockSize, f.size),
+        0,
+      );
+      const total = journal.files.reduce((total, f) => total + f.size, 0);
+      return {
+        transferId: journal.transferId,
+        corrupt: false,
+        journal,
+        committedBytes: committed,
+        totalBytes: total,
+        label:
+          journal.files.length === 1
+            ? journal.files[0]!.name
+            : `${journal.files.length} files (${journal.files[0]!.name}…)`,
+        updatedAt: journal.updatedAt,
+      };
+    });
+  }
+
+  /** Resume an interrupted receive: join the peer's FRESH rendezvous carrying the attempt. */
+  function resumeReceive(entry: ReceiveJournalEntry) {
+    if (entry.corrupt || entry.journal === undefined || entry.journal.resumeSecret === undefined) {
+      receiveResumeHint =
+        'This interrupted receive has no resume credential — start a fresh transfer instead; the kept partial data was not deleted.';
+      return;
+    }
+    pendingReceiveResume = entry;
+    receiveResumeHint = `Resuming ${entry.label} — verified prior progress (${humanBytes(entry.committedBytes)}) is reused only after the peer authenticates. Ask the sender to resume and share their fresh code.`;
+  }
+
+  /** Explicitly discard one interrupted receive's journal + partials (keeps others). */
+  async function discardReceive(entry: ReceiveJournalEntry) {
+    const ownerId = crypto.randomUUID();
+    try {
+      await discardDurableTransfer(entry.transferId, ownerId, {
+        files: durableOpfsFiles(),
+        store: indexedDbDurableStore(),
+      });
+    } catch {
+      // Keep the entry visible; the data is still kept and the discard can be retried.
+    }
+    await refreshReceiveJournals();
   }
 
   /** Resume an interrupted send from its record. */
@@ -430,6 +576,14 @@
   function backHome() {
     reset();
     screen = 'home';
+    // Refresh both interrupted surfaces: local durable state may have changed.
+    void refreshSenderRecords();
+    void refreshReceiveJournals();
+  }
+
+  // Populate the interrupted-receives list once the app mounts.
+  if (typeof window !== 'undefined') {
+    void refreshReceiveJournals();
   }
 </script>
 
@@ -502,6 +656,49 @@
             <option value="direct-directory">Save directly to a folder</option>
           </select>
         </form>
+        {#if receiveResumeHint}
+          <p class="resume-hint">{receiveResumeHint}</p>
+        {/if}
+        {#if receiveJournalList.length > 0}
+          <div class="resume-zone">
+            <h3>Interrupted receives</h3>
+            {#each receiveJournalList as entry (entry.transferId)}
+              <div class="resume-card">
+                {#if entry.corrupt}
+                  <p class="resume-name">Unreadable interrupted receive</p>
+                  <p class="muted">
+                    {entry.error} — nothing was received; discard it to start a new transfer.
+                  </p>
+                  <div class="resume-actions">
+                    <button class="ghost" onclick={() => discardReceive(entry)}>Discard</button>
+                  </div>
+                {:else}
+                  <p class="resume-name">{entry.label}</p>
+                  <p class="muted">
+                    {#if entry.journal?.resumeSecret !== undefined}
+                      {humanBytes(entry.committedBytes)} of {humanBytes(entry.totalBytes)} verified
+                      {'\u00b7'} ready to resume
+                    {:else}
+                      {humanBytes(entry.committedBytes)} of {humanBytes(entry.totalBytes)} verified
+                      {'\u00b7'} restart required (no credential)
+                    {/if}
+                    {'\u00b7'} interrupted {new Date(entry.updatedAt).toLocaleString()}
+                  </p>
+                  <div class="resume-actions">
+                    <button
+                      class="ghost"
+                      disabled={entry.journal?.resumeSecret === undefined}
+                      onclick={() => resumeReceive(entry)}
+                    >
+                      Resume
+                    </button>
+                    <button class="ghost" onclick={() => discardReceive(entry)}>Discard</button>
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {/if}
       </article>
     </section>
   {:else if screen === 'sending'}

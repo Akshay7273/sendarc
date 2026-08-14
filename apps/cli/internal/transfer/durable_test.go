@@ -129,8 +129,22 @@ func durableLoopbackMaster() []byte {
 // The resume seed is applied through OnManifestSet exactly as the CLI driver does: the
 // authenticated manifest binds the journal, then per-file high-water marks and digest
 // prefixes are rebuilt from the persisted partials.
+// resumeAuthorizedDest marks a destination as an authenticated resume leg (V13-PR08): in
+// these direct/loopback tests there is no handshake, so the driver's ExpectResume +
+// SetResumeAuthorized are applied directly. The unauthenticated refusal is covered by the
+// dedicated fail-closed regression tests.
+func resumeAuthorizedDest(dest *DurableDestination) {
+	dest.ExpectResume(durableTestID)
+	dest.SetResumeAuthorized()
+}
+
 func runDurableLoopback(t *testing.T, dest *DurableDestination, blockSize int, contents map[string][]byte) (sendErr, recvErr error) {
 	t.Helper()
+	// V13-PR08: every resumed leg in these tests models the product flow where resume-auth
+	// already succeeded in this session (ExpectResume pre-selects the journal; the loopback
+	// has no handshake, so the driver's SetResumeAuthorized is applied directly). The
+	// unauthenticated variant is covered by the dedicated fail-closed regression tests.
+	resumeAuthorizedDest(dest)
 	keys, err := wire.DeriveTransferKeys(durableLoopbackMaster())
 	if err != nil {
 		t.Fatal(err)
@@ -244,11 +258,12 @@ func TestDurableDigestCheckpointPersistsAndResumes(t *testing.T) {
 		t.Fatalf("checkpoint state hex = %d chars, want %d (a 108-byte sha256 state)", len(cp.State), 2*108)
 	}
 
-	// A fresh process restores the digest from the checkpointed state.
+	// A fresh process restores the digest from the checkpointed state (authenticated leg).
 	resumed, err := NewDurableDestination(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	resumeAuthorizedDest(resumed)
 	if err := resumed.Prepare(manifest); err != nil {
 		t.Fatal(err)
 	}
@@ -292,13 +307,16 @@ func TestDurableUnusableCheckpointFallsBackToRehash(t *testing.T) {
 	manifest := durableTestManifest(t, durableTestID, blockSize, map[string][]byte{"f.bin": content})
 
 	// seedCheckpoint writes one committed block with a digest checkpoint, then mutates the
-	// checkpoint in the on-disk journal and re-saves it (recomputed checksum).
+	// checkpoint in the on-disk journal and re-saves it (recomputed checksum). The sub-tests
+	// share one dir, so a later seed may find the earlier journal: mark the leg authorized
+	// (V13-PR08) — this test exercises checkpoint restore, not the auth gate.
 	seedCheckpoint := func(t *testing.T, mutate func(cp *wire.JournalDigestCheckpoint)) {
 		t.Helper()
 		dest, err := NewDurableDestination(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
+		resumeAuthorizedDest(dest)
 		if err := dest.Prepare(manifest); err != nil {
 			t.Fatal(err)
 		}
@@ -336,6 +354,7 @@ func TestDurableUnusableCheckpointFallsBackToRehash(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		resumeAuthorizedDest(resumed)
 		if err := resumed.Prepare(manifest); err != nil {
 			t.Fatal(err)
 		}
@@ -356,6 +375,7 @@ func TestDurableUnusableCheckpointFallsBackToRehash(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		resumeAuthorizedDest(resumed)
 		if err := resumed.Prepare(manifest); err != nil {
 			t.Fatal(err)
 		}
@@ -851,6 +871,10 @@ func TestDurableMissingOrTruncatedPartialFailsClosed(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// V13-PR08: this leg models an authenticated resume (the loopback has no
+			// handshake; the dedicated regression tests cover the unauthenticated refusal).
+			resumed.ExpectResume(durableTestID)
+			resumed.SetResumeAuthorized()
 			if err := resumed.Prepare(manifest); err != nil {
 				t.Fatalf("Prepare with the matching journal must succeed: %v", err)
 			}
@@ -1152,6 +1176,9 @@ func TestDurablePathAndSymlinkSafety(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// V13-PR08: this leg models an authenticated resume.
+		resumed.ExpectResume(durableTestID)
+		resumed.SetResumeAuthorized()
 		if err := resumed.Prepare(manifest); err != nil {
 			t.Fatal(err)
 		}
@@ -1571,10 +1598,13 @@ func TestDurableAttachResumeSecretResumedJournalNeverGetsFabricatedSecret(t *tes
 
 	// Session 2: a later receive loads the journal as existing/resumed state and attaches
 	// with a DIFFERENT session root. It must leave the journal without a credential.
+	// V13-PR08: the leg models an authenticated resume.
 	second, err := NewDurableDestination(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	second.ExpectResume(durableTestID)
+	second.SetResumeAuthorized()
 	if err := second.Prepare(manifest); err != nil {
 		t.Fatal(err)
 	}

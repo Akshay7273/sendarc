@@ -125,9 +125,54 @@ func runSend(args []string) int {
 		fmt.Fprintf(os.Stderr, "sendbeam send: %s\n", err)
 		return 1
 	}
+	// V13-PR08 cross-session resume: a reused record resumes only through authenticated
+	// resume-auth (a fresh invite code authenticates the NEW session only). A record
+	// without a transfer-scoped credential is legacy pre-PR07 state: the id must never be
+	// reused, so the send refuses with explicit restart/discard guidance. With a
+	// credential, this send advertises resume-auth-v1 and authenticates with the original
+	// receiver before any verified progress is reused.
+	session := rendezvous.Options{
+		Role:      rendezvous.RoleOfferer,
+		WordCount: *words,
+		OnCode:    codePrinter(*server),
+		OnPhase:   phasePrinter(rendezvous.RoleOfferer),
+	}
+	var resumeCtx *transfer.ResumeContext
 	if reused {
+		srec, ok, lookupErr := senderStore.Lookup(transfer.PathKey(positionals))
+		if lookupErr != nil {
+			fmt.Fprintf(os.Stderr, "sendbeam send: %s\n", lookupErr)
+			return 1
+		}
+		if !ok {
+			fmt.Fprintf(os.Stderr, "sendbeam send: the sender record for the interrupted transfer vanished; the source cannot be verified — nothing was sent. Start fresh or discard any receiver-side state.\n")
+			return 1
+		}
+		if srec.ResumeSecret == nil {
+			// Legacy pre-PR07 record: no transfer-scoped credential, so authenticated
+			// cross-session resume is unavailable and the id must not be reused (the
+			// receiver would otherwise silently trust old progress).
+			fmt.Fprintf(os.Stderr, "sendbeam send: the sender record for transfer %s carries no resume credential (legacy pre-PR07 state); authenticated cross-session resume is unavailable and the transfer id cannot be reused — nothing was sent. Discard the record with %q and send fresh, or resume with a pre-PR07-compatible receiver.\n",
+				srec.TransferID, "sendbeam transfers discard "+srec.TransferID)
+			return 1
+		}
+		secret, err := wire.DecodeResumeSecretEnvelope(srec.ResumeSecret)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "sendbeam send: sender record %s has a corrupt resume credential (%v); refusing to reuse the id — discard the record with %q\n",
+				srec.TransferID, err, "sendbeam transfers discard "+srec.TransferID)
+			return 1
+		}
+		resumeCtx = &transfer.ResumeContext{
+			TransferID:          srec.TransferID,
+			ManifestFingerprint: srec.ManifestFingerprint,
+			Role:                wire.RoleOfferer,
+			ResumeSecret:        secret,
+		}
+		caps := rendezvous.DefaultCaps()
+		caps.Features = append(caps.Features, wire.ResumeAuthCapability)
+		session.LocalCaps = &caps
 		s := newStyle(os.Stderr)
-		fmt.Fprintln(os.Stderr, s.dim("Continuing interrupted transfer "+transferID+" — the source must be unchanged."))
+		fmt.Fprintln(os.Stderr, s.dim("Interrupted transfer "+transferID+" — resuming requires authenticating with the original receiver before any verified progress is reused."))
 	}
 	progressFiles := make([]progressFile, len(sources))
 	for i, source := range sources {
@@ -153,12 +198,7 @@ func runSend(args []string) int {
 	progress := newProgress(totalSize)
 	progress.setFiles(progressFiles)
 	out, err := transfer.Run(ctx, client, transfer.Spec{
-		Session: rendezvous.Options{
-			Role:      rendezvous.RoleOfferer,
-			WordCount: *words,
-			OnCode:    codePrinter(*server),
-			OnPhase:   phasePrinter(rendezvous.RoleOfferer),
-		},
+		Session:        session,
 		Sources:        sources,
 		TransferID:     transferID,
 		OnSendManifest: onSendManifest,
@@ -170,6 +210,15 @@ func runSend(args []string) int {
 		// without one — never fabricated from a later session master).
 		OnResumeCredential: func(manifest wire.Manifest, resumeRoot []byte) error {
 			return senderStore.AttachResumeSecret(manifest, resumeRoot, !reused)
+		},
+		Resume: resumeCtx,
+		OnResume: func(r transfer.ResumeResult) {
+			s := newStyle(os.Stderr)
+			if r.Authenticated {
+				fmt.Fprintln(os.Stderr, s.check("Authenticated with the original receiver — resuming from the verified checkpoint with fresh keys."))
+			} else if r.Attempted {
+				fmt.Fprintln(os.Stderr, s.cyan("Authenticating the interrupted transfer with the receiver …"))
+			}
 		},
 		ForceRelay:     *relayOnly,
 		ICEServers:     ice,

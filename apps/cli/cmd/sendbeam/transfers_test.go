@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,6 +14,22 @@ import (
 	clitransfer "github.com/sendbeam/cli/internal/transfer"
 	"github.com/sendbeam/wire"
 )
+
+// attachSeedSecret attaches a valid resume-secret envelope to the journal for id so the
+// management list classifies it as ready to resume (V13-PR08).
+func attachSeedSecret(t *testing.T, store *clitransfer.DurableStore, id string) error {
+	t.Helper()
+	j, ok, err := store.LoadJournal(id)
+	if err != nil || !ok {
+		return fmt.Errorf("load journal: ok=%v err=%v", ok, err)
+	}
+	env, err := wire.EncodeResumeSecretEnvelope(bytes.Repeat([]byte{0x5A}, 32))
+	if err != nil {
+		return err
+	}
+	j.ResumeSecret = &wire.JournalResumeSecret{Version: env.Version, Value: env.Value}
+	return store.SaveJournal(j)
+}
 
 // captureStderr runs fn with os.Stderr redirected to a pipe and returns its exit code
 // and captured output.
@@ -81,6 +99,10 @@ func TestTransfersListInspectResumeDiscard(t *testing.T) {
 	if code != 0 || !strings.Contains(out, id) || !strings.Contains(out, "committed") {
 		t.Fatalf("list: code=%d out=%q", code, out)
 	}
+	// The seeded journal has no resume credential: the list must classify it honestly.
+	if !strings.Contains(out, "Legacy — restart required") {
+		t.Fatalf("list status: missing legacy classification in %q", out)
+	}
 
 	code, out = captureStderr(t, func() int {
 		return runTransfers([]string{"inspect", id, "--out", dir})
@@ -89,11 +111,33 @@ func TestTransfersListInspectResumeDiscard(t *testing.T) {
 		t.Fatalf("inspect: code=%d out=%q", code, out)
 	}
 
+	// V13-PR08: resume requires the fresh invite code from the sender's re-run.
 	code, out = captureStderr(t, func() int {
 		return runTransfers([]string{"resume", id, "--out", dir})
 	})
-	if code != 0 || !strings.Contains(out, "resumable") || !strings.Contains(out, "sendbeam receive") {
-		t.Fatalf("resume: code=%d out=%q", code, out)
+	if code != 2 || !strings.Contains(out, "--code") {
+		t.Fatalf("resume without --code: code=%d out=%q", code, out)
+	}
+	// A legacy no-secret journal cannot authenticate a cross-session resume.
+	code, out = captureStderr(t, func() int {
+		return runTransfers([]string{"resume", id, "--code", "7-alpha-bravo", "--out", dir})
+	})
+	if code != 1 || !strings.Contains(out, "no resume credential") {
+		t.Fatalf("resume legacy: code=%d out=%q", code, out)
+	}
+	// Once the credential is attached, the journal is classified as ready to resume.
+	store, err := clitransfer.OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := attachSeedSecret(t, store, id); err != nil {
+		t.Fatal(err)
+	}
+	code, out = captureStderr(t, func() int {
+		return runTransfers([]string{"list", "--out", dir})
+	})
+	if code != 0 || !strings.Contains(out, "Ready to resume") || !strings.Contains(out, "resume "+id+" --code <code>") {
+		t.Fatalf("list after credential: code=%d out=%q", code, out)
 	}
 
 	code, out = captureStderr(t, func() int {
@@ -170,7 +214,7 @@ func TestTransfersInspectAndResumeFailClosedOnInconsistency(t *testing.T) {
 		t.Fatalf("inspect inconsistent: code=%d out=%q", code, out)
 	}
 	code, out = captureStderr(t, func() int {
-		return runTransfers([]string{"resume", id, "--out", dir})
+		return runTransfers([]string{"resume", id, "--code", "7-alpha-bravo", "--out", dir})
 	})
 	if code != 1 || !strings.Contains(out, "not resumable") {
 		t.Fatalf("resume inconsistent: code=%d out=%q", code, out)

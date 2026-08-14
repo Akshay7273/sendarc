@@ -494,12 +494,13 @@ func TestDriverArmsReconnectableSignal(t *testing.T) {
 	}
 }
 
-// TestDriverSenderRestartResumesDurableReceive drives the full V13-PR04 restart loop
-// through the real driver and the real durable destination: the sender persists a record
-// before the manifest is advertised, the transfer is interrupted mid-file, and re-running
-// the same send reuses the recorded id and completes byte-identical against the receiver's
-// durable journal.
-func TestDriverSenderRestartResumesDurableReceive(t *testing.T) {
+// TestDriverAuthenticatedCrossSessionResume drives the full V13-PR08 cross-session resume
+// loop through the real driver and the real durable destination: leg 1 persists the sender
+// record and the receiver journal (each carrying the transfer-scoped resume credential)
+// and is interrupted mid-file; leg 2 is a FRESH rendezvous where both peers run mutual
+// resume-auth BEFORE any verified progress is reused, then continue under a fresh key
+// epoch and complete byte-identical.
+func TestDriverAuthenticatedCrossSessionResume(t *testing.T) {
 	senderStore := testSenderStore(t)
 	outDir := t.TempDir()
 	srcDir := t.TempDir()
@@ -512,14 +513,19 @@ func TestDriverSenderRestartResumesDurableReceive(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := []string{srcPath}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	type result struct {
 		out *Outcome
 		err error
 	}
-	runLeg := func(idempotent string, interrupt bool) (send, recv result, id string, reused bool) {
+	capsResume := func() *rendezvous.Caps {
+		c := rendezvous.DefaultCaps()
+		c.Features = append(c.Features, wire.ResumeAuthCapability)
+		return &c
+	}
+	runLeg := func(interrupt bool, sendResume, recvResume *ResumeContext, sendCaps, recvCaps *rendezvous.Caps) (send, recv result, id string, reused bool) {
 		hub := newRelay()
 		sources, _, err := NewOSFileSources(args)
 		if err != nil {
@@ -547,18 +553,23 @@ func TestDriverSenderRestartResumesDurableReceive(t *testing.T) {
 		recvDone := make(chan result, 1)
 		go func() {
 			out, err := Run(legCtx, hub.off, Spec{
-				Session:        rendezvous.Options{Role: rendezvous.RoleOfferer, Words: "alpha-bravo"},
+				Session:        rendezvous.Options{Role: rendezvous.RoleOfferer, Words: "alpha-bravo", LocalCaps: sendCaps},
 				Sources:        sources,
 				TransferID:     id,
 				OnSendManifest: hook,
-				ICEServers:     []webrtc.ICEServer{},
+				OnResumeCredential: func(manifest wire.Manifest, resumeRoot []byte) error {
+					return senderStore.AttachResumeSecret(manifest, resumeRoot, !reused)
+				},
+				Resume:     sendResume,
+				ICEServers: []webrtc.ICEServer{},
 			})
 			sendDone <- result{out, err}
 		}()
 		go func() {
 			out, err := Run(legCtx, hub.join, Spec{
-				Session:    rendezvous.Options{Role: rendezvous.RoleJoiner, Code: "7-alpha-bravo"},
+				Session:    rendezvous.Options{Role: rendezvous.RoleJoiner, Code: "7-alpha-bravo", LocalCaps: recvCaps},
 				DestDir:    outDir,
+				Resume:     recvResume,
 				ICEServers: []webrtc.ICEServer{},
 				OnProgress: func(int64) {
 					if interrupt {
@@ -570,12 +581,12 @@ func TestDriverSenderRestartResumesDurableReceive(t *testing.T) {
 		}()
 		send = <-sendDone
 		recv = <-recvDone
-		_ = idempotent
 		return send, recv, id, reused
 	}
 
-	// Leg 1: interrupt the transfer after the first committed block.
-	send1, recv1, _, _ := runLeg("interrupt", true)
+	// Leg 1: interrupt the transfer after the first committed block. Both peers persist the
+	// transfer-scoped resume credential derived from the ORIGINAL session master.
+	send1, recv1, id1, _ := runLeg(true, nil, nil, capsResume(), capsResume())
 	if send1.err == nil || recv1.err == nil {
 		t.Fatalf("interrupted leg unexpectedly succeeded: send=%v recv=%v", send1.err, recv1.err)
 	}
@@ -594,9 +605,35 @@ func TestDriverSenderRestartResumesDurableReceive(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("sender record not persisted after interruption: ok=%v err=%v", ok, err)
 	}
+	// Leg 1 minted a fresh id (the record carries it); the journal is keyed by it.
+	j, ok, err := recvStore.LoadJournal(srec.TransferID)
+	if err != nil || !ok {
+		t.Fatalf("receiver journal not persisted: ok=%v err=%v", ok, err)
+	}
+	_ = id1
+	if srec.ResumeSecret == nil || j.ResumeSecret == nil {
+		t.Fatalf("resume credentials not persisted after leg 1: record=%v journal=%v", srec.ResumeSecret != nil, j.ResumeSecret != nil)
+	}
+	secret, err := wire.DecodeResumeSecretEnvelope(srec.ResumeSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jSecret, err := wire.DecodeResumeSecretEnvelope(&wire.ResumeSecretEnvelope{Version: j.ResumeSecret.Version, Value: j.ResumeSecret.Value})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(secret, jSecret) {
+		t.Fatal("both peers must derive the same transfer-scoped credential")
+	}
 
-	// Leg 2: restart the same send — the id is reused and the source identity verified.
-	send2, recv2, id2, reused := runLeg("resume", false)
+	// Leg 2: a FRESH rendezvous with authenticated cross-session resume. The sender reuses
+	// its record (source identity re-verified) and the receiver pre-selects its journal;
+	// both advertise resume-auth-v1, run the preamble BEFORE the manifest, then continue
+	// under a fresh key epoch.
+	send2, recv2, id2, reused := runLeg(false,
+		&ResumeContext{TransferID: srec.TransferID, ManifestFingerprint: srec.ManifestFingerprint, Role: wire.RoleOfferer, ResumeSecret: secret},
+		&ResumeContext{TransferID: j.TransferID, ManifestFingerprint: j.ManifestFingerprint, Role: wire.RoleJoiner, ResumeSecret: jSecret},
+		capsResume(), capsResume())
 	if send2.err != nil || recv2.err != nil {
 		t.Fatalf("restart leg: send=%v recv=%v", send2.err, recv2.err)
 	}
