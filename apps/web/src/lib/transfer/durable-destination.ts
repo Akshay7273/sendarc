@@ -380,20 +380,18 @@ export class DurableDestination implements BrowserDestination {
     for (let i = 0; i < journal.files.length; i++) {
       const state = journal.files[i]!;
       const committed = Math.min(state.committedBlocks * state.blockSize, state.size);
-      if (state.committedBlocks > 0) {
-        const size = await this.files.partialSize(
-          this.transferId,
-          normalizeTransferPath(state.name),
-        );
-        if (size === undefined || size < committed) {
-          throw new TransferError(
-            'sink_error',
-            `journal ${this.transferId} file ${state.name}: partial data missing or truncated; refusing to resume — discard it`,
-          );
-        }
-      } else {
-        // Nothing persisted: the receiver starts fresh, no seed needed.
+      if (state.committedBlocks === 0) {
+        // Nothing persisted: the file restarts from zero. The seed still includes an entry
+        // so the receiver's exact file-set validation (V13-PR06) sees complete coverage.
+        files.set(i, { haveBlocks: 0, seedDigest: this.createDigest() });
         continue;
+      }
+      const size = await this.files.partialSize(this.transferId, normalizeTransferPath(state.name));
+      if (size === undefined || size < committed) {
+        throw new TransferError(
+          'sink_error',
+          `journal ${this.transferId} file ${state.name}: partial data missing or truncated; refusing to resume — discard it`,
+        );
       }
       let digest: Digest;
       let restored = false;

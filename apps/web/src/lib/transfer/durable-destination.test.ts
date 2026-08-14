@@ -795,14 +795,17 @@ describe('DurableDestination', () => {
       ]),
     );
     const files = d.resumeStateFor()!.files;
-    // Fully committed: the seed covers the whole file (verified at finish). Not started:
-    // no seed — the receiver starts the file fresh, exactly like the Go driver.
+    // Fully committed: the seed covers the whole file (verified at finish). Not started: the
+    // seed still covers it at haveBlocks 0 (complete coverage, V13-PR06) so the receiver's
+    // exact file-set validation passes and the file restarts fresh — like the Go driver.
     expect(files.get(0)!.haveBlocks).toBe(3);
     expect(await files.get(0)!.seedDigest.hexDigest()).toBe(
       bytesToHex(await sha256(new Uint8Array(24).map((_, k) => (k + 1) & 0xff))),
     );
-    expect(files.has(1)).toBe(false);
+    expect(files.get(1)!.haveBlocks).toBe(0);
     expect(files.get(2)!.haveBlocks).toBe(1);
+    // Every manifest file is covered.
+    expect(files.size).toBe(3);
   });
 
   it('final resumed transfer streams only missing blocks and verifies every file (V13-PR05)', async () => {
