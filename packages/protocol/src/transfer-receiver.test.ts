@@ -7,12 +7,56 @@ import { FRAME_VERSION } from './constants.js';
 import { sha256 } from './webcrypto.js';
 import { bytesToHex } from './bytes.js';
 import { decodeControl, encodeControl } from './transfer-messages.js';
-import { MemorySink, type Digest, type Sink } from './transfer-ports.js';
+import {
+  MemorySink,
+  type Digest,
+  type DigestState,
+  type DigestStateSink,
+  type Sink,
+} from './transfer-ports.js';
 import { TransferReceiver } from './transfer-receiver.js';
 
 function nodeDigest(): Digest {
   const h = createHash('sha256');
   return { update: (b) => void h.update(b), hexDigest: () => h.digest('hex') };
+}
+
+/** Digest whose optional state serialization always fails (V13-PR05 regression). */
+class StateFailDigest implements Digest, DigestState {
+  private readonly h = createHash('sha256');
+  update(bytes: Uint8Array): void {
+    this.h.update(bytes);
+  }
+  hexDigest(): string {
+    return this.h.digest('hex');
+  }
+  saveState(): Uint8Array {
+    throw new Error('serialization failed');
+  }
+}
+
+/** Sink with the optional DigestStateSink seam, recording every state it was handed. */
+class StateRecordSink implements Sink, DigestStateSink {
+  states: Array<Uint8Array | null> = [];
+  chunks: Uint8Array[] = [];
+  write(_offset: number, bytes: Uint8Array): void {
+    this.chunks.push(bytes);
+  }
+  close(): void {}
+  abort(): void {}
+  setDigestState(state: Uint8Array | null): void {
+    this.states.push(state);
+  }
+}
+
+/** Sink whose state persistence (the journal write) genuinely fails. */
+class FailingStateSink implements Sink, DigestStateSink {
+  write(): void {}
+  close(): void {}
+  abort(): void {}
+  setDigestState(): void {
+    throw new Error('journal write failed');
+  }
 }
 const master = new Uint8Array(32).fill(9);
 
@@ -106,6 +150,121 @@ describe('TransferReceiver', () => {
     const backTypes: number[] = [];
     for (const f of backChannel) backTypes.push((await open(keys.j2o, c++, f)).header.type);
     expect(backTypes).toEqual([FrameType.Ack, FrameType.Ack, FrameType.Ack, FrameType.Done]);
+  });
+
+  it('a digest whose saveState throws omits the checkpoint but the receive completes (V13-PR05)', async () => {
+    const keys = await deriveTransferKeys(master);
+    const data = new Uint8Array(16).map((_, i) => i);
+    const fileDigest = createHash('sha256').update(data).digest('hex');
+    const b = await build(keys);
+    await b.ctrl(FrameType.Manifest, {
+      type: FrameType.Manifest,
+      files: [
+        {
+          idx: 0,
+          name: 'f',
+          size: 16,
+          mime: '',
+          lastModified: 0,
+          blockSize: 8,
+          blocks: 2,
+          fileDigest,
+        },
+      ],
+      totalSize: 16,
+    });
+    for (let blk = 0; blk * 8 < data.length; blk++) {
+      const block = data.subarray(blk * 8, Math.min(blk * 8 + 8, data.length));
+      await b.push(
+        {
+          version: FRAME_VERSION,
+          type: FrameType.BlockData,
+          flags: 1,
+          fileIdx: 0,
+          blockIdx: blk,
+          frameOff: 0,
+        },
+        block,
+      );
+      await b.ctrl(FrameType.BlockHash, {
+        type: FrameType.BlockHash,
+        fileIdx: 0,
+        blockIdx: blk,
+        sha256: bytesToHex(await sha256(block)),
+      });
+    }
+    await b.ctrl(FrameType.Complete, { type: FrameType.Complete, fileDigest });
+
+    // Serialization of the optimization state fails: the sink must be handed null (the
+    // durable host journals a checkpoint without digest state and resume re-hashes).
+    const sink = new StateRecordSink();
+    const receiver = new TransferReceiver({
+      send: () => void Promise.resolve(),
+      sendDir: keys.j2o,
+      recvDir: keys.o2j,
+      sendCounterStart: 0,
+      recvCounterStart: 0,
+      createDigest: () => new StateFailDigest(),
+      sink,
+    });
+    for (const f of b.frames) receiver.handle(f);
+    const result = await receiver.done;
+    expect(result.digest).toBe(fileDigest);
+    expect(sink.states).toEqual([null, null]);
+    expect(sink.chunks.flatMap((c) => [...c])).toEqual([...data]);
+  });
+
+  it('a failing setDigestState still fails the receive (genuine journal failure, V13-PR05)', async () => {
+    const keys = await deriveTransferKeys(master);
+    const data = new Uint8Array(8).map((_, i) => i);
+    const fileDigest = createHash('sha256').update(data).digest('hex');
+    const b = await build(keys);
+    await b.ctrl(FrameType.Manifest, {
+      type: FrameType.Manifest,
+      files: [
+        {
+          idx: 0,
+          name: 'f',
+          size: 8,
+          mime: '',
+          lastModified: 0,
+          blockSize: 8,
+          blocks: 1,
+          fileDigest,
+        },
+      ],
+      totalSize: 8,
+    });
+    await b.push(
+      {
+        version: FRAME_VERSION,
+        type: FrameType.BlockData,
+        flags: 1,
+        fileIdx: 0,
+        blockIdx: 0,
+        frameOff: 0,
+      },
+      data,
+    );
+    await b.ctrl(FrameType.BlockHash, {
+      type: FrameType.BlockHash,
+      fileIdx: 0,
+      blockIdx: 0,
+      sha256: bytesToHex(await sha256(data)),
+    });
+    await b.ctrl(FrameType.Complete, { type: FrameType.Complete, fileDigest });
+
+    const receiver = new TransferReceiver({
+      send: () => void Promise.resolve(),
+      sendDir: keys.j2o,
+      recvDir: keys.o2j,
+      sendCounterStart: 0,
+      recvCounterStart: 0,
+      createDigest: nodeDigest,
+      sink: new FailingStateSink(),
+    });
+    for (const f of b.frames) receiver.handle(f);
+    await expect(receiver.done).rejects.toThrow(/sink_error/);
   });
 
   it('ignores pre-manifest data and identical duplicate manifests (cutover recovery)', async () => {

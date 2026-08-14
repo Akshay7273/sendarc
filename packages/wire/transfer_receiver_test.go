@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -345,6 +346,102 @@ type plainDigest struct{ d Digest }
 
 func (d *plainDigest) Update(b []byte)   { d.d.Update(b) }
 func (d *plainDigest) HexDigest() string { return d.d.HexDigest() }
+
+// marshalFailDigest is a Digest WITH the optional DigestState capability whose
+// serialization always fails, to prove the seam degrades to a nil state.
+type marshalFailDigest struct {
+	d      Digest
+	events *[]string
+}
+
+func (d *marshalFailDigest) Update(b []byte) {
+	*d.events = append(*d.events, "update")
+	d.d.Update(b)
+}
+func (d *marshalFailDigest) HexDigest() string { return d.d.HexDigest() }
+func (d *marshalFailDigest) MarshalState() ([]byte, error) {
+	return nil, errors.New("serialization failed")
+}
+
+// failingStateSink records writes like seamSink but its SetDigestState (the journal
+// write) genuinely fails and must fail the receive.
+type failingStateSink struct {
+	seamSink
+}
+
+func (s *failingStateSink) SetDigestState([]byte) error { return errors.New("journal write failed") }
+
+func TestReceiverDigestMarshalStateFailureFallsBack(t *testing.T) {
+	// The digest's state serialization fails: the checkpoint is an optimization, so the
+	// sink must be handed a nil state and the receive must complete (resume re-hashes).
+	keys, err := DeriveTransferKeys(senderMaster())
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := seq(16)
+	sf := newSenderFrames(t, keys)
+	sf.ctrl(NewManifest([]FileEntry{{
+		Idx: 0, Name: "f", Size: 16, BlockSize: 8, Blocks: 2, FileDigest: hexSHA256(data),
+	}}, 16))
+	sf.blockData(data, 8, 8)
+	sf.ctrl(NewComplete(hexSHA256(data)))
+
+	var events []string
+	sink := &seamSink{events: &events}
+	var back outbox
+	r := NewReceiver(ReceiverOptions{
+		Send: back.push, SendDir: keys.J2O, RecvDir: keys.O2J, Sink: sink,
+		CreateDigest: func() Digest { return &marshalFailDigest{d: NewSHA256Digest(), events: &events} },
+	})
+	for _, f := range sf.frames {
+		r.Handle(f)
+	}
+	if _, err := r.Wait(context.Background()); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if len(sink.states) != 2 || sink.states[0] != nil || sink.states[1] != nil {
+		t.Fatalf("failing serialization must hand the sink nil states, got %v", sink.states)
+	}
+	wantEvents := []string{
+		"update", "setState", "write",
+		"update", "setState", "write",
+	}
+	for i, e := range wantEvents {
+		if events[i] != e {
+			t.Fatalf("event %d = %q, want %q", i, events[i], e)
+		}
+	}
+}
+
+func TestReceiverDigestSetStateFailurePropagates(t *testing.T) {
+	// A genuine journal/sink failure while persisting digest state must fail the receive
+	// (only serialization of the optional state is degraded, never the sink write).
+	keys, err := DeriveTransferKeys(senderMaster())
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := seq(8)
+	sf := newSenderFrames(t, keys)
+	sf.ctrl(NewManifest([]FileEntry{{
+		Idx: 0, Name: "f", Size: 8, BlockSize: 8, Blocks: 1, FileDigest: hexSHA256(data),
+	}}, 8))
+	sf.push(FrameHeaderInput{Version: FrameVersion, Type: FrameBlockData, Flags: FrameFlagLastInBlock}, data)
+	sf.ctrl(NewBlockHash(0, 0, hexSHA256(data)))
+	sf.ctrl(NewComplete(hexSHA256(data)))
+
+	sink := &failingStateSink{}
+	var back outbox
+	r := NewReceiver(ReceiverOptions{
+		Send: back.push, SendDir: keys.J2O, RecvDir: keys.O2J, Sink: sink,
+	})
+	for _, f := range sf.frames {
+		r.Handle(f)
+	}
+	_, err = r.Wait(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "sink_error") {
+		t.Fatalf("Wait error = %v, want one mentioning sink_error", err)
+	}
+}
 
 // recordingSink records the order of its calls so a test can assert onManifest ran first.
 type recordingSink struct{ events *[]string }

@@ -48,14 +48,14 @@ describe('createSha256DigestFactory', () => {
     live.update(suffix);
     const oneShot = new Uint8Array([...prefix, ...suffix]);
 
-    const restored = (await createSha256DigestFactory(state))();
+    const restored = make.restore(state);
     restored.update(suffix);
     const restoredHex = await restored.hexDigest(); // hash-wasm digest() is one-shot
     expect(restoredHex).toBe(await live.hexDigest());
     expect(restoredHex).toBe(await ref(oneShot));
     // A restored digest covering a different prefix differs — only whole-file
     // verification can vouch for the final digest.
-    const other = (await createSha256DigestFactory(state))();
+    const other = make.restore(state);
     other.update(prefix); // double-fed: same state, extra prefix
     other.update(suffix);
     expect(await other.hexDigest()).not.toBe(await ref(oneShot));
@@ -66,15 +66,39 @@ describe('createSha256DigestFactory', () => {
     // A state from a different runtime: the 4-byte wasm prefix is mangled, so load()
     // must throw (never guess) and a fresh digest must still work.
     const bogus = new Uint8Array([1, 2, 3, 4, ...new Uint8Array(112)]);
-    const bogusFactory = await createSha256DigestFactory(bogus);
-    expect(() => bogusFactory().update(new Uint8Array([1]))).toThrow();
+    expect(() => make.restore(bogus).update(new Uint8Array([1]))).toThrow();
     // Truncated state is rejected too.
     const fresh = make();
     fresh.update(new Uint8Array([5]));
     const state = (fresh as unknown as DigestState).saveState();
-    const truncatedFactory = await createSha256DigestFactory(state.subarray(0, 20));
-    expect(() => truncatedFactory().update(new Uint8Array([1]))).toThrow();
+    expect(() => make.restore(state.subarray(0, 20)).update(new Uint8Array([1]))).toThrow();
     // An untouched factory still yields a working digest after all the failed loads.
     expect(await make().hexDigest()).toBe(await ref(new Uint8Array()));
+  });
+
+  it('keeps simultaneously-live digests isolated over one scratch hasher (V13-PR05)', async () => {
+    const make = await createSha256DigestFactory();
+    const a = new Uint8Array([1, 2, 3]);
+    const b = new Uint8Array([4, 5, 6, 7]);
+    const d1 = make();
+    const d2 = make();
+    d1.update(a);
+    d2.update(b);
+    // Interleaved updates must not alias: each digest covers exactly its own bytes.
+    expect(await d1.hexDigest()).toBe(await ref(a));
+    expect(await d2.hexDigest()).toBe(await ref(b));
+    // Digesting d1 deinitializes the shared scratch hasher; d2 must still finish.
+    expect(await d1.hexDigest()).toBe(await ref(a));
+    expect(await d2.hexDigest()).toBe(await ref(b));
+    // saveState of one digest must not alter the other.
+    const s1 = (d1 as unknown as DigestState).saveState();
+    expect(await d2.hexDigest()).toBe(await ref(b));
+    const restored = make.restore(s1);
+    expect(await restored.hexDigest()).toBe(await ref(a));
+    // Interleaving a restored digest with a live one stays independent.
+    restored.update(new Uint8Array([8]));
+    d2.update(new Uint8Array([9]));
+    expect(await restored.hexDigest()).toBe(await ref(new Uint8Array([1, 2, 3, 8])));
+    expect(await d2.hexDigest()).toBe(await ref(new Uint8Array([4, 5, 6, 7, 9])));
   });
 });

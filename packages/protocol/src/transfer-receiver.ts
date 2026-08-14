@@ -469,7 +469,15 @@ export class TransferReceiver {
   private async attachDigestState(sink: Sink, digest: Digest): Promise<void> {
     const stateSink = sink as Sink & Partial<DigestStateSink>;
     if (typeof stateSink.setDigestState !== 'function') return;
-    const state = (digest as Digest & Partial<DigestState>).saveState?.() ?? null;
+    let state: Uint8Array | null = null;
+    try {
+      state = (digest as Digest & Partial<DigestState>).saveState?.() ?? null;
+    } catch {
+      // Digest checkpoints are an optimization: serialization failure omits the state
+      // (the sink journals a checkpoint without it, and resume re-hashes the persisted
+      // prefix). Genuine journal/sink failures below must still propagate.
+      state = null;
+    }
     await stateSink.setDigestState(state);
   }
 
