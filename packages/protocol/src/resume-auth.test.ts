@@ -506,6 +506,93 @@ describe('resume-auth input hygiene and bounds (review fixes)', () => {
       expect(String(e2.reason)).toContain('verification failed');
     }
   });
+
+  it('EVERY inbound-processing failure is terminal: a later valid message cannot continue (BLOCKER 1)', async () => {
+    // A valid challenge for the fixed offerer context, produced by a real joiner.
+    const validChallengeBytes = (() => {
+      const o = new ResumeAuthSession(context('offerer'));
+      const j = new ResumeAuthSession(context('joiner'));
+      const init = o.start();
+      const challenge = j.handle(encodeResumeMessage(init));
+      return Promise.resolve(challenge).then((c) => encodeResumeMessage(c.out!));
+    })();
+    const malformedInputs: Array<[string, Uint8Array]> = [
+      ['malformed JSON', utf8('{not json')],
+      ['oversized message', new Uint8Array(MAX_RESUME_AUTH_MESSAGE_BYTES + 1)],
+      [
+        'invalid base64 / wrong field shape',
+        utf8(
+          JSON.stringify({
+            type: RESUME_MSG_CHALLENGE,
+            version: 1,
+            role: 'joiner',
+            nonce: '!!!!',
+            proof: '!!!!',
+          }),
+        ),
+      ],
+      [
+        'wrong version',
+        utf8(
+          JSON.stringify({
+            type: RESUME_MSG_CHALLENGE,
+            version: 2,
+            role: 'joiner',
+            nonce: 'A'.repeat(43),
+            proof: 'A'.repeat(43),
+          }),
+        ),
+      ],
+      [
+        'unknown field',
+        utf8(
+          JSON.stringify({
+            type: RESUME_MSG_CHALLENGE,
+            version: 1,
+            role: 'joiner',
+            nonce: 'A'.repeat(43),
+            proof: 'A'.repeat(43),
+            extra: 1,
+          }),
+        ),
+      ],
+    ];
+    for (const [name, bad] of malformedInputs) {
+      const session = new ResumeAuthSession(context('offerer'));
+      session.start();
+      // The malformed message rejects...
+      await expect(session.handle(bad), `${name}: malformed must reject`).rejects.toThrow();
+      // ...and the session is TERMINAL: a subsequent VALID challenge must reject with the
+      // settled failure, never continue the handshake or authenticate.
+      await expect(
+        session.handle(await validChallengeBytes),
+        `${name}: valid-after-malformed must reject terminally`,
+      ).rejects.toThrow();
+    }
+  });
+
+  it('Promise.all arrival order: a malformed first message settles the session before a queued valid one runs (BLOCKER 1)', async () => {
+    const session = new ResumeAuthSession(context('offerer'));
+    const init = session.start();
+    const malformed = utf8('{not json');
+    // Build a VALID challenge for this exact offerer session (same nonce) from a joiner.
+    const valid = await (async () => {
+      const j = new ResumeAuthSession(context('joiner'));
+      const c = await j.handle(encodeResumeMessage(init));
+      return encodeResumeMessage(c.out!);
+    })();
+    const [bad, good] = await Promise.allSettled([
+      session.handle(malformed),
+      session.handle(valid),
+    ]);
+    expect(bad.status).toBe('rejected');
+    expect(good.status).toBe('rejected');
+    // The later queued message observes the SAME terminal failure, never authentication.
+    if (bad.status === 'rejected' && good.status === 'rejected') {
+      expect(String(good.reason)).toContain('invalid JSON');
+      expect(String(bad.reason)).toBe(String(good.reason));
+    }
+  });
 });
 
 describe('resume-auth handshake', () => {

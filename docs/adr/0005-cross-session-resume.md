@@ -302,6 +302,15 @@ joiner:   idle ──valid init──► awaitConfirm ──valid confirm──�
   response; a conflicting concurrent duplicate fails closed deterministically; a failure is
   terminal and later queued work cannot resurrect or overwrite the failed state; no
   unhandled rejection leaks. Go serializes `Handle` with a mutex (equivalent semantics).
+- **Every inbound failure is terminal (Blocker 1):** the serialized inbound path wraps
+  decoding AND processing together, so ANY inbound-processing failure after construction —
+  oversized message, malformed JSON, unknown/missing fields, bad version/role,
+  non-canonical nonce/proof, proof failure, out-of-state message, or internal
+  crypto/derivation failure — transitions the session terminally to `failed`. A valid
+  message queued after a malformed one observes the SAME settled failure and can never
+  continue the handshake or authenticate. There is no state where a decoder rejection
+  leaves the session still awaiting a challenge. Go fails `DecodeResumeMessage` the same
+  way (terminal).
 - No challenge replacement after a proof, no nonce/proof/role/version mutation.
 
 ## 7. Fresh resumed traffic keys
@@ -393,15 +402,23 @@ vectors, the persisted-credential seams (sender records + receiver journals), th
 capability constant + negotiation tests, and the fail-closed compatibility behavior.
 Automatic product use is **not enabled**.
 
-**Browser journal mutation is lease-guarded (Blocker 6):** the only way a resume credential
-enters a browser journal is the narrow `attachResumeSecret(transferId, envelope, ownerId,
-nowMs)` store operation, which re-loads the CURRENT journal in a transaction over journals
-
-- leases, verifies the caller still owns the lease at write time, preserves every committed
-  block/digest checkpoint, adds the credential only if absent, preserves an existing
-  credential exactly, renews the lease, and fails closed if lease ownership was lost (another
-  tab took over). There is deliberately no generic "write any journal without a lease" API,
-  so a stale owner can never overwrite a taken-over journal with an older snapshot.
+**Browser journal mutation is lease-guarded and compare-and-swap (Blockers 6 + 2):** the
+only way a resume credential enters a browser journal is the narrow
+`attachResumeSecret(transferId, envelope, ownerId, nowMs)` store operation. It does NOT
+blindly overwrite a stale snapshot. Pass 1 (readonly) snapshots the exact raw encoded
+journal bytes + lease, decodes/validates the current journal, and builds the candidate
+`next` journal. Pass 2 is ONE readwrite transaction over journals + leases that re-reads the
+lease AND the current raw journal, verifies the caller still owns the lease at write time,
+byte-compares the CURRENT raw journal against the pass-1 snapshot (the complete encoded
+journal — digest checkpoints, timestamps, existing secret, and all state participate), and
+only if BOTH hold writes the candidate and renews the lease. A journal that advanced under
+the SAME owner between the passes (e.g. a concurrent commitBlocks) aborts and is retried
+from a FRESH snapshot, strictly bounded (`DURABLE_ATTACH_MAX_RETRIES`), so newer
+committedBlocks/digest-checkpoint state can never be overwritten or regressed; a lost or
+foreign lease fails closed immediately. Existing credentials are preserved exactly and the
+credential is only added when absent. There is deliberately no generic "write any journal
+without a lease" API, so neither a stale owner nor a stale same-owner snapshot can ever
+overwrite newer progress.
 
 **Non-durable browser receives never fail on credential attachment (Blocker 2):** the
 resume root being present must not make an ordinary receive fail. Credential attachment is

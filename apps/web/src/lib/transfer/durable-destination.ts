@@ -252,8 +252,10 @@ export class DurableDestination implements BrowserDestination {
       journal.transferId,
       fingerprint,
     );
-    // The lease-guarded store operation re-loads the CURRENT journal in one transaction,
-    // preserves committed progress, and fails closed if this receiver lost the lease.
+    // The lease-guarded store operation is a compare-and-swap: it snapshots the current
+    // journal, then in one readwrite transaction verifies lease ownership and byte-compares
+    // the live journal against that snapshot before writing, so newer committed progress
+    // under the same owner is never overwritten and a lost lease fails closed.
     this.journal = await this.store.attachResumeSecret(
       journal.transferId,
       encodeResumeSecretEnvelope(secret),

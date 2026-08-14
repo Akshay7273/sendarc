@@ -567,22 +567,39 @@ export class ResumeAuthSession {
 
   private async handleSerialized(payload: Uint8Array): Promise<ResumeAuthOutcome> {
     if (this.state === 'failed') throw this.settledErr;
-    const msg = decodeResumeMessage(payload);
-    // Idempotent replay first: an exact duplicate of ANY accepted message (current or
-    // settled step) is re-answered with the SAME snapshot for the rest of the session —
-    // including after done — so a lost response is retransmitted identically, never with a
-    // fresh nonce/proof. A snapshot with no response (offerer's accepted ready) is a settled
-    // no-op; a snapshot that produced a response re-answers it with the same bytes.
-    const step = this.steps.find((s) => bytesEqual(payload, s.accepted));
-    if (step) {
-      if (step.responded === undefined) {
-        return this.result === undefined ? {} : { result: this.result };
+    try {
+      const msg = decodeResumeMessage(payload);
+      // Idempotent replay first: an exact duplicate of ANY accepted message (current or
+      // settled step) is re-answered with the SAME snapshot for the rest of the session —
+      // including after done — so a lost response is retransmitted identically, never with a
+      // fresh nonce/proof. A snapshot with no response (offerer's accepted ready) is a
+      // settled no-op; a snapshot that produced a response re-answers it with the same
+      // bytes. (A decode failure of our own snapshot cannot happen; if it somehow did, the
+      // catch below settles the session failed rather than leaving a half-processed state.)
+      const step = this.steps.find((s) => bytesEqual(payload, s.accepted));
+      if (step) {
+        if (step.responded === undefined) {
+          return this.result === undefined ? {} : { result: this.result };
+        }
+        const out = decodeResumeMessage(step.responded);
+        return this.result === undefined ? { out } : { out, result: this.result };
       }
-      const out = decodeResumeMessage(step.responded);
-      return this.result === undefined ? { out } : { out, result: this.result };
+      if (this.ctx.role === 'offerer') return await this.handleOfferer(msg, payload);
+      return await this.handleJoiner(msg, payload);
+    } catch (e) {
+      // EVERY inbound-processing failure after construction is terminal (Blocker 1): a
+      // decode error (oversized/malformed JSON/unknown field/bad version/role/noncanonical
+      // nonce/proof), a proof failure, an out-of-state message, or an internal crypto
+      // failure settles the session `failed`. Go behaves the same (DecodeResumeMessage
+      // failure calls failLocked). A later valid message must observe the SAME terminal
+      // failure — never continue a partially-processed handshake. If a handler already
+      // failed the session (it throws `this.fail(...)`), rethrow the settled error verbatim
+      // instead of double-wrapping it.
+      // `settledErr` is set exactly when the session is failed (fail() sets both), and this
+      // sidesteps TS control-flow narrowing that would otherwise reject the state check.
+      if (this.settledErr !== undefined) throw this.settledErr;
+      throw this.fail(e instanceof Error ? e : new Error(String(e)));
     }
-    if (this.ctx.role === 'offerer') return this.handleOfferer(msg, payload);
-    return this.handleJoiner(msg, payload);
   }
 
   private async handleOfferer(msg: ResumeMessage, payload: Uint8Array): Promise<ResumeAuthOutcome> {
