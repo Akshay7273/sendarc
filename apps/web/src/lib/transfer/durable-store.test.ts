@@ -626,7 +626,7 @@ describe('sync partial writer short writes', () => {
     const store = indexedDbDurableStore();
     const digestFactory = await createSha256DigestFactory();
     const d = new DurableDestination({
-      createDigest: () => digestFactory(),
+      createDigest: digestFactory,
       files: durableOpfsFiles(),
       store,
       now: () => 1_000,

@@ -5,22 +5,28 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   DIGEST_CHECKPOINT_FORMAT_HASH_WASM,
+  FRAME_VERSION,
   FrameType,
   TransferError,
+  TransferReceiver,
   bytesToHex,
   commitBlocks as advanceJournal,
   decodeJournal,
+  deriveTransferKeys,
+  encodeControl,
   encodeJournal,
   newJournal,
+  seal,
   sha256,
   type Digest,
   type DigestState,
   type DigestStateSink,
   type DurableJournal,
+  type FrameHeaderInput,
   type JournalDigestCheckpoint,
   type Manifest,
 } from '@sendbeam/protocol';
-import { createSha256DigestFactory } from './digest.js';
+import { createSha256DigestFactory, type Sha256DigestFactory } from './digest.js';
 import { DurableDestination } from './durable-destination.js';
 import {
   DURABLE_LEASE_TTL_MS,
@@ -305,7 +311,7 @@ interface Harness {
   store: MemoryStore;
   files: MemoryFiles;
   makeDestination: (overrides?: Partial<{ now: () => number }>) => DurableDestination;
-  digest: () => Digest;
+  digest: Sha256DigestFactory;
   advance: (ms: number) => void;
 }
 
@@ -318,7 +324,7 @@ async function harness(): Promise<Harness> {
   const now = () => clock;
   const makeDestination = (overrides: Partial<{ now: () => number }> = {}): DurableDestination =>
     new DurableDestination({
-      createDigest: () => digestFactory(),
+      createDigest: digestFactory,
       files,
       store,
       now,
@@ -330,7 +336,7 @@ async function harness(): Promise<Harness> {
     store,
     files,
     makeDestination,
-    digest: () => digestFactory(),
+    digest: digestFactory,
     advance: (ms) => {
       clock += ms;
     },
@@ -355,11 +361,12 @@ async function journalFor(
   files: MemoryFiles,
   names: Array<[string, number]>,
   committedPerFile: number[],
+  m: Manifest = manifest(names),
 ): Promise<DurableJournal> {
   // The destination binds journals to the browser storage location; journals the tests
   // fabricate must carry the same claim or prepare rejects them as foreign.
   const destination = await webDestinationIdentity('web');
-  return newJournal(TRANSFER_ID, manifest(names), IDENTITY, destination, 1_000).then(async (j) => {
+  return newJournal(TRANSFER_ID, m, IDENTITY, destination, 1_000).then(async (j) => {
     for (let i = 0; i < names.length; i++) {
       const f = j.files[i]!;
       const rel = names[i]![0];
@@ -620,6 +627,325 @@ describe('DurableDestination', () => {
     );
   });
 
+  it('multi-file resume: fallback seeds from one factory stay isolated while live (V13-PR05)', async () => {
+    const h = await harness();
+    // Old v1 journal: no digest checkpoints anywhere — every seed must be re-hashed.
+    await journalFor(
+      h.store,
+      h.files,
+      [
+        ['a.bin', 24],
+        ['b.bin', 16],
+      ],
+      [2, 1],
+    );
+    // Distinct persisted content for the second file (journalFor's default pattern is shared).
+    const bPrefix = new Uint8Array(8).map((_, k) => (k + 101) & 0xff);
+    h.files.data.set('b.bin', bPrefix);
+
+    h.advance(DURABLE_LEASE_TTL_MS + 1);
+    const d = h.makeDestination();
+    await d.prepare(
+      manifest([
+        ['a.bin', 24],
+        ['b.bin', 16],
+      ]),
+    );
+    const files = d.resumeStateFor()!.files;
+    const a = files.get(0)!.seedDigest;
+    const b = files.get(1)!.seedDigest;
+
+    // The receiver feeds files interleaved while every seed stays live; each digest
+    // must cover exactly its own prefix. (Before the fix, a shared hasher aliased them.)
+    a.update(new Uint8Array([17, 18, 19, 20, 21, 22, 23, 24]));
+    b.update(new Uint8Array([109, 110, 111, 112, 113, 114, 115, 116]));
+    expect(await a.hexDigest()).toBe(
+      bytesToHex(await sha256(new Uint8Array(24).map((_, k) => (k + 1) & 0xff))),
+    );
+    expect(await b.hexDigest()).toBe(
+      bytesToHex(
+        await sha256(new Uint8Array([...bPrefix, 109, 110, 111, 112, 113, 114, 115, 116])),
+      ),
+    );
+    // Digesting one must not deinitialize the other's stream.
+    expect(await a.hexDigest()).toBe(
+      bytesToHex(await sha256(new Uint8Array(24).map((_, k) => (k + 1) & 0xff))),
+    );
+    expect(await b.hexDigest()).toBe(
+      bytesToHex(
+        await sha256(new Uint8Array([...bPrefix, 109, 110, 111, 112, 113, 114, 115, 116])),
+      ),
+    );
+  });
+
+  it('multi-file resume: a restored checkpoint and a fallback seed stay isolated (V13-PR05)', async () => {
+    const h = await harness();
+    const j = await journalFor(
+      h.store,
+      h.files,
+      [
+        ['a.bin', 24],
+        ['b.bin', 24],
+      ],
+      [2, 1],
+    );
+    const aBytes = new Uint8Array(16).map((_, k) => (k + 1) & 0xff);
+    await journalWithCheckpoint(h.store, j, {
+      format: DIGEST_CHECKPOINT_FORMAT_HASH_WASM,
+      committedBlocks: 2,
+      committedBytes: 16,
+      state: bytesToHex(digestStateFor(h, aBytes)),
+    });
+    // Corrupt a.bin on disk: the restored seed must ignore it (restore skips the re-hash).
+    h.files.data.set('a.bin', new Uint8Array(16).fill(0xff));
+
+    h.advance(DURABLE_LEASE_TTL_MS + 1);
+    const d = h.makeDestination();
+    await d.prepare(
+      manifest([
+        ['a.bin', 24],
+        ['b.bin', 24],
+      ]),
+    );
+    const files = d.resumeStateFor()!.files;
+    const a = files.get(0)!.seedDigest;
+    const b = files.get(1)!.seedDigest;
+    expect(await a.hexDigest()).toBe(bytesToHex(await sha256(aBytes)));
+    expect(await b.hexDigest()).toBe(
+      bytesToHex(await sha256(new Uint8Array(8).map((_, k) => (k + 1) & 0xff))),
+    );
+    // Interleaved continuation of both remains independent.
+    a.update(new Uint8Array([17, 18, 19, 20, 21, 22, 23, 24]));
+    b.update(new Uint8Array([9, 10, 11, 12, 13, 14, 15, 16]));
+    b.update(new Uint8Array([17, 18, 19, 20, 21, 22, 23, 24]));
+    expect(await a.hexDigest()).toBe(
+      bytesToHex(await sha256(new Uint8Array(24).map((_, k) => (k + 1) & 0xff))),
+    );
+    expect(await b.hexDigest()).toBe(
+      bytesToHex(await sha256(new Uint8Array(24).map((_, k) => (k + 1) & 0xff))),
+    );
+  });
+
+  it('multi-file resume: foreign-format checkpoint falls back alongside a plain rehash (V13-PR05)', async () => {
+    const h = await harness();
+    const j = await journalFor(
+      h.store,
+      h.files,
+      [
+        ['a.bin', 24],
+        ['b.bin', 24],
+      ],
+      [2, 1],
+    );
+    await journalWithCheckpoint(h.store, j, {
+      format: 'sha256-go-v1',
+      committedBlocks: 2,
+      committedBytes: 16,
+      state: '00'.repeat(108),
+    });
+
+    h.advance(DURABLE_LEASE_TTL_MS + 1);
+    const d = h.makeDestination();
+    await d.prepare(
+      manifest([
+        ['a.bin', 24],
+        ['b.bin', 24],
+      ]),
+    );
+    const files = d.resumeStateFor()!.files;
+    const a = files.get(0)!.seedDigest;
+    const b = files.get(1)!.seedDigest;
+    // Both re-hash from the persisted prefix, but stay independent while live.
+    const aBytes = new Uint8Array(16).map((_, k) => (k + 1) & 0xff);
+    const bBytes = new Uint8Array(8).map((_, k) => (k + 1) & 0xff);
+    expect(await a.hexDigest()).toBe(bytesToHex(await sha256(aBytes)));
+    expect(await b.hexDigest()).toBe(bytesToHex(await sha256(bBytes)));
+    a.update(new Uint8Array([17, 18, 19, 20, 21, 22, 23, 24]));
+    b.update(new Uint8Array([9, 10, 11, 12, 13, 14, 15, 16]));
+    b.update(new Uint8Array([17, 18, 19, 20, 21, 22, 23, 24]));
+    expect(await a.hexDigest()).toBe(
+      bytesToHex(await sha256(new Uint8Array(24).map((_, k) => (k + 1) & 0xff))),
+    );
+    expect(await b.hexDigest()).toBe(
+      bytesToHex(await sha256(new Uint8Array(24).map((_, k) => (k + 1) & 0xff))),
+    );
+  });
+
+  it('resume covers fully committed files and skips seeds for not-yet-started ones (matches the Go driver)', async () => {
+    const h = await harness();
+    // a.bin fully committed (3/3), b.bin not started (0/3), c.bin partially committed (1/3).
+    await journalFor(
+      h.store,
+      h.files,
+      [
+        ['a.bin', 24],
+        ['b.bin', 24],
+        ['c.bin', 24],
+      ],
+      [3, 0, 1],
+    );
+
+    h.advance(DURABLE_LEASE_TTL_MS + 1);
+    const d = h.makeDestination();
+    await d.prepare(
+      manifest([
+        ['a.bin', 24],
+        ['b.bin', 24],
+        ['c.bin', 24],
+      ]),
+    );
+    const files = d.resumeStateFor()!.files;
+    // Fully committed: the seed covers the whole file (verified at finish). Not started:
+    // no seed — the receiver starts the file fresh, exactly like the Go driver.
+    expect(files.get(0)!.haveBlocks).toBe(3);
+    expect(await files.get(0)!.seedDigest.hexDigest()).toBe(
+      bytesToHex(await sha256(new Uint8Array(24).map((_, k) => (k + 1) & 0xff))),
+    );
+    expect(files.has(1)).toBe(false);
+    expect(files.get(2)!.haveBlocks).toBe(1);
+  });
+
+  it('final resumed transfer streams only missing blocks and verifies every file (V13-PR05)', async () => {
+    const h = await harness();
+    const whole = new Uint8Array(24).map((_, k) => (k + 1) & 0xff);
+    const small = new Uint8Array(8).map((_, k) => (k + 1) & 0xff);
+    const files = [
+      { name: 'a.bin', size: 24, data: whole },
+      { name: 'b.bin', size: 24, data: whole },
+      { name: 'c.bin', size: 24, data: whole },
+      { name: 'd.bin', size: 8, data: small },
+    ];
+    const digests = await Promise.all(files.map(async (f) => bytesToHex(await sha256(f.data))));
+    const m: Manifest = {
+      type: FrameType.Manifest,
+      transferId: TRANSFER_ID,
+      files: files.map((f, idx) => ({
+        idx,
+        name: f.name,
+        size: f.size,
+        mime: 'application/octet-stream',
+        lastModified: 0,
+        blockSize: 8,
+        blocks: Math.ceil(f.size / 8),
+        fileDigest: digests[idx]!,
+      })),
+      totalSize: files.reduce((total, f) => total + f.size, 0),
+    };
+    const j = await journalFor(
+      h.store,
+      h.files,
+      files.map((f) => [f.name, f.size]),
+      [3, 2, 1, 0],
+      m,
+    );
+    // a.bin: valid wasm checkpoint (restored). b.bin: foreign-format checkpoint (rehash).
+    // c.bin: old journal, no checkpoint (rehash). d.bin: not started (no seed).
+    let advanced = advanceJournal(j, 0, 3, 3_000, {
+      format: DIGEST_CHECKPOINT_FORMAT_HASH_WASM,
+      committedBlocks: 3,
+      committedBytes: 24,
+      state: bytesToHex(digestStateFor(h, whole)),
+    });
+    advanced = advanceJournal(advanced, 1, 2, 3_000, {
+      format: 'sha256-go-v1',
+      committedBlocks: 2,
+      committedBytes: 16,
+      state: '00'.repeat(108),
+    });
+    h.store.journals.set(TRANSFER_ID, await encodeJournal(advanced));
+
+    h.advance(DURABLE_LEASE_TTL_MS + 1);
+    const d = h.makeDestination();
+
+    const keys = await deriveTransferKeys(new Uint8Array(32).fill(7));
+    const frames: Uint8Array[] = [];
+    let ctr = 0;
+    const push = async (header: FrameHeaderInput, payload: Uint8Array) => {
+      frames.push(await seal(keys.o2j, ctr++, header, payload));
+    };
+    const ctrl = (type: FrameType, msg: Parameters<typeof encodeControl>[0]) =>
+      push(
+        { version: FRAME_VERSION, type, flags: 0, fileIdx: 0, blockIdx: 0, frameOff: 0 },
+        encodeControl(msg),
+      );
+    await ctrl(FrameType.Manifest, m);
+    // The sender learned the high-water marks from the ResumeState control: it sends only
+    // the blocks the receiver lacks, in file order — b.bin 2, c.bin 1..2, d.bin 0.
+    // a.bin streams nothing.
+    for (const [fileIdx, startBlock] of [
+      [1, 2],
+      [2, 1],
+      [3, 0],
+    ] as Array<[number, number]>) {
+      const f = files[fileIdx]!;
+      for (let blk = startBlock; blk * 8 < f.size; blk++) {
+        const start = blk * 8;
+        const end = Math.min(start + 8, f.size);
+        const block = f.data.subarray(start, end);
+        for (let off = 0; off < block.length; off += 4) {
+          const frag = block.subarray(off, Math.min(off + 4, block.length));
+          const last = off + frag.length === block.length;
+          await push(
+            {
+              version: FRAME_VERSION,
+              type: FrameType.BlockData,
+              flags: last ? 1 : 0,
+              fileIdx,
+              blockIdx: blk,
+              frameOff: off,
+            },
+            frag,
+          );
+        }
+        await ctrl(FrameType.BlockHash, {
+          type: FrameType.BlockHash,
+          fileIdx,
+          blockIdx: blk,
+          sha256: bytesToHex(await sha256(block)),
+        });
+      }
+    }
+    // One-shot terminal Complete carrying the canonical file-set completion digest.
+    await ctrl(FrameType.Complete, {
+      type: FrameType.Complete,
+      fileDigest: bytesToHex(await sha256(new TextEncoder().encode(digests.join('\n')))),
+    });
+
+    const receiverOpts: ConstructorParameters<typeof TransferReceiver>[0] = {
+      send: () => void Promise.resolve(),
+      sendDir: keys.j2o,
+      recvDir: keys.o2j,
+      sendCounterStart: 0,
+      recvCounterStart: 0,
+      createDigest: h.digest,
+      destination: d,
+      onManifestSet: async () => {
+        const state = d.resumeStateFor();
+        if (state) receiverOpts.resume = state;
+      },
+    };
+    const receiver = new TransferReceiver(receiverOpts);
+    for (const f of frames) receiver.handle(f);
+    const result = await receiver.done;
+
+    // Every file verified end-to-end; the durable store finalized (journal + lease gone).
+    expect(result.digests).toEqual(digests);
+    expect((await h.store.loadJournal(TRANSFER_ID)).kind).toBe('none');
+    const zipBytes = h.files.outputs.get(`sendbeam/durable/${TRANSFER_ID}/__receive.zip`);
+    expect(zipBytes).toBeDefined();
+    const dir = mkdtempSync(join(tmpdir(), 'sendbeam-durable-resume-'));
+    try {
+      const path = join(dir, 'resume.zip');
+      writeFileSync(path, zipBytes!);
+      expect(execFileSync('unzip', ['-t', path], { encoding: 'utf8' })).toContain('No errors');
+      for (const f of files) {
+        expect(execFileSync('unzip', ['-p', path, f.name])).toEqual(Buffer.from(f.data));
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('stale tail beyond the checkpoint is truncated and re-transferred on resume', async () => {
     const h = await harness();
     await journalFor(h.store, h.files, [['a.bin', 24]], [1]);
@@ -718,7 +1044,7 @@ describe('DurableDestination', () => {
     const m = manifest([['a.bin', 16]]);
 
     const low = new DurableDestination({
-      createDigest: () => h.digest(),
+      createDigest: h.digest,
       files: h.files,
       store: h.store,
       now: () => 1_000,
