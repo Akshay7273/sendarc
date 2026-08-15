@@ -129,8 +129,22 @@ func durableLoopbackMaster() []byte {
 // The resume seed is applied through OnManifestSet exactly as the CLI driver does: the
 // authenticated manifest binds the journal, then per-file high-water marks and digest
 // prefixes are rebuilt from the persisted partials.
+// resumeAuthorizedDest marks a destination as an authenticated resume leg (V13-PR08): in
+// these direct/loopback tests there is no handshake, so the driver's ExpectResume +
+// SetResumeAuthorized are applied directly. The unauthenticated refusal is covered by the
+// dedicated fail-closed regression tests.
+func resumeAuthorizedDest(dest *DurableDestination) {
+	dest.ExpectResume(durableTestID)
+	dest.SetResumeAuthorized()
+}
+
 func runDurableLoopback(t *testing.T, dest *DurableDestination, blockSize int, contents map[string][]byte) (sendErr, recvErr error) {
 	t.Helper()
+	// V13-PR08: every resumed leg in these tests models the product flow where resume-auth
+	// already succeeded in this session (ExpectResume pre-selects the journal; the loopback
+	// has no handshake, so the driver's SetResumeAuthorized is applied directly). The
+	// unauthenticated variant is covered by the dedicated fail-closed regression tests.
+	resumeAuthorizedDest(dest)
 	keys, err := wire.DeriveTransferKeys(durableLoopbackMaster())
 	if err != nil {
 		t.Fatal(err)
@@ -244,11 +258,12 @@ func TestDurableDigestCheckpointPersistsAndResumes(t *testing.T) {
 		t.Fatalf("checkpoint state hex = %d chars, want %d (a 108-byte sha256 state)", len(cp.State), 2*108)
 	}
 
-	// A fresh process restores the digest from the checkpointed state.
+	// A fresh process restores the digest from the checkpointed state (authenticated leg).
 	resumed, err := NewDurableDestination(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	resumeAuthorizedDest(resumed)
 	if err := resumed.Prepare(manifest); err != nil {
 		t.Fatal(err)
 	}
@@ -292,13 +307,16 @@ func TestDurableUnusableCheckpointFallsBackToRehash(t *testing.T) {
 	manifest := durableTestManifest(t, durableTestID, blockSize, map[string][]byte{"f.bin": content})
 
 	// seedCheckpoint writes one committed block with a digest checkpoint, then mutates the
-	// checkpoint in the on-disk journal and re-saves it (recomputed checksum).
+	// checkpoint in the on-disk journal and re-saves it (recomputed checksum). The sub-tests
+	// share one dir, so a later seed may find the earlier journal: mark the leg authorized
+	// (V13-PR08) — this test exercises checkpoint restore, not the auth gate.
 	seedCheckpoint := func(t *testing.T, mutate func(cp *wire.JournalDigestCheckpoint)) {
 		t.Helper()
 		dest, err := NewDurableDestination(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
+		resumeAuthorizedDest(dest)
 		if err := dest.Prepare(manifest); err != nil {
 			t.Fatal(err)
 		}
@@ -336,6 +354,7 @@ func TestDurableUnusableCheckpointFallsBackToRehash(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		resumeAuthorizedDest(resumed)
 		if err := resumed.Prepare(manifest); err != nil {
 			t.Fatal(err)
 		}
@@ -356,6 +375,7 @@ func TestDurableUnusableCheckpointFallsBackToRehash(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		resumeAuthorizedDest(resumed)
 		if err := resumed.Prepare(manifest); err != nil {
 			t.Fatal(err)
 		}
@@ -851,6 +871,10 @@ func TestDurableMissingOrTruncatedPartialFailsClosed(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// V13-PR08: this leg models an authenticated resume (the loopback has no
+			// handshake; the dedicated regression tests cover the unauthenticated refusal).
+			resumed.ExpectResume(durableTestID)
+			resumed.SetResumeAuthorized()
 			if err := resumed.Prepare(manifest); err != nil {
 				t.Fatalf("Prepare with the matching journal must succeed: %v", err)
 			}
@@ -1152,6 +1176,9 @@ func TestDurablePathAndSymlinkSafety(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// V13-PR08: this leg models an authenticated resume.
+		resumed.ExpectResume(durableTestID)
+		resumed.SetResumeAuthorized()
 		if err := resumed.Prepare(manifest); err != nil {
 			t.Fatal(err)
 		}
@@ -1571,10 +1598,13 @@ func TestDurableAttachResumeSecretResumedJournalNeverGetsFabricatedSecret(t *tes
 
 	// Session 2: a later receive loads the journal as existing/resumed state and attaches
 	// with a DIFFERENT session root. It must leave the journal without a credential.
+	// V13-PR08: the leg models an authenticated resume.
 	second, err := NewDurableDestination(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	second.ExpectResume(durableTestID)
+	second.SetResumeAuthorized()
 	if err := second.Prepare(manifest); err != nil {
 		t.Fatal(err)
 	}
@@ -1791,4 +1821,228 @@ func TestDurableJournalIsLocalStateNotWireMaterial(t *testing.T) {
 			t.Fatalf("journal contains raw key material")
 		}
 	}
+}
+
+// --- V13-PR08 review Blocker 2: durable authorization is scoped to the SELECTED journal ---
+//
+// Successful resume-auth in this session proves continuity with the peer for the locally
+// selected interrupted transfer A ONLY. It must never authorize an existing journal B when
+// the peer later sends a manifest for B, and authorization with no selected journal
+// authorizes nothing. The strict predicate for pre-existing durable progress is:
+//
+//	authorizedForThisJournal := resumeAuthorized && expectResume != "" &&
+//	    expectResume == journal.TransferID && expectResume == validatedManifest.TransferID
+//
+// Anything else fails closed: zero old progress advertised, every journal/partial
+// preserved, never repaired/deleted/guessed. A genuinely fresh manifest with a DIFFERENT
+// transfer id and NO existing journal remains an ordinary fresh receive.
+
+// durableJournalFor seeds an existing journal (with committed partials) for a transfer.
+func durableJournalFor(t *testing.T, dir, transferID string, blockSize int, contents map[string][]byte) {
+	t.Helper()
+	dest, err := NewDurableDestination(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := durableTestManifest(t, transferID, blockSize, contents)
+	if err := dest.Prepare(manifest); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range sortedNames(contents) {
+		sink, err := dest.Open(manifestFileByName(manifest, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeDurableBlocks(t, sink, blockSize, contents[name])
+	}
+}
+
+func sortedNames(contents map[string][]byte) []string {
+	names := make([]string, 0, len(contents))
+	for name := range contents {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func manifestFileByName(manifest wire.Manifest, name string) wire.FileEntry {
+	for _, f := range manifest.Files {
+		if f.Name == name {
+			return f
+		}
+	}
+	panic("file not in manifest: " + name)
+}
+
+// TestDurableAuthScopedToSelectedJournalA: selected A + auth success + manifest A +
+// journal A => resume allowed, its verified progress reused.
+func TestDurableAuthScopedToSelectedJournalA(t *testing.T) {
+	dir := t.TempDir()
+	blockSize := 1024
+	idA := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	contentA := durableTestData(4 * blockSize)
+	durableJournalFor(t, dir, idA, blockSize, map[string][]byte{"a.bin": contentA})
+
+	dest, err := NewDurableDestination(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest.ExpectResume(idA)
+	dest.SetResumeAuthorized()
+	manifestA := durableTestManifest(t, idA, blockSize, map[string][]byte{"a.bin": contentA})
+	if err := dest.Prepare(manifestA); err != nil {
+		t.Fatalf("Prepare for the selected journal A must succeed: %v", err)
+	}
+	resume, err := dest.ResumeStateFor(manifestA)
+	if err != nil {
+		t.Fatalf("ResumeStateFor for A: %v", err)
+	}
+	if resume == nil || resume.Files[0].HaveBlocks != 4 {
+		t.Fatalf("resume must advertise A's checkpoint, got %+v", resume)
+	}
+}
+
+// TestDurableAuthForADoesNotAuthorizeJournalB: selected A + auth success + incoming
+// manifest B + EXISTING journal B => fail closed; B's progress never advertised; both
+// journals/partials preserved.
+func TestDurableAuthForADoesNotAuthorizeJournalB(t *testing.T) {
+	dir := t.TempDir()
+	blockSize := 1024
+	idA := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	idB := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	contentA := durableTestData(2 * blockSize)
+	contentB := durableTestData(4 * blockSize)
+	durableJournalFor(t, dir, idA, blockSize, map[string][]byte{"a.bin": contentA})
+	durableJournalFor(t, dir, idB, blockSize, map[string][]byte{"b.bin": contentB})
+
+	dest, err := NewDurableDestination(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The user selected A locally and auth succeeded for A...
+	dest.ExpectResume(idA)
+	dest.SetResumeAuthorized()
+	// ...but the peer's manifest is B, which has its own existing journal.
+	manifestB := durableTestManifest(t, idB, blockSize, map[string][]byte{"b.bin": contentB})
+	err = dest.Prepare(manifestB)
+	if err == nil {
+		t.Fatal("Prepare must fail closed when auth covers A but the manifest is B with an existing journal")
+	}
+	if !strings.Contains(err.Error(), "not "+idB) || !strings.Contains(err.Error(), "authenticated resume for "+idA) {
+		t.Fatalf("error must name the authorized transfer and the refused journal: %v", err)
+	}
+	// Prepare already refused before any journal was bound, so ResumeStateFor must
+	// advertise NOTHING (no journal loaded) — B's progress never reaches the wire.
+	if resume, err := dest.ResumeStateFor(manifestB); err != nil || resume != nil {
+		t.Fatalf("ResumeStateFor after a failed Prepare must advertise nothing, got resume=%+v err=%v", resume, err)
+	}
+	// Both journals and their partials are preserved; nothing was deleted or repaired.
+	for _, id := range []string{idA, idB} {
+		if _, ok, err := dest.Store().LoadJournal(id); err != nil || !ok {
+			t.Fatalf("journal %s must be preserved: ok=%v err=%v", id, ok, err)
+		}
+	}
+	if size := partialSizeFor(t, dest, idB, "b.bin"); size != int64(len(contentB)) {
+		t.Fatalf("B's partial must be preserved, got %d bytes", size)
+	}
+	if size := partialSizeFor(t, dest, idA, "a.bin"); size != int64(len(contentA)) {
+		t.Fatalf("A's partial must be preserved, got %d bytes", size)
+	}
+}
+
+// TestDurableAuthForADoesNotBlockFreshTransferB: selected A + auth success + incoming
+// FRESH manifest B + NO journal B => ordinary fresh receive allowed, reused bytes = 0.
+func TestDurableAuthForADoesNotBlockFreshTransferB(t *testing.T) {
+	dir := t.TempDir()
+	blockSize := 1024
+	idA := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	idB := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	contentA := durableTestData(2 * blockSize)
+	durableJournalFor(t, dir, idA, blockSize, map[string][]byte{"a.bin": contentA})
+
+	dest, err := NewDurableDestination(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest.ExpectResume(idA)
+	dest.SetResumeAuthorized()
+	contentB := durableTestData(3 * blockSize)
+	manifestB := durableTestManifest(t, idB, blockSize, map[string][]byte{"b.bin": contentB})
+	if err := dest.Prepare(manifestB); err != nil {
+		t.Fatalf("a genuinely fresh manifest B with no journal B must remain an ordinary receive: %v", err)
+	}
+	if dest.resumed {
+		t.Fatal("fresh transfer B must not be marked resumed")
+	}
+	resume, err := dest.ResumeStateFor(manifestB)
+	if err != nil {
+		t.Fatalf("ResumeStateFor for fresh B: %v", err)
+	}
+	if resume != nil && resume.Files[0].HaveBlocks != 0 {
+		t.Fatalf("fresh B must advertise zero old progress, got %+v", resume)
+	}
+}
+
+// TestDurableAuthRequiredForSelectedJournal: selected A + NO auth + journal A => fail
+// closed; A's progress never reused.
+func TestDurableAuthRequiredForSelectedJournal(t *testing.T) {
+	dir := t.TempDir()
+	blockSize := 1024
+	idA := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	contentA := durableTestData(4 * blockSize)
+	durableJournalFor(t, dir, idA, blockSize, map[string][]byte{"a.bin": contentA})
+
+	dest, err := NewDurableDestination(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest.ExpectResume(idA) // selected, but resume-auth never ran in this session
+	manifestA := durableTestManifest(t, idA, blockSize, map[string][]byte{"a.bin": contentA})
+	if err := dest.Prepare(manifestA); err == nil {
+		t.Fatal("Prepare must fail closed without session authentication")
+	}
+	if _, ok, _ := dest.Store().LoadJournal(idA); !ok {
+		t.Fatal("journal A must be preserved on auth failure")
+	}
+}
+
+// TestDurableResumeStateForRejectsWrongJournal pins the defense-in-depth gate: even when
+// the destination holds authorization for A, ResumeStateFor must never advertise the
+// persisted progress of a loaded journal B.
+func TestDurableResumeStateForRejectsWrongJournal(t *testing.T) {
+	dir := t.TempDir()
+	blockSize := 1024
+	idA := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	idB := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	contentB := durableTestData(4 * blockSize)
+	durableJournalFor(t, dir, idB, blockSize, map[string][]byte{"b.bin": contentB})
+
+	dest, err := NewDurableDestination(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Load B's journal as the destination's journal while the session authorized A only.
+	j, ok, err := dest.Store().LoadJournal(idB)
+	if err != nil || !ok {
+		t.Fatalf("load journal B: ok=%v err=%v", ok, err)
+	}
+	dest.journal = &j
+	dest.resumed = true
+	dest.ExpectResume(idA)
+	dest.SetResumeAuthorized()
+	manifestB := durableTestManifest(t, idB, blockSize, map[string][]byte{"b.bin": contentB})
+	if _, err := dest.ResumeStateFor(manifestB); err == nil {
+		t.Fatal("ResumeStateFor must fail closed for a journal not covered by this session's authorization")
+	}
+}
+
+// partialSizeFor returns the on-disk size of one transfer's .part.
+func partialSizeFor(t *testing.T, dest *DurableDestination, transferID, name string) int64 {
+	t.Helper()
+	info, err := os.Stat(dest.Store().PartialPath(transferID, name))
+	if err != nil {
+		t.Fatalf("stat partial %s for %s: %v", name, transferID, err)
+	}
+	return info.Size()
 }

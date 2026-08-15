@@ -80,6 +80,13 @@ export interface TransferSenderOptions {
   /** Reports verified progress for the active file plus aggregate acknowledged bytes. */
   onFileProgress?(fileIdx: number, fileBytes: number, acknowledgedBytes: number): void;
   /**
+   * Reports the verified baseline reused from the authenticated durable checkpoint at
+   * resume start (the receiver's validated haveBlocks claim), invoked ONCE before any
+   * block is sent. The host anchors its session rate on this baseline so the reused jump
+   * is never counted as transferred bytes: sessionBytes = verified - reused (V13-PR08).
+   */
+  onResume?(reusedBytes: number): void;
+  /**
    * Called with the validated manifest immediately before its frame is transmitted — the
    * seam the caller uses to make sender-side state durable (stable transfer id + canonical
    * source identity) strictly before the id is advertised. May be async; a rejection
@@ -318,6 +325,16 @@ export class TransferSender {
     // streaming so skipped blocks are never sent. Fresh transfers never take this branch.
     if (this.transferId !== undefined) {
       await this.resumeReady;
+      // V13-PR08 progress contract: surface the verified baseline reused from the
+      // authenticated checkpoint immediately — before any block is sent — so the host
+      // anchors its session rate on it and never counts the reused jump as transferred.
+      let reusedTotal = 0;
+      for (const file of manifest.files) {
+        const have = this.resumePlan.get(file.idx) ?? 0;
+        if (have <= 0) continue;
+        reusedTotal += have >= file.blocks ? file.size : have * file.blockSize;
+      }
+      if (reusedTotal > 0) this.o.onResume?.(reusedTotal);
     }
 
     for (const [fileIdx, source] of this.files.entries()) {

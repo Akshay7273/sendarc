@@ -63,6 +63,9 @@ class FakeObjectStore {
   getAll(): FakeRequest {
     return this.tx.request(() => [...this.data.values()]);
   }
+  getAllKeys(): FakeRequest {
+    return this.tx.request(() => [...this.data.keys()]);
+  }
 }
 
 class FakeTransaction {
@@ -241,6 +244,33 @@ describe('indexedDbDurableStore', () => {
     // Still present for explicit discard.
     const again = await s.loadJournal(TRANSFER_ID);
     expect(again.kind).toBe('corrupt');
+  });
+
+  it('lists interrupted receives: valid + corrupt journals, never guessing (V13-PR08)', async () => {
+    const s = store();
+    // One healthy interrupted receive with committed progress.
+    await s.createJournal(
+      TRANSFER_ID,
+      manifest([['a.bin', 16]]),
+      { version: 1, value: '0'.repeat(64) },
+      { version: 1, value: '1'.repeat(64) },
+      1_000,
+    );
+    // One corrupt journal under a second id, for explicit discard.
+    const otherId = 'bb'.repeat(16);
+    const idb = (globalThis as unknown as { indexedDB: FakeIndexedDB }).indexedDB;
+    const tx = idb.db.transaction(['journals'], 'readwrite');
+    tx.objectStore('journals').put(new Uint8Array([9, 9, 9]), otherId);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const listed = await s.listJournals();
+    expect(listed).toHaveLength(2);
+    const healthy = listed.find((e) => e.transferId === TRANSFER_ID)!;
+    expect(healthy.kind).toBe('ok');
+    expect(healthy.journal?.files[0]?.committedBlocks).toBe(0);
+    const corrupt = listed.find((e) => e.transferId === otherId)!;
+    expect(corrupt.kind).toBe('corrupt');
+    expect(corrupt.error).toBeDefined();
   });
 
   it('advances a checkpoint only when the caller still owns the lease', async () => {

@@ -175,6 +175,76 @@ Resume is **same-session** recovery: the sender must still be connected in the r
 user re-joins with the same invite code, and the new handshake always derives fresh
 traffic keys — no old key or counter is ever reused.
 
+## Cross-session resume (v1.3 PR08)
+
+A _process/page/session death_ is different from a _same-session path switch_. PR08 makes
+that distinction explicit and turns the PR07 resume credential into a real, safe product
+flow:
+
+- **reconnect** — same live transfer engine/session; a direct↔relay or temporary outage;
+  the existing traffic-key epoch stays valid under current semantics (PR06 path
+  recovery). No resume-auth runs.
+- **durable resume** — the process/session died; persisted transfer state exists on BOTH
+  peers; both possess the matching PR07 resume credential; mutual resume-auth-v1
+  succeeds; then a brand-new traffic-key epoch is derived and the verified durable
+  checkpoint is reused.
+- **restart** — no compatible credential (lost secret, legacy pre-PR07 state, changed
+  source, corrupt state, or the user elects to start from zero). Old partials are never
+  silently trusted and never deleted without explicit discard.
+
+### The invariant
+
+> Durable progress from a PREVIOUS authenticated session may be reused ONLY after
+> successful resume-auth-v1 continuity authentication. A fresh invite/rendezvous code
+> authenticates the NEW session; it does NOT by itself prove continuity with the
+> original transfer peer.
+
+Both the CLI and the browser enforce this at the storage layer: a journal's verified
+progress is never advertised unless the local peer explicitly armed an authenticated
+resume attempt (`ExpectResume`/`expectResumeFor`) AND resume-auth succeeded in this
+session (`SetResumeAuthorized`/`authorizeResume`) before the manifest was processed. A
+fresh session that presents the same `transferId` + manifest fingerprint without the
+preamble fails closed — nothing is received, nothing is deleted, the journal stays
+intact. Regression tests prove a fresh session cannot skip old blocks merely because
+the ids match.
+
+### The flow
+
+1. The user selects the interrupted transfer locally (sender record / receive journal).
+2. The sender revalidates its source: reopen the persisted path or handle (or an explicit
+   reselection), and run a cheap pre-check — the canonical source identity (count, names,
+   sizes, mtimes in canonical order) compared against the record — refusing before
+   dialing on any obvious mismatch. The EXACT manifest fingerprint is recomputed from the
+   validated manifest and compared with the record strictly before the manifest frame is
+   transmitted: after resume-auth, but before any durable progress is reused or any data
+   is sent under the resumed transfer. A changed source is a hard resume refusal — a
+   valid `resumeSecret` is not authorization to change the source.
+3. A fresh temporary rendezvous is created and a fresh invite code shown (the code is
+   never persisted and never derived from the resume secret).
+4. Both peers join; peer capabilities are checked (`resume-auth-v1`).
+5. PR07 resume-auth runs mutually over the session channel, with fresh nonces.
+6. ONLY after success: fresh directional keys + salts are derived and counters start at
+   0 under them; the transfer engine is constructed with the new key epoch.
+7. Authenticated Manifest → fingerprint-bound resume_state → sender validates the
+   durable claim → missing blocks only → whole-file verification → Complete/Done.
+
+Nothing — Manifest, ResumeState, BlockData, Complete — travels from a resumed transfer
+before resume-auth completes, and the normal transfer protocol never runs under
+provisional resume-auth keys.
+
+### Failure semantics
+
+- Resume auth failure: sender record and receiver journal + partials are preserved;
+  candidate attempt keys/nonces are destroyed; a later attempt uses fresh nonces.
+- Lost credential / peer capability absent / stripped capability: durable data is
+  preserved, authenticated resume is reported unavailable, and an explicit fresh
+  restart/discard is offered. A replacement credential is NEVER derived from the new
+  session.
+- Source mismatch: old state is preserved until explicit discard; no data is sent under
+  the old transfer identity.
+- Corrupt journal: fail closed, keep for inspect/discard; never clamped or repaired
+  silently.
+
 ## Management commands
 
 ```
@@ -184,13 +254,19 @@ sendbeam transfers resume   <id> [--out DIR]
 sendbeam transfers discard  <id>... [--out DIR] [--all] [--yes]
 ```
 
-- `list` shows every journal (valid or unreadable) and orphaned partial tree. A bad
-  journal never hides the others and is never deleted.
+- `list` shows every journal (valid or unreadable) and orphaned partial tree, with a
+  status per entry: interrupted transfer not found, ready to resume, legacy (restart
+  required), partial data missing/truncated, or credential unavailable. A bad journal
+  never hides the others and is never deleted. No secret material is printed.
 - `inspect` cross-checks one journal against its partial data, reporting exactly which
   file's partial is missing or truncated. It never deletes.
-- `resume` verifies a journal is resumable and explains how: re-run
-  `sendbeam receive <code>` in the room where the sender is still connected. The invite
-  code is never stored, so a standalone resume without the sender is not possible.
+- `resume <id> --code <fresh-code>` performs the cross-session authenticated resume:
+  the receiver selects the matching interrupted journal, joins the sender's fresh
+  rendezvous with the fresh code, both peers run resume-auth-v1, and only after mutual
+  authentication is the verified checkpoint reused under a fresh key epoch. It fails
+  closed with distinct errors when the transfer is not found, the source changed, the
+  receiver state is missing/corrupt, the credential is unavailable, the peer does not
+  support authenticated resume, or resume authentication fails.
 - `discard` explicitly deletes one journal and its partial tree (or `--all` with `--yes`),
   bounded to that transfer, idempotent, and safe to repeat. Nothing is ever discarded
   implicitly.
@@ -206,8 +282,7 @@ sendbeam transfers discard  <id>... [--out DIR] [--all] [--yes]
 
 ## Deferred limits (later v1.3 PRs)
 
-- Cross-session authenticated resume with fresh traffic keys without a live sender is
-  PR07 (the `resumeSecret` envelope exists in the schema but is unused by PR02).
-- Resume validation against authenticated peer identity (beyond the manifest fingerprint
-  and destination location) is PR07. PR06 already binds every seed to the authenticated
-  manifest's fingerprint and geometry.
+- Persistent server-side presence, inboxes, accounts, cloud backup/history, and
+  trusted-device pairing remain explicitly OUT of scope — PR08 stays account-free with
+  no server-side file storage, no permanent trusted-device identity, no global transfer
+  directory, and no background cloud mailbox. Durable receive state is purely local.

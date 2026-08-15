@@ -95,6 +95,10 @@ type SenderEntry struct {
 	TotalSize   int64
 	CreatedAt   int64
 	UpdatedAt   int64
+	// HasResumeSecret is true when the record carries the transfer-scoped resume
+	// credential (V13-PR07); without it, authenticated cross-session resume is unavailable
+	// (legacy pre-PR07 state). Never printed as a value.
+	HasResumeSecret bool
 }
 
 // SenderStore owns the sender-state directory: record load/save with atomic replace,
@@ -235,14 +239,15 @@ func (s *SenderStore) List() ([]SenderEntry, error) {
 			total += f.Size
 		}
 		out = append(out, SenderEntry{
-			TransferID:  id,
-			RecordOK:    true,
-			Fingerprint: rec.ManifestFingerprint,
-			Paths:       rec.Paths,
-			Files:       len(rec.Files),
-			TotalSize:   total,
-			CreatedAt:   rec.CreatedAt,
-			UpdatedAt:   rec.UpdatedAt,
+			TransferID:      id,
+			RecordOK:        true,
+			Fingerprint:     rec.ManifestFingerprint,
+			Paths:           rec.Paths,
+			Files:           len(rec.Files),
+			TotalSize:       total,
+			CreatedAt:       rec.CreatedAt,
+			UpdatedAt:       rec.UpdatedAt,
+			HasResumeSecret: rec.ResumeSecret != nil,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].TransferID < out[j].TransferID })

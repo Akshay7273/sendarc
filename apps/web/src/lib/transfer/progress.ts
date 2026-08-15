@@ -1,7 +1,12 @@
 import type { TransferRunState } from '@sendbeam/protocol';
 
 export interface TransferSnapshot {
+  /** Verified high-water (ACKed) bytes; on a resume this includes the reused baseline. */
   bytes: number;
+  /** Verified baseline reused from the authenticated durable checkpoint at resume start. */
+  reusedBytes: number;
+  /** New bytes durably ACKed during THIS session: bytes - reusedBytes (never negative). */
+  sessionBytes: number;
   total: number | undefined;
   rateBps: number;
   etaSeconds: number | undefined;
@@ -19,6 +24,10 @@ interface Sample {
  */
 export class ProgressTracker {
   private bytes = 0;
+  // V13-PR08: verified baseline reused from the authenticated durable checkpoint. Anchored
+  // by setReused BEFORE the first new block, so the first rate sample sits exactly on the
+  // checkpoint and the reused jump is never counted as transferred bytes.
+  private reusedBytes = 0;
   private totalBytes: number | undefined;
   private rateBps = 0;
   private state: TransferRunState = 'running';
@@ -34,6 +43,15 @@ export class ProgressTracker {
 
   setTotal(total: number): void {
     this.totalBytes = total;
+  }
+
+  /**
+   * V13-PR08: anchor the verified baseline reused from the authenticated durable
+   * checkpoint. The engine reports it once, before the first new block is ACKed, so the
+   * session rate measures only this session's advancement (never the reused jump).
+   */
+  setReused(reused: number): void {
+    this.reusedBytes = Math.max(0, reused);
   }
 
   update(acknowledgedBytes: number): TransferSnapshot {
@@ -70,6 +88,8 @@ export class ProgressTracker {
         : undefined;
     return {
       bytes: this.bytes,
+      reusedBytes: this.reusedBytes,
+      sessionBytes: Math.max(0, this.bytes - this.reusedBytes),
       total: this.totalBytes,
       rateBps: this.rateBps,
       etaSeconds,

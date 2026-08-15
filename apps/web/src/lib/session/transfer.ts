@@ -10,7 +10,11 @@
  * have their own tests, and the whole path is covered by the e2e transfer.
  */
 
-import { deriveResumeRoot, type RendezvousResult } from '@sendbeam/protocol';
+import {
+  decodeResumeSecretEnvelope,
+  deriveResumeRoot,
+  type RendezvousResult,
+} from '@sendbeam/protocol';
 import { WakeLockManager } from './wake-lock.js';
 import type { SignalChannel } from '../signaling/client.js';
 import { SignalAuthenticator } from '../transfer/authed-signaling.js';
@@ -32,6 +36,7 @@ import {
 import type {
   HostToWorker,
   ReceiveDestinationSpec,
+  ResumeAttempt,
   SessionCrypto,
   WorkerToHost,
 } from '../transfer/wire.js';
@@ -93,6 +98,12 @@ export interface SendOptions {
   transferId?: string;
   /** How this send's source can be reopened after an interruption (persisted with the record). */
   reattachment?: SenderReattachment;
+  /**
+   * V13-PR08: explicit cross-session resume. The host decodes the locally persisted
+   * credential and passes only the decoded secret to the worker, which runs resume-auth-v1
+   * with the peer strictly before reusing any durable progress.
+   */
+  resumeAttempt?: HostResumeAttempt;
   /** Operator-published ICE servers; omitting keeps the bundled default STUN. */
   iceServers?: RTCIceServer[];
 }
@@ -112,6 +123,9 @@ export function runSend(
       files: opts.files,
       ...(opts.transferId !== undefined ? { transferId: opts.transferId } : {}),
       ...(opts.reattachment !== undefined ? { reattachment: opts.reattachment } : {}),
+      ...(opts.resumeAttempt !== undefined
+        ? { resumeAttempt: await hostResumeAttempt(opts.resumeAttempt) }
+        : {}),
       // V13-PR07: the main thread derives the narrow transient resume root from the
       // ORIGINAL session master and passes only that root to the worker — never the master.
       ...(await resumeRootOf(rendezvous)),
@@ -125,7 +139,7 @@ export function runReceive(
   rendezvous: RendezvousResult,
   signaling: SignalChannel,
   destination: ReceiveDestinationSpec = { kind: 'auto' },
-  opts: { iceServers?: RTCIceServer[] } = {},
+  opts: { iceServers?: RTCIceServer[]; resumeAttempt?: HostResumeAttempt } = {},
 ): TransferController {
   return run(rendezvous, signaling, {
     role: 'receive',
@@ -133,6 +147,9 @@ export function runReceive(
     start: async () => ({
       kind: 'start-recv',
       destination,
+      ...(opts.resumeAttempt !== undefined
+        ? { resumeAttempt: await hostResumeAttempt(opts.resumeAttempt) }
+        : {}),
       // V13-PR07: the main thread derives the narrow transient resume root from the
       // ORIGINAL session master and passes only that root to the worker — never the master.
       ...(await resumeRootOf(rendezvous)),
@@ -401,6 +418,9 @@ function run(
             return;
           case 'progress':
             progress.update(msg.bytes);
+            // V13-PR08: anchor the verified baseline reused from the authenticated
+            // checkpoint (reported before the first new block).
+            if (msg.reusedBytes !== undefined) progress.setReused(msg.reusedBytes);
             return;
           case 'manifest':
             total = msg.totalSize;
@@ -609,4 +629,26 @@ function crypto(r: RendezvousResult): SessionCrypto {
  */
 async function resumeRootOf(r: RendezvousResult): Promise<{ resumeRoot: Uint8Array }> {
   return { resumeRoot: await deriveResumeRoot(r.master) };
+}
+
+/**
+ * V13-PR08: the host-side resume attempt — the persisted credential envelope stays on the
+ * main thread; only the decoded secret crosses into the worker.
+ */
+export interface HostResumeAttempt {
+  transferId: string;
+  manifestFingerprint: string;
+  role: 'offerer' | 'joiner';
+  /** The persisted opaque credential envelope (journal or sender record). */
+  envelope: import('@sendbeam/protocol').ResumeSecretEnvelope;
+}
+
+/** Strictly decode the persisted credential envelope; a missing/invalid one fails closed. */
+async function hostResumeAttempt(a: HostResumeAttempt): Promise<ResumeAttempt> {
+  return {
+    transferId: a.transferId,
+    manifestFingerprint: a.manifestFingerprint,
+    role: a.role,
+    resumeSecret: decodeResumeSecretEnvelope(a.envelope),
+  };
 }

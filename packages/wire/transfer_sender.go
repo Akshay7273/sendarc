@@ -65,7 +65,12 @@ type SenderOptions struct {
 	// OnProgress reports bytes acknowledged after verify-and-sink.
 	OnProgress     func(acknowledgedBytes int64)
 	OnFileProgress func(fileIdx int, fileBytes, acknowledgedBytes int64)
-	OnStateChange  func(TransferState)
+	// OnResume reports the verified baseline reused from the authenticated durable
+	// checkpoint at resume start (the receiver's validated haveBlocks claim), invoked ONCE
+	// before any block is sent. The host anchors its session rate on this baseline so the
+	// reused jump is never counted as transferred bytes: sessionBytes = acknowledged - reused.
+	OnResume      func(reusedBytes int64)
+	OnStateChange func(TransferState)
 	// OnManifest, when set, is called with the validated manifest immediately before its
 	// frame is transmitted. It lets the caller make sender-side state durable — the stable
 	// transfer id and canonical source identity — strictly before the manifest can
@@ -280,6 +285,22 @@ func (s *Sender) Run(ctx context.Context) (string, error) {
 	if s.transferID != "" {
 		if err := s.waitResume(); err != nil {
 			return "", err
+		}
+		// V13-PR08 progress contract: surface the verified baseline reused from the
+		// authenticated checkpoint immediately — before any block is sent — so the host
+		// anchors its session rate on it and never counts the reused jump as transferred.
+		if s.o.OnResume != nil {
+			reusedTotal := int64(0)
+			for fileIdx, have := range s.resumePlan {
+				committed := int64(have) * int64(s.blockSize)
+				if have >= entries[fileIdx].Blocks {
+					committed = entries[fileIdx].Size
+				}
+				reusedTotal += committed
+			}
+			if reusedTotal > 0 {
+				s.o.OnResume(reusedTotal)
+			}
 		}
 	}
 
