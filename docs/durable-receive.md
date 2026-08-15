@@ -280,9 +280,46 @@ sendbeam transfers discard  <id>... [--out DIR] [--all] [--yes]
   unlimited.
 - Cleanup only ever touches the `.sendbeam` directory of the selected out directory.
 
-## Deferred limits (later v1.3 PRs)
+## Resume support limits (v1.3 release gate)
+
+What a reload / process death / restart does and does not preserve, exactly:
+
+**Survives (resumable):**
+
+- Verified + checkpointed partial data and the journal (browser: OPFS partials + IDB
+  journal/lease; CLI: `.part` files + `<transferId>.json`), at the last durable
+  checkpoint. A resume re-sends only whole missing blocks beyond the committed high-water
+  (block granularity — never sub-block), and the whole-file digest is always verified at
+  the end.
+- The opaque resume-credential envelope (browser: in the journal/sender record; CLI: in
+  the journal/record), enabling an authenticated cross-session resume with a fresh key
+  epoch. Nothing else secret is ever persisted.
+- Sender records + reattachment (persisted native path or browser handle, else explicit
+  re-selection); the canonical source identity is revalidated before any progress is
+  reused.
+
+**Does NOT survive / is not supported:**
+
+- The un-checkpointed in-flight tail (crash before the durability barrier): re-transferred
+  on resume — safe, never corruption.
+- Browser direct-file / direct-directory saves: capability-gated, not reload-durable; the
+  ordinary Save-to selector is disabled while an interrupted-journal resume is armed.
+- Safari async-sink granularity: a file's checkpoint advances only when its whole stream
+  closes (honest granularity), never block-by-block.
+- Sender source across devices: reattachment is same-browser + same-origin only, or an
+  explicit re-selection; a changed source is a hard resume refusal. There is no
+  cross-device resume.
+- Legacy pre-PR07 records/journals without a resume credential: durable data may stay
+  locally, authenticated cross-session resume is unavailable, and an explicit fresh
+  restart/discard is the only path (nothing is fabricated, nothing silently reused).
+- Mobile browsers: best-effort, following the engine's OPFS/WebCrypto behavior.
+- ZIP archive sink above 4 GiB, and any cloud backup/history, accounts, inboxes, or
+  trusted-device pairing: all out of scope — durable state is purely local.
+
+## Out of scope (permanent)
 
 - Persistent server-side presence, inboxes, accounts, cloud backup/history, and
-  trusted-device pairing remain explicitly OUT of scope — PR08 stays account-free with
-  no server-side file storage, no permanent trusted-device identity, no global transfer
-  directory, and no background cloud mailbox. Durable receive state is purely local.
+  trusted-device pairing remain explicitly OUT of scope — the product stays account-free
+  with no server-side file storage, no permanent trusted-device identity, no global
+  transfer directory, and no background cloud mailbox. Durable receive state is purely
+  local.
