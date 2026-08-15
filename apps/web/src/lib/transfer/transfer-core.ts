@@ -10,6 +10,7 @@
 
 import {
   RESUME_AUTH_VERSION,
+  ResumePreamble,
   TransferSender,
   TransferReceiver,
   TransferError,
@@ -19,6 +20,7 @@ import {
   manifestFingerprint,
   type Digest,
   type Destination,
+  type DirectionalKey,
   type FileEntry,
   type FileSource,
   type Manifest,
@@ -70,6 +72,10 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
           transportChanged(): void | Promise<void>;
         }
       | undefined;
+    // V13-PR08: while a resume preamble is in flight, inbound frames feed the preamble, not
+    // the engine; frames arriving after it settles but before the engine is installed are
+    // queued and replayed in order, so no frame is dropped or misrouted.
+    let preamble: ResumePreamble | undefined;
     let started = false;
     const pending: Uint8Array[] = [];
     const pendingControls: Array<'pause' | 'resume' | 'cancel'> = [];
@@ -132,7 +138,8 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
           return;
         case 'inbound-frame': {
           const frame = new Uint8Array(msg.frame);
-          if (engine) consume(engine, frame);
+          if (preamble && !preamble.isSettled()) void preamble.handle(frame);
+          else if (engine) consume(engine, frame);
           else pending.push(frame);
           return;
         }
@@ -142,6 +149,10 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
           return;
         case 'cancel':
           if (engine) engine.cancel(msg.reason);
+          // An in-flight resume preamble must settle when the peer tears down, exactly as
+          // the CLI driver's ctx-bound wait aborts; a queued cancel that only reaches the
+          // future engine would leave the handshake hanging forever.
+          else if (preamble && !preamble.isSettled()) preamble.cancel();
           else pendingControls.push('cancel');
           return;
         case 'control':
@@ -159,13 +170,45 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
         const sources = msg.files.map((file) => deps.fileSource(file));
         let manifestFiles: FileEntry[] = [];
         let transferId = msg.transferId ?? '';
+        // V13-PR08: an explicit cross-session resume runs resume-auth-v1 with the peer
+        // strictly before the transfer engine starts; only a successful mutual
+        // authentication reuses the record's verified progress under a FRESH resumed key
+        // epoch (never the session keys for the transfer).
+        let sendDir = msg.sendDir;
+        let recvDir = msg.recvDir;
+        let sendCounter = msg.sendCounter;
+        let recvCounter = msg.recvCounter;
+        // V13-PR08 progress contract: verified baseline reused from the authenticated
+        // checkpoint, anchored by the engine's onResume before any new block is ACKed.
+        let reusedBaseline = 0;
+        const progressMsg = (bytes: number): WorkerToHost => ({
+          kind: 'progress',
+          bytes,
+          ...(reusedBaseline > 0 ? { reusedBytes: reusedBaseline } : {}),
+        });
+        if (msg.resumeAttempt !== undefined) {
+          // V13-PR08 role binding: a sender resume attempt must carry the offerer role; a
+          // mismatched persisted/host role is a hard failure, never silently ignored.
+          if (msg.resumeAttempt.role !== 'offerer') {
+            throw new TransferError(
+              'integrity',
+              'a sender resume attempt must carry the offerer role',
+            );
+          }
+          const resumed = await runResumePreamble(msg, send, (p) => (preamble = p));
+          sendDir = resumed.sendDir;
+          recvDir = resumed.recvDir;
+          sendCounter = resumed.sendCounter;
+          recvCounter = resumed.recvCounter;
+          transferId = msg.resumeAttempt.transferId;
+        }
         const sender = new TransferSender({
           files: sources,
           send,
-          sendDir: msg.sendDir,
-          recvDir: msg.recvDir,
-          sendCounterStart: msg.sendCounter,
-          recvCounterStart: msg.recvCounter,
+          sendDir,
+          recvDir,
+          sendCounterStart: sendCounter,
+          recvCounterStart: recvCounter,
           createDigest: deps.createDigest,
           // Mint a stable transfer id so the manifest opts into resumption and a crashed
           // receiver can journal and resume this exact transfer (V13-PR03). A restart
@@ -174,8 +217,17 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
             transferId = mintTransferId();
             return transferId;
           },
-          ...(msg.transferId !== undefined ? { transferId: msg.transferId } : {}),
-          onProgress: (bytes) => post({ kind: 'progress', bytes }),
+          // Fresh sends carry `msg.transferId`; an explicit cross-session resume reuses the
+          // interrupted id from the attempt (set above) so the manifest binds to the same
+          // journal/fingerprint the peer authenticated. Omitting it would mint a NEW id and
+          // silently abandon the interrupted transfer's durable state.
+          ...(transferId !== '' ? { transferId } : {}),
+          onResume: (reused) => {
+            reusedBaseline = reused;
+            // Surface the verified checkpoint immediately — before the first new block.
+            post(progressMsg(reused));
+          },
+          onProgress: (bytes) => post(progressMsg(bytes)),
           onManifest: async (manifest) => {
             manifestFiles = manifest.files;
             const store = deps.senderRecords;
@@ -222,18 +274,63 @@ export function runTransferCore(port: Port, deps: TransferCoreDeps): Promise<voi
         const destination = deps.createDestination
           ? deps.createDestination(_msg.destination)
           : sinkFactoryDestination(deps.createSink);
+        // V13-PR08: an explicit cross-session resume runs resume-auth-v1 with the peer
+        // strictly before the transfer engine starts; only after mutual authentication may
+        // the pre-selected interrupted journal's verified progress be advertised, under a
+        // FRESH resumed key epoch.
+        let sendDir = _msg.sendDir;
+        let recvDir = _msg.recvDir;
+        let sendCounter = _msg.sendCounter;
+        let recvCounter = _msg.recvCounter;
+        // V13-PR08 progress contract: verified baseline reused from the authenticated
+        // checkpoint, anchored by the engine's onResume before any new block is ACKed.
+        let reusedBaseline = 0;
+        const progressMsg = (bytes: number): WorkerToHost => ({
+          kind: 'progress',
+          bytes,
+          ...(reusedBaseline > 0 ? { reusedBytes: reusedBaseline } : {}),
+        });
+        if (_msg.resumeAttempt !== undefined) {
+          // V13-PR08 role binding: a receiver resume attempt must carry the joiner role; a
+          // mismatched persisted/host role is a hard failure, never silently ignored.
+          if (_msg.resumeAttempt.role !== 'joiner') {
+            throw new TransferError(
+              'integrity',
+              'a receiver resume attempt must carry the joiner role',
+            );
+          }
+          // The user pre-selected this interrupted journal locally; its verified progress
+          // may be reused only after resume-auth succeeds in this session.
+          if (isBrowserDestination(destination) && destination.expectResumeFor) {
+            destination.expectResumeFor(_msg.resumeAttempt.transferId);
+          }
+          const resumed = await runResumePreamble(_msg, send, (p) => (preamble = p));
+          sendDir = resumed.sendDir;
+          recvDir = resumed.recvDir;
+          sendCounter = resumed.sendCounter;
+          recvCounter = resumed.recvCounter;
+          if (isBrowserDestination(destination) && destination.durableMeta) {
+            // Only now may the pre-selected journal's verified progress be reused.
+            destination.authorizeResume?.();
+          }
+        }
         // The resume seam mirrors the CLI driver (durable.go): a shared, mutable resume
         // seed is filled from onManifestSet — after the destination prepares against the
         // authenticated manifest — and the wire receiver applies it before streaming.
         const receiverOpts: ConstructorParameters<typeof TransferReceiver>[0] = {
           send,
-          sendDir: _msg.sendDir,
-          recvDir: _msg.recvDir,
-          sendCounterStart: _msg.sendCounter,
-          recvCounterStart: _msg.recvCounter,
+          sendDir,
+          recvDir,
+          sendCounterStart: sendCounter,
+          recvCounterStart: recvCounter,
           createDigest: deps.createDigest,
           destination,
-          onProgress: (bytes) => post({ kind: 'progress', bytes }),
+          onResume: (reused) => {
+            reusedBaseline = reused;
+            // Surface the verified checkpoint immediately — before the first new block.
+            post(progressMsg(reused));
+          },
+          onProgress: (bytes) => post(progressMsg(bytes)),
           onStateChange: (state) => post({ kind: 'state', state }),
           onManifestSet: async (manifest) => {
             post({
@@ -331,6 +428,56 @@ function mintTransferId(): string {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
   return bytesToHex(bytes);
+}
+
+/**
+ * V13-PR08: run resume-auth-v1 with the peer over the sealed session channel, strictly
+ * before the transfer engine starts. The resume-auth messages travel as FrameResumeAuth
+ * frames sealed under the SESSION directional keys; the engine then runs under the FRESH
+ * resumed key epoch derived from the mutually authenticated resume master, with counters
+ * starting at 0 (safe only because the keys+salts are new). Inbound frames arriving while
+ * the preamble is in flight are routed to it by the message handler; frames arriving after
+ * it settles but before the engine is installed are queued and replayed by `bind`.
+ *
+ * `setPreamble` publishes the in-flight preamble to the inbound handler so frames reach it.
+ */
+async function runResumePreamble(
+  msg: StartSendMsg | StartRecvMsg,
+  send: (frame: Uint8Array) => void,
+  setPreamble: (p: ResumePreamble | undefined) => void,
+): Promise<{
+  sendDir: DirectionalKey;
+  recvDir: DirectionalKey;
+  sendCounter: number;
+  recvCounter: number;
+}> {
+  const attempt = msg.resumeAttempt!;
+  const preamble = new ResumePreamble({
+    role: attempt.role,
+    transferId: attempt.transferId,
+    fingerprint: attempt.manifestFingerprint,
+    resumeSecret: attempt.resumeSecret,
+    send,
+    sendDir: msg.sendDir,
+    recvDir: msg.recvDir,
+    sendCounter: msg.sendCounter,
+    recvCounter: msg.recvCounter,
+  });
+  setPreamble(preamble);
+  try {
+    await preamble.start();
+    const result = await preamble.done();
+    if (result === undefined) {
+      throw preamble.result(); // throws the terminal error
+    }
+    // The offerer sends on O2J and receives on J2O; the joiner is the mirror. The resumed
+    // result is role-agnostic directional keys; pick this peer's send/recv by its role.
+    const sendDir: DirectionalKey = attempt.role === 'offerer' ? result.keys.o2j : result.keys.j2o;
+    const recvDir: DirectionalKey = attempt.role === 'offerer' ? result.keys.j2o : result.keys.o2j;
+    return { sendDir, recvDir, sendCounter: result.sendCounter, recvCounter: result.recvCounter };
+  } finally {
+    setPreamble(undefined);
+  }
 }
 
 /**

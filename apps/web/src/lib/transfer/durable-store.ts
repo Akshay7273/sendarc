@@ -129,6 +129,14 @@ export type JournalLoad =
 /** Transactional journal + lease metadata store. All writes are atomic IDB transactions. */
 export interface DurableJournalStore {
   loadJournal(transferId: string): Promise<JournalLoad>;
+  /**
+   * Enumerate locally interrupted receive journals (V13-PR08). Corrupt journals are reported
+   * with `kind: 'corrupt'` so the UI can offer explicit discard instead of guessing. This is
+   * deliberately the ONLY discovery surface — there is no server-side transfer directory.
+   */
+  listJournals(): Promise<
+    Array<{ transferId: string; kind: 'ok' | 'corrupt'; journal?: DurableJournal; error?: string }>
+  >;
   /** Create and persist a fresh zero-checkpoint journal (validates + encodes). */
   createJournal(
     transferId: string,
@@ -205,6 +213,7 @@ interface IDBObjectStoreLike {
   put(value: unknown, key: string): IDBRequestLike;
   delete(key: string): IDBRequestLike;
   getAll(): IDBRequestLike<unknown[]>;
+  getAllKeys(): IDBRequestLike<unknown[]>;
 }
 interface IDBTransactionLike {
   objectStore(name: string): IDBObjectStoreLike;
@@ -234,6 +243,22 @@ function transactionDone(tx: IDBTransactionLike): Promise<void> {
     tx.onerror = () => reject(new Error('indexeddb transaction failed'));
     tx.onabort = () => reject(new Error('indexeddb transaction aborted'));
   });
+}
+
+/**
+ * Recover the transferId from an encoded journal WITHOUT full validation, so a corrupt
+ * journal can still be listed and explicitly discarded (never guessed, never repaired).
+ * Returns '' when the bytes are not a journal-shaped record.
+ */
+function encodedJournalTransferId(bytes: Uint8Array): string {
+  try {
+    const obj = JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
+    const id = obj.transferId;
+    if (typeof id !== 'string') return '';
+    return /^[0-9a-f]{32}$/.test(id) ? id : '';
+  } catch {
+    return '';
+  }
 }
 
 /** The browser journal/lease store over IndexedDB. */
@@ -284,6 +309,51 @@ class IndexedDbDurableStore implements DurableJournalStore {
     } catch (e) {
       return { kind: 'corrupt', error: e instanceof Error ? e.message : String(e) };
     }
+  }
+
+  async listJournals(): Promise<
+    Array<{ transferId: string; kind: 'ok' | 'corrupt'; journal?: DurableJournal; error?: string }>
+  > {
+    const db = await this.db();
+    const tx = db.transaction([DURABLE_JOURNALS_STORE], 'readonly');
+    // The completion promise is created BEFORE issuing requests so the oncomplete handler is
+    // registered before the transaction can complete (see attachResumeSecret for the same
+    // ordering rule).
+    const done = transactionDone(tx);
+    const store = tx.objectStore(DURABLE_JOURNALS_STORE);
+    // Zip keys and values in one readonly transaction. The IndexedDB key IS the transferId
+    // (all journal writes key by it), so even a fully unparseable corrupt entry keeps its id
+    // for explicit discard — nothing is guessed or repaired.
+    const [keys, all] = (await Promise.all([
+      requestResult(store.getAllKeys()),
+      requestResult(store.getAll()),
+    ])) as [unknown[], unknown[]];
+    await done;
+    const out: Array<{
+      transferId: string;
+      kind: 'ok' | 'corrupt';
+      journal?: DurableJournal;
+      error?: string;
+    }> = [];
+    for (let i = 0; i < Math.max(keys.length, all.length); i++) {
+      const key = keys[i];
+      const entry = all[i];
+      const transferId =
+        typeof key === 'string' && /^[0-9a-f]{32}$/.test(key)
+          ? key
+          : encodedJournalTransferId(journalBytes(entry));
+      if (transferId === '') continue; // not a journal-shaped record; skip silently
+      try {
+        out.push({ transferId, kind: 'ok', journal: await decodeJournal(journalBytes(entry)) });
+      } catch (e) {
+        out.push({
+          transferId,
+          kind: 'corrupt',
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+    return out;
   }
 
   async createJournal(

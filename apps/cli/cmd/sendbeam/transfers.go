@@ -1,12 +1,17 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
+	"github.com/sendbeam/cli/internal/rendezvous"
 	clitransfer "github.com/sendbeam/cli/internal/transfer"
+	"github.com/sendbeam/wire"
 )
 
 // transfersUsage prints the management-command help.
@@ -15,20 +20,29 @@ func transfersUsage(w *os.File) {
 	_, _ = fmt.Fprintln(w, "Usage:")
 	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam transfers list")+" [--out DIR]")
 	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam transfers inspect")+" <id> [--out DIR]")
-	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam transfers resume")+" <id> [--out DIR]")
+	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam transfers resume")+" <id> --code <code> [--out DIR]")
 	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam transfers discard")+" <id>... [--out DIR] [--all] [--yes]")
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, s.dim("Manage durable receive state kept under DIR/.sendbeam (default .):"))
 	_, _ = fmt.Fprintln(w, "  list     show every journal, unreadable journal, and orphaned partial tree")
 	_, _ = fmt.Fprintln(w, "  inspect  validate one journal against its partial data (never deletes)")
-	_, _ = fmt.Fprintln(w, "  resume   verify a journal is resumable and how to resume it")
+	_, _ = fmt.Fprintln(w, "  resume   resume an interrupted transfer: join the sender's fresh rendezvous")
+	_, _ = fmt.Fprintln(w, "           with --code and authenticate the original sender (PR07 resume-auth)")
+	_, _ = fmt.Fprintln(w, "           before any verified progress is reused (fresh keys every attempt)")
 	_, _ = fmt.Fprintln(w, "  discard  explicitly delete a journal and its partials (idempotent)")
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, s.dim("Session classes (used consistently in list statuses):"))
+	_, _ = fmt.Fprintln(w, "  reconnect      same live transfer; transport direct<->relay / outage recovery")
+	_, _ = fmt.Fprintln(w, "  durable resume  process/session died; both peers authenticate via resume-auth,")
+	_, _ = fmt.Fprintln(w, "                 then continue from the verified checkpoint with fresh keys")
+	_, _ = fmt.Fprintln(w, "  restart        no compatible credential; start from zero, old state kept")
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, s.dim("Sender records (kept under the user config dir):"))
 	_, _ = fmt.Fprintln(w, "  list     also shows interrupted sends and their source paths")
 	_, _ = fmt.Fprintln(w, "  discard  also removes the matching sender record (idempotent)")
 	_, _ = fmt.Fprintln(w)
-	_, _ = fmt.Fprintln(w, s.dim("Discard flags:"))
+	_, _ = fmt.Fprintln(w, s.dim("Resume/other flags:"))
+	_, _ = fmt.Fprintln(w, "  --code   fresh invite code from the sender's re-run (resume)")
 	_, _ = fmt.Fprintln(w, "  --all    discard every journal and orphaned partial tree in the store")
 	_, _ = fmt.Fprintln(w, "  --yes    confirm --all without prompting")
 }
@@ -110,10 +124,12 @@ func transfersList(args []string) int {
 			if entry.Files > 1 {
 				label = fmt.Sprintf("%s (%d files)", label, entry.Files)
 			}
+			status := durableStatus(entry)
 			fmt.Fprintf(os.Stderr, "  %s  %s committed / %s total · updated %s\n",
 				s.cyan(label),
 				humanBytes(entry.CommittedBytes), humanBytes(entry.TotalSize),
 				formatTime(entry.UpdatedAt))
+			fmt.Fprintf(os.Stderr, "      %s\n", s.dim(status+" · run: sendbeam transfers "+resumeHint(entry)))
 		}
 	}
 	// Interrupted sends: the sender-side records of transfers whose manifest was
@@ -144,6 +160,10 @@ func transfersList(args []string) int {
 		fmt.Fprintf(os.Stderr, "  %s  %d file(s) · %s · updated %s\n",
 			s.cyan(entry.TransferID), entry.Files, humanBytes(entry.TotalSize),
 			formatTime(entry.UpdatedAt))
+		status := senderStatus(entry)
+		if status != "" {
+			fmt.Fprintf(os.Stderr, "      %s\n", s.dim(status))
+		}
 		for _, p := range entry.Paths {
 			fmt.Fprintf(os.Stderr, "      %s\n", s.dim(p))
 		}
@@ -202,12 +222,60 @@ func transfersInspect(args []string) int {
 	return 0
 }
 
+// durableStatus renders the receiver-side session class for one journal (V13-PR08).
+func durableStatus(entry clitransfer.DurableEntry) string {
+	switch {
+	case !entry.PartialOK:
+		return "Partial data missing — inspect/discard"
+	case !entry.HasResumeSecret:
+		return "Legacy — restart required"
+	default:
+		return "Ready to resume"
+	}
+}
+
+// resumeHint renders the management command for one journal's next step.
+func resumeHint(entry clitransfer.DurableEntry) string {
+	switch {
+	case !entry.PartialOK:
+		return "inspect " + entry.TransferID + ""
+	case !entry.HasResumeSecret:
+		return "discard " + entry.TransferID + ""
+	default:
+		return "resume " + entry.TransferID + " --code <code>"
+	}
+}
+
+// senderStatus renders the sender-side session class for one record (V13-PR08).
+func senderStatus(entry clitransfer.SenderEntry) string {
+	if !entry.HasResumeSecret {
+		return "Legacy — restart required (no resume credential; discard to send fresh)"
+	}
+	return "Ready to resume (re-run the same send command, then resume on the receiver)"
+}
+
+// transfersResume resumes an interrupted transfer (V13-PR08): the user pre-selected the
+// interrupted journal locally, joins the sender's FRESH rendezvous with --code, and the
+// two peers authenticate continuity via resume-auth before any verified progress is reused.
+// Verified progress is advertised only after mutual authentication; the transfer then runs
+// under a fresh key epoch with fresh counters.
 func transfersResume(args []string) int {
 	fs := flag.NewFlagSet("transfers resume", flag.ExitOnError)
 	outDir := fs.String("out", ".", "directory whose .sendbeam store to resume from")
+	code := fs.String("code", "", "fresh invite code from the sender's re-run of `sendbeam send`")
+	server := fs.String("server", defaultServer, "signaling server URL")
+	insecure := fs.Bool("insecure-skip-verify", false, "skip TLS verification (self-signed dev certs only)")
+	relayOnly := fs.Bool("relay-only", false, "force the encrypted WebSocket relay")
+	var iceServer iceServerList
+	fs.Var(&iceServer, "ice-server", "STUN server URL for direct-path candidates (repeatable; default stun:stun.l.google.com:19302)")
 	positionals := parseArgs(fs, args)
 	if len(positionals) != 1 {
 		fmt.Fprintln(os.Stderr, "sendbeam transfers resume: exactly one transfer id is required")
+		return 2
+	}
+	if *code == "" {
+		s0 := newStyle(os.Stderr)
+		fmt.Fprintln(os.Stderr, "sendbeam transfers resume: --code is required — the sender re-runs "+s0.bold("sendbeam send")+" (same paths) and shares the fresh invite code")
 		return 2
 	}
 	id := positionals[0]
@@ -216,12 +284,13 @@ func transfersResume(args []string) int {
 		fmt.Fprintf(os.Stderr, "sendbeam transfers resume: %s\n", err)
 		return 1
 	}
+	s := newStyle(os.Stderr)
 	ins, err := store.Inspect(id)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sendbeam transfers resume: %s\n", err)
+		fmt.Fprintf(os.Stderr, "  %s\n", s.dim("nothing was deleted; discard the state explicitly to remove it"))
 		return 1
 	}
-	s := newStyle(os.Stderr)
 	if !ins.Resumable {
 		fmt.Fprintln(os.Stderr, s.cross("Transfer "+id+" is not resumable:"))
 		for _, problem := range ins.Problems {
@@ -230,13 +299,106 @@ func transfersResume(args []string) int {
 		fmt.Fprintln(os.Stderr, s.dim("Nothing was deleted. Discard the state to start a fresh receive."))
 		return 1
 	}
-	fmt.Fprintln(os.Stderr, s.check(fmt.Sprintf("Transfer %s is resumable at %s committed.", id, humanBytes(ins.Committed))))
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, s.dim("To resume: re-run "+s.bold("sendbeam receive <code>")+" in the same room where the sender is still connected."))
-	fmt.Fprintln(os.Stderr, s.dim("The receiver detects the matching journal from the authenticated manifest and continues from its checkpoint automatically."))
-	fmt.Fprintln(os.Stderr, s.dim("The invite code is never stored, so a standalone resume without the sender is not possible yet."))
-	fmt.Fprintln(os.Stderr, s.dim("Cross-session authenticated resume with fresh traffic keys is a later milestone; until then every resume re-derives a fresh key from a new handshake."))
+	j := ins.Journal
+	if j.ResumeSecret == nil {
+		fmt.Fprintln(os.Stderr, s.cross("Transfer "+id+" has no resume credential (legacy pre-PR07 state); authenticated cross-session resume is unavailable."))
+		fmt.Fprintf(os.Stderr, "  %s\n", s.dim("The verified partial data is kept; restart from zero explicitly with: sendbeam transfers discard "+id+" --out "+*outDir))
+		return 1
+	}
+	// The journal is strictly validated on load (version + exact 64-hex value), so this
+	// decode is a belt-and-braces re-check before the secret enters the handshake.
+	secret, err := wire.DecodeResumeSecretEnvelope(&wire.ResumeSecretEnvelope{
+		Version: j.ResumeSecret.Version,
+		Value:   j.ResumeSecret.Value,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sendbeam transfers resume: transfer %s has a corrupt resume credential (%v); refusing to reuse its progress — nothing was deleted\n", id, err)
+		return 1
+	}
+	ice, err := iceServers(iceServer)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sendbeam transfers resume: %s\n", err)
+		return 2
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	client, err := dial(ctx, *server, *insecure)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\n%s\n", s.cross("Failed: "+handshakeError(err)))
+		return 1
+	}
+	defer client.Close()
+
+	fmt.Fprintf(os.Stderr, "%s\n", s.dim("Resuming transfer "+id+" — joining the sender's fresh rendezvous "+normalizeCodeArg(*code)+" …"))
+	progress := newProgress(0)
+	caps := rendezvous.DefaultCaps()
+	caps.Features = append(caps.Features, wire.ResumeAuthCapability)
+	resumeCtx := &clitransfer.ResumeContext{
+		TransferID:          j.TransferID,
+		ManifestFingerprint: j.ManifestFingerprint,
+		Role:                wire.RoleJoiner,
+		ResumeSecret:        secret,
+	}
+	out, err := clitransfer.Run(ctx, client, clitransfer.Spec{
+		Session: rendezvous.Options{
+			Role:      rendezvous.RoleJoiner,
+			Code:      normalizeCodeArg(*code),
+			LocalCaps: &caps,
+			OnPhase:   phasePrinter(rendezvous.RoleJoiner),
+		},
+		DestDir:    *outDir,
+		ForceRelay: *relayOnly,
+		ICEServers: ice,
+		Resume:     resumeCtx,
+		OnResume: func(r clitransfer.ResumeResult) {
+			if r.Authenticated {
+				fmt.Fprintf(os.Stderr, "%s\n", s.check(fmt.Sprintf("Authenticated with the original sender — resuming %s from %s verified; %s remains to transfer.",
+					id, humanBytes(ins.Committed), humanBytes(ins.Total-ins.Committed))))
+			} else if r.Attempted {
+				fmt.Fprintln(os.Stderr, s.cyan("Authenticating the interrupted transfer with the sender …"))
+			} else if r.Skipped {
+				fmt.Fprintf(os.Stderr, "%s\n", s.yellow("The sender did not authenticate a resume; receiving a fresh transfer. Your interrupted state for "+id+" was kept."))
+			}
+		},
+		OnTransport: transportPrinter,
+		OnManifestSet: func(manifest wire.Manifest) {
+			progress.setTotal(manifest.TotalSize)
+			files := make([]progressFile, len(manifest.Files))
+			for i, file := range manifest.Files {
+				files[i] = progressFile{name: file.Name, size: file.Size}
+			}
+			progress.setFiles(files)
+			connectPrinter(fmt.Sprintf("Receiving %s (%s) …", labelFor(manifest), humanBytes(manifest.TotalSize)))()
+		},
+		OnFileProgress:   progress.reportFile,
+		OnResumeProgress: progress.setReused,
+		OnControls:       terminalControls(),
+		OnStateChange:    progress.setState,
+	})
+	progress.finish()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\n%s\n", s.cross("Failed: "+handshakeError(err)))
+		fmt.Fprintf(os.Stderr, "%s\n", s.dim("The interrupted state for "+id+" was kept; the sender record and partial data were not deleted."))
+		return 1
+	}
+	fmt.Println()
+	if len(out.Files) == 1 {
+		fmt.Println(s.check("Received " + s.bold(out.Name) + " (" + humanBytes(out.Size) + ") → " + out.Path + "."))
+	} else {
+		fmt.Println(s.check("Received " + s.bold(fmt.Sprintf("%d files", len(out.Files))) + " (" + humanBytes(out.Size) + ") → " + *outDir + "."))
+	}
+	fmt.Printf("  %s  %s\n", s.grey("SHA-256:"), out.Digest)
 	return 0
+}
+
+// labelFor names the manifest's first file or file count for progress headers.
+func labelFor(manifest wire.Manifest) string {
+	if len(manifest.Files) == 1 {
+		return manifest.Files[0].Name
+	}
+	return fmt.Sprintf("%d files", len(manifest.Files))
 }
 
 func transfersDiscard(args []string) int {

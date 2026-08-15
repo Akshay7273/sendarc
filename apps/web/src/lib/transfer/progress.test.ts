@@ -38,4 +38,74 @@ describe('ProgressTracker', () => {
     expect(resumed.rateBps).toBe(1000);
     expect(resumed.etaSeconds).toBe(2);
   });
+
+  // V13-PR08 progress contract: verified = reused + session, the checkpoint is surfaced
+  // before the first new block, and the rate/ETA measure only this session's advancement.
+  describe('resumed transfers (V13-PR08)', () => {
+    it('surfaces the verified checkpoint immediately and anchors the session rate on it', () => {
+      let now = 0;
+      const tracker = new ProgressTracker(100_000, () => now);
+      // The engine reports the reused baseline BEFORE the first new block is ACKed.
+      now = 1000;
+      tracker.setReused(68_000);
+      const baseline = tracker.snapshot();
+      expect(baseline.bytes).toBe(0); // no verified bytes reported yet
+      expect(baseline.reusedBytes).toBe(68_000);
+      expect(baseline.sessionBytes).toBe(0);
+      // The first verified sample lands exactly on the checkpoint.
+      now = 2000;
+      const first = tracker.update(68_000);
+      expect(first.bytes).toBe(68_000);
+      expect(first.reusedBytes).toBe(68_000);
+      expect(first.sessionBytes).toBe(0);
+      expect(first.rateBps).toBe(0); // the reused jump is NOT a transfer rate
+      // A new block is durably ACKed this session.
+      now = 3000;
+      const second = tracker.update(69_000);
+      expect(second.bytes).toBe(69_000);
+      expect(second.reusedBytes).toBe(68_000);
+      expect(second.sessionBytes).toBe(1000);
+      // 1000 bytes over 1s: the rate measures ONLY the session advancement.
+      expect(second.rateBps).toBe(1000);
+      expect(second.etaSeconds).toBe(31); // remaining verified / session rate
+    });
+
+    it('never regresses below the verified checkpoint and never counts stale callbacks', () => {
+      let now = 0;
+      const tracker = new ProgressTracker(100_000, () => now);
+      now = 1000;
+      tracker.setReused(68_000);
+      tracker.update(68_000);
+      now = 2000;
+      tracker.update(69_000);
+      // A stale callback below the checkpoint cannot move verified backwards.
+      now = 3000;
+      expect(tracker.update(50_000).bytes).toBe(69_000);
+      expect(tracker.snapshot().sessionBytes).toBe(1000);
+    });
+
+    it('zero-byte resume: 100% verified, 0 session bytes before terminal presentation', () => {
+      let now = 0;
+      const tracker = new ProgressTracker(68_000, () => now);
+      now = 1000;
+      tracker.setReused(68_000);
+      const snapshot = tracker.update(68_000);
+      expect(snapshot.bytes).toBe(68_000);
+      expect(snapshot.reusedBytes).toBe(68_000);
+      expect(snapshot.sessionBytes).toBe(0);
+      expect(snapshot.rateBps).toBe(0);
+      // ETA: no remaining verified bytes and no session rate — nothing left to transfer.
+      expect(snapshot.etaSeconds).toBeUndefined();
+    });
+
+    it('fresh transfers keep reusedBytes at zero and unchanged semantics', () => {
+      let now = 0;
+      const tracker = new ProgressTracker(1000, () => now);
+      tracker.update(0);
+      now = 1000;
+      const snapshot = tracker.update(500);
+      expect(snapshot.reusedBytes).toBe(0);
+      expect(snapshot.sessionBytes).toBe(500);
+    });
+  });
 });

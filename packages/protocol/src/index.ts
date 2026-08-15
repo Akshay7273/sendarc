@@ -27,3 +27,4 @@ export * from './errors.js';
 export * from './ice-servers.js';
 export * from './journal.js';
 export * from './resume-auth.js';
+export * from './resume-preamble.js';

@@ -10,6 +10,7 @@ import {
   phaseLabel,
   progressLabel,
   progressPercent,
+  progressResumedLabel,
   rateLabel,
   sasFingerprint,
 } from './present.js';
@@ -120,6 +121,21 @@ describe('progressLabel', () => {
   });
   it('shows 100% at completion', () => {
     expect(progressLabel(4_194_304, 4_194_304)).toBe('4 MiB / 4 MiB (100%)');
+  });
+});
+
+describe('progressResumedLabel (V13-PR08)', () => {
+  it('separates the reused checkpoint from this-session bytes', () => {
+    // 68 MiB of a 100 MiB transfer was verified before the interruption; 4 MiB moved this
+    // session → verified = 72 MiB, reused = 68 MiB, session = 4 MiB.
+    expect(progressResumedLabel(72 * 2 ** 20, 68 * 2 ** 20, 100 * 2 ** 20)).toBe(
+      'Resuming from 72% verified — 68 MiB reused · 4 MiB transferred this session',
+    );
+  });
+  it('zero-byte resume shows 100% verified with no session bytes', () => {
+    expect(progressResumedLabel(68 * 2 ** 20, 68 * 2 ** 20, 68 * 2 ** 20)).toBe(
+      'Resuming from 100% verified — 68 MiB reused · 0 B transferred this session',
+    );
   });
 });
 

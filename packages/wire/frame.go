@@ -48,6 +48,11 @@ const (
 	FrameDone        uint8 = 10
 	FrameFail        uint8 = 11
 	FrameResumeState uint8 = 12
+	// FrameResumeAuth carries one resume-auth message (EncodeResumeMessage JSON) sealed
+	// under the SESSION directional keys, exchanged strictly before the transfer engine
+	// starts (V13-PR08). It is never used for transfer protocol frames; after mutual
+	// authentication the transfer runs under the fresh resumed key epoch.
+	FrameResumeAuth uint8 = 13
 )
 
 // encodeFrameHeader encodes h into a fresh 16-byte buffer.
