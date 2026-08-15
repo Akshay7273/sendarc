@@ -92,6 +92,43 @@ Not yet CI-tested. iOS Safari and Android Chrome share the WebKit/Chromium engin
 so WebRTC/WebCrypto/OPFS are expected to work, but file-handle behavior and OPFS support
 differ by version; treat mobile as best-effort until the opt-in suite covers it.
 
+## Durable resume
+
+Cross-session durable resume (v1.3) — a process/page/session death followed by an
+authenticated resume against the verified durable checkpoint — is supported across host
+combinations through the shared `sendbeam/1` wire protocol with the additive
+`resume-auth-v1` capability. The resume-auth handshake, transcript, proofs, and fresh key
+derivation are pinned byte-for-byte by `docs/test-vectors/resume-auth.json`, asserted by
+both the Go and TypeScript hosts, so browser↔CLI sessions negotiate and authenticate over
+identical semantics.
+
+| Host pair (sender → receiver)   | Resume supported | Verified by                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CLI → CLI                       | ✓                | `apps/cli/internal/transfer/driver_test.go` (`TestDriverAuthenticatedCrossSessionResume`) + `resume_driver_test.go` (`TestDriverResumeTransfersZeroBytesWhenAllCommitted`, crash/resume tests), `durable_test.go` (`TestDurableResumeFromCheckpointEndToEnd`, auth-scoped-to-selected-journal tests), wire loopback sender/receiver resume suites.                           |
+| Browser → Browser               | ✓                | `apps/web/src/App.test.ts` (exact receive-attempt flow, resume sender/binding tests), `apps/web/src/lib/transfer/durable-destination.test.ts` (reload resume, checkpoint reuse only after auth, streams only missing blocks), `packages/protocol/src/resume-auth.test.ts` (fresh keys per attempt).                                                                          |
+| Browser → CLI                   | ✓                | Same wire protocol + byte-identical resume-auth vectors (Go + TS assert the same `resume-auth.json`); capability negotiation (`resume-auth-v1`) tested on both hosts (`packages/wire/resumeauth_test.go` `TestResumeAuthNegotiation`, `apps/web/src/App.test.ts` capability-gate tests); CLI receiver auth gate scoped to the selected journal (`durable_test.go`).          |
+| CLI → Browser                   | ✓                | Same protocol/vector grounding as Browser → CLI; browser receiver advertises `resume-auth-v1` only for an armed interrupted-receive attempt and reuses the verified checkpoint only after the preamble succeeds (`durable-destination.test.ts`, `App.test.ts`).                                                                                                              |
+| Any → legacy/no-credential peer | ✗ (fails closed) | Peer without the capability (or with a stripped/absent capability, or a host without the local credential) never receives resume-auth messages and never reuses old durable progress; the receiver keeps the journal and proceeds fresh or refuses — `resume_driver_test.go` (`TestDriverReceiverResumeWithoutCapableSenderFallsBackFresh`), `App.test.ts` capability tests. |
+| Credential on one side only     | ✗ (fails closed) | No credential is fabricated or replaced; authenticated resume is unavailable and explicit fresh restart/discard is offered — `sender_state_test.go` (`TestAttachResumeSecretPersistsOnceAndNeverReplaces`, legacy v1 migration), `durable_test.go` (never-fabricated-secret tests).                                                                                          |
+
+### Resume limits
+
+- Resume is **block-granular**: only whole missing blocks beyond the committed high-water
+  are retransmitted; the whole-file digest is always verified at the end.
+- Browser durable receive survives reload and worker death via OPFS partials + the
+  IndexedDB journal and lease; the direct-file and direct-directory save modes are
+  capability-gated and are **not** reload-durable. Safari's async sink advances its
+  checkpoint at file close (honest granularity), never block-by-block.
+- Sender reattachment needs the same browser + origin (persisted handle/record are
+  origin-scoped) or an explicit re-selection of the original source; a changed source is a
+  hard resume refusal. There is **no cross-device resume**.
+- Legacy pre-PR07 records/journals have no resume credential: their durable data may stay
+  locally but cross-session resume is unavailable (fresh restart/discard only).
+- Mobile browsers are best-effort (see Browser compatibility); resume limits follow the
+  engine's OPFS/WebCrypto behavior.
+- No cloud backup/history, accounts, or server-side presence — durable state is purely
+  local.
+
 ## Interpretation
 
 - **Restrictive networks engage the relay without a blind fixed wait**: there is no fixed
