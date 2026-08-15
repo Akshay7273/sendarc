@@ -89,6 +89,11 @@
   // let an interrupted send be reopened against its original source.
   let senderRecordList = $state.raw<SenderRecordListEntry[]>([]);
   let pendingResume = $state.raw<SenderRecord | undefined>(undefined);
+  // Final review blocker: the interrupted sender record this FRESH rendezvous was created
+  // FOR. Captured BEFORE offer() (only startSendResume sets it) and bound to the exact
+  // transfer id, so an ordinary rendezvous can never be retrofitted into a resume session
+  // and a rendezvous armed for record A can never resume record B. Cleared by reset().
+  let activeSendResumeTransferId = $state<string | undefined>(undefined);
   let resumeHint = $state('');
   let pickError = $state('');
   // Interrupted-receives surface (V13-PR08): locally kept receive journals with their
@@ -204,6 +209,10 @@
     }
     pickError = '';
     reset();
+    // Bind THIS rendezvous to THIS exact interrupted record BEFORE the offer is created:
+    // this is the proof the local resume-auth-v1 capability was advertised during caps
+    // negotiation, and it restricts resume eligibility to exactly this transfer.
+    activeSendResumeTransferId = rec.transferId;
     pendingResume = rec;
     resumeHint =
       'Authenticated resume armed — verified progress is reused only after the peer authenticates. Pick the original source.';
@@ -410,11 +419,30 @@
    *   - this rendezvous exists (handshake/signaling adopted)
    *   - the remote peer advertised resume-auth-v1 in THIS session
    *   - the record actually holds a resume credential (armed interrupted sender record)
+   *   - THIS rendezvous was itself armed for THIS exact interrupted record before the
+   *     offer (activeSendResumeTransferId === rec.transferId)
    * On any refusal: runSend is never called, the old transferId never leaves the host,
    * the worker never starts, and the sender record is preserved.
    */
   function beginSendResume(rec: SenderRecord, files: File[], reattachment: SenderReattachment) {
     if (handshake === undefined || signaling === undefined) return;
+    // Final review blocker: local resume intent must have been bound to THIS rendezvous
+    // before offer() (i.e. the user started it from the Resume action). pendingResume alone
+    // is not proof — the ordinary sendAgain() reselection flow can assign it after an
+    // ordinary rendezvous, and advertising generic resume-auth-v1 for a rendezvous armed
+    // for another record must not make every record eligible.
+    if (activeSendResumeTransferId === undefined) {
+      errorText =
+        'Authenticated resume was not armed before this rendezvous — nothing was sent. Start the interrupted transfer from the Resume action and share the fresh code.';
+      screen = 'failed';
+      return;
+    }
+    if (activeSendResumeTransferId !== rec.transferId) {
+      errorText =
+        'This rendezvous is armed to resume a different interrupted transfer — nothing was sent. Start resume for this record from the Resume action with a fresh code.';
+      screen = 'failed';
+      return;
+    }
     if (rec.resumeSecret === undefined) {
       // Legacy pre-PR07 record: authenticated resume is unavailable and the old stable id
       // is never reused under a fresh session — forget and restart fresh.
@@ -535,6 +563,7 @@
     durableDiscarded = false;
     senderRecordList = [];
     pendingResume = undefined;
+    activeSendResumeTransferId = undefined;
     resumeHint = '';
     pickError = '';
     receiveJournalList = [];

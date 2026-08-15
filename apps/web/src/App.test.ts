@@ -826,4 +826,189 @@ describe('App transfer completion', () => {
     const opts = mocks.runReceive.mock.calls[0]![3] as { resumeAttempt?: unknown };
     expect(opts.resumeAttempt).toBeUndefined();
   });
+
+  it('ordinary sender cannot retrofit resume after negotiation (final blocker test 1)', async () => {
+    // An interrupted send holds a credential + reopenable handle; the peer happens to be
+    // attempting a receive resume (so IT advertises resume-auth-v1), but THIS sender's
+    // rendezvous was an ORDINARY fresh send with no local resume intent.
+    const envelope = { format: 1, bytes: new Uint8Array([9, 9, 9]) };
+    const record = {
+      transferId: 'c'.repeat(32),
+      manifestFingerprint: 'd'.repeat(64),
+      files: [{ name: 'photo.bin', size: 8 }],
+      reattachment: { kind: 'handle', handleKind: 'directory', handle: {} },
+      resumeSecret: envelope,
+      updatedAt: 1_700_000_000_000,
+    };
+    mocks.listSenderRecords.mockResolvedValue([
+      { transferId: record.transferId, kind: 'ok', record },
+    ]);
+    mocks.senderRecordStoreWhenAvailable.mockReturnValue({
+      list: mocks.listSenderRecords,
+      remove: mocks.removeSenderRecord,
+    });
+    const file = new File([new Uint8Array([1, 2, 3])], 'photo.bin');
+    mocks.ensureReadPermission.mockResolvedValue(true);
+    mocks.materializeHandle.mockResolvedValue([file]);
+
+    const handshake = deferred<unknown>();
+    const signaling = {
+      send: vi.fn(),
+      sendBinary: vi.fn(),
+      onMessage: vi.fn(),
+      onBinary: vi.fn(),
+      onClose: vi.fn(),
+      close: vi.fn(),
+    };
+    mocks.offer.mockReturnValue({
+      code: undefined,
+      phase: 'idle',
+      done: handshake.promise,
+      cancel: vi.fn(),
+      adoptSignaling: vi.fn(() => signaling),
+    });
+
+    component = mount(App, { target });
+    await settle();
+    await settle();
+    await settle();
+    // An ORDINARY fresh send: local caps must NOT advertise resume-auth-v1.
+    const sendButton = [...target.querySelectorAll('button')].find(
+      (button) => button.textContent?.trim() === 'Send a file',
+    );
+    expect(sendButton).toBeDefined();
+    sendButton!.click();
+    await settle();
+    const offerOpts = mocks.offer.mock.calls[0]![0] as { localCaps: { features: string[] } };
+    expect(offerOpts.localCaps.features).not.toContain('resume-auth-v1');
+
+    // The receiver is attempting an interrupted receive resume, so ITS caps contain
+    // resume-auth-v1 even though this sender never armed local resume intent.
+    handshake.resolve({
+      master: new Uint8Array(32),
+      remoteCaps: {
+        version: 'sendbeam/1',
+        maxFrame: 16 * 1024,
+        blockSize: 1024 * 1024,
+        features: ['resume-auth-v1'],
+        sinkHints: ['opfs'],
+      },
+      role: 'offerer',
+    });
+    await settle();
+    await settle();
+
+    // "Send again" on the credentialed record: materialization may happen, but the worker
+    // must NEVER start — local resume intent was never bound to this rendezvous.
+    const sendAgainButton = [...target.querySelectorAll('button')].find(
+      (button) => button.textContent?.trim() === 'Send again',
+    );
+    expect(sendAgainButton).toBeDefined();
+    sendAgainButton!.click();
+    await settle();
+    await settle();
+    expect(mocks.materializeHandle).toHaveBeenCalledOnce();
+    expect(mocks.runSend).not.toHaveBeenCalled();
+    expect(mocks.removeSenderRecord).not.toHaveBeenCalled();
+    expect(target.textContent).toContain('was not armed before this rendezvous');
+    expect(target.textContent).toContain('nothing was sent');
+  });
+
+  it('resume rendezvous is bound to the exact record A, refusing record B (final blocker test 2)', async () => {
+    // Two interrupted sends: A (size 8) and B (size 16), both credentialed + reopenable.
+    const envelope = { format: 1, bytes: new Uint8Array([9, 9, 9]) };
+    const recordA = {
+      transferId: 'a'.repeat(32),
+      manifestFingerprint: 'd'.repeat(64),
+      files: [{ name: 'a.bin', size: 8 }],
+      reattachment: { kind: 'handle', handleKind: 'directory', handle: {} },
+      resumeSecret: envelope,
+      updatedAt: 1_700_000_000_000,
+    };
+    const recordB = {
+      transferId: 'b'.repeat(32),
+      manifestFingerprint: 'e'.repeat(64),
+      files: [{ name: 'b.bin', size: 16 }],
+      reattachment: { kind: 'handle', handleKind: 'directory', handle: {} },
+      resumeSecret: envelope,
+      updatedAt: 1_700_000_000_000,
+    };
+    mocks.listSenderRecords.mockResolvedValue([
+      { transferId: recordA.transferId, kind: 'ok', record: recordA },
+      { transferId: recordB.transferId, kind: 'ok', record: recordB },
+    ]);
+    mocks.senderRecordStoreWhenAvailable.mockReturnValue({
+      list: mocks.listSenderRecords,
+      remove: mocks.removeSenderRecord,
+    });
+    mocks.ensureReadPermission.mockResolvedValue(true);
+    mocks.materializeHandle.mockResolvedValue([new File([new Uint8Array([1, 2, 3])], 'b.bin')]);
+
+    const handshake = deferred<unknown>();
+    const signaling = {
+      send: vi.fn(),
+      sendBinary: vi.fn(),
+      onMessage: vi.fn(),
+      onBinary: vi.fn(),
+      onClose: vi.fn(),
+      close: vi.fn(),
+    };
+    mocks.offer.mockReturnValue({
+      code: undefined,
+      phase: 'idle',
+      done: handshake.promise,
+      cancel: vi.fn(),
+      adoptSignaling: vi.fn(() => signaling),
+    });
+
+    component = mount(App, { target });
+    await settle();
+    await settle();
+    await settle();
+    // Start resume for record A: the offer advertises resume-auth-v1 for THIS rendezvous.
+    const resumeButtons = [...target.querySelectorAll('button')].filter(
+      (button) => button.textContent?.trim() === 'Resume',
+    );
+    const resumeA = resumeButtons.find((b) =>
+      b.closest('.resume-card')?.textContent?.includes('8 B'),
+    );
+    expect(resumeA).toBeDefined();
+    resumeA!.click();
+    await settle();
+    const offerOpts = mocks.offer.mock.calls[0]![0] as { localCaps: { features: string[] } };
+    expect(offerOpts.localCaps.features).toContain('resume-auth-v1');
+
+    // The peer is capable and the rendezvous settles as the offerer.
+    handshake.resolve({
+      master: new Uint8Array(32),
+      remoteCaps: {
+        version: 'sendbeam/1',
+        maxFrame: 16 * 1024,
+        blockSize: 1024 * 1024,
+        features: ['resume-auth-v1'],
+        sinkHints: ['opfs'],
+      },
+      role: 'offerer',
+    });
+    await settle();
+    await settle();
+
+    // "Send again" for record B inside a rendezvous armed for A must be refused: generic
+    // resume-auth-v1 for this session does not make every local record eligible.
+    const sendAgainButtons = [...target.querySelectorAll('button')].filter(
+      (button) => button.textContent?.trim() === 'Send again',
+    );
+    const sendAgainB = sendAgainButtons.find((b) =>
+      b.closest('.resume-card')?.textContent?.includes('16 B'),
+    );
+    expect(sendAgainB).toBeDefined();
+    sendAgainB!.click();
+    await settle();
+    await settle();
+    expect(mocks.materializeHandle).toHaveBeenCalledOnce();
+    expect(mocks.runSend).not.toHaveBeenCalled();
+    expect(mocks.removeSenderRecord).not.toHaveBeenCalled();
+    expect(target.textContent).toContain('armed to resume a different interrupted transfer');
+    expect(target.textContent).toContain('nothing was sent');
+  });
 });
