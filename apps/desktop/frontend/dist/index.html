@@ -10,105 +10,409 @@
         color-scheme: dark;
         font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
       }
+      * { box-sizing: border-box; }
       body {
         margin: 0;
-        padding: 2rem;
+        padding: 1.5rem 2rem 3rem;
         background: #0f1115;
         color: #e6e9ef;
       }
-      h1 { font-size: 1.25rem; margin: 0 0 0.25rem; }
-      .sub { color: #8b93a1; font-size: 0.85rem; margin-bottom: 1.5rem; }
+      header { display: flex; align-items: baseline; gap: 0.75rem; margin-bottom: 1.25rem; }
+      h1 { font-size: 1.3rem; margin: 0; }
+      .sub { color: #8b93a1; font-size: 0.85rem; }
+
+      .tabs { display: flex; gap: 0.5rem; margin-bottom: 1.25rem; }
+      .tab {
+        background: #171a21; border: 1px solid #262b36; color: #8b93a1;
+        border-radius: 8px; padding: 0.45rem 1.1rem; font-size: 0.9rem; cursor: pointer;
+      }
+      .tab.active { color: #e6e9ef; border-color: #2563eb; background: #1c2330; }
+      .panel { display: none; }
+      .panel.active { display: block; }
+
       .card {
-        background: #171a21;
-        border: 1px solid #262b36;
-        border-radius: 10px;
-        padding: 1rem 1.25rem;
-        margin-bottom: 1rem;
-        max-width: 640px;
+        background: #171a21; border: 1px solid #262b36; border-radius: 10px;
+        padding: 1rem 1.25rem; margin-bottom: 1rem; max-width: 720px;
       }
       .card h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: #8b93a1; margin: 0 0 0.75rem; }
-      .row { display: flex; justify-content: space-between; padding: 0.2rem 0; font-size: 0.9rem; }
-      .row .k { color: #8b93a1; }
+      .row { display: flex; justify-content: space-between; gap: 1rem; padding: 0.2rem 0; font-size: 0.9rem; }
+      .row .k { color: #8b93a1; flex: 0 0 auto; }
       .row .v { color: #e6e9ef; word-break: break-all; text-align: right; }
+
       button {
-        background: #2563eb;
-        color: white;
-        border: 0;
-        border-radius: 8px;
-        padding: 0.55rem 1.1rem;
-        font-size: 0.9rem;
-        cursor: pointer;
+        background: #2563eb; color: white; border: 0; border-radius: 8px;
+        padding: 0.55rem 1.1rem; font-size: 0.9rem; cursor: pointer;
       }
       button:disabled { opacity: 0.5; cursor: default; }
-      #selfcheck { white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 0.8rem; color: #8b93a1; margin-top: 0.75rem; }
+      button.ghost { background: #1f2430; border: 1px solid #2c3342; color: #c9d1dd; }
+      button.danger { background: #7f1d1d; }
+
+      input[type="text"] {
+        background: #0f1115; border: 1px solid #2c3342; color: #e6e9ef;
+        border-radius: 8px; padding: 0.55rem 0.75rem; font-size: 0.9rem; width: 100%;
+      }
+      label { display: block; font-size: 0.8rem; color: #8b93a1; margin: 0.75rem 0 0.3rem; }
+
+      .drop {
+        border: 2px dashed #2c3342; border-radius: 10px; padding: 1.75rem;
+        text-align: center; color: #8b93a1; font-size: 0.9rem; cursor: pointer;
+        transition: border-color 0.15s, background 0.15s;
+      }
+      .drop.over, .drop:hover { border-color: #2563eb; background: #151b27; color: #c9d1dd; }
+
+      .file-list { margin: 0.75rem 0 0; padding: 0; list-style: none; max-height: 10rem; overflow: auto; }
+      .file-list li { font-size: 0.82rem; color: #b9c0cc; padding: 0.2rem 0; border-bottom: 1px solid #20242e; word-break: break-all; }
+      .file-list li span { color: #6b7280; margin-left: 0.5rem; }
+
+      .invite { display: flex; gap: 1.25rem; align-items: flex-start; }
+      .invite .code { font-size: 1.6rem; font-weight: 600; letter-spacing: 0.03em; font-family: ui-monospace, monospace; }
+      .invite img { width: 180px; height: 180px; border-radius: 8px; background: white; padding: 6px; }
+      .invite .copy { margin-top: 0.5rem; }
+
+      .progress { height: 10px; background: #0f1115; border-radius: 6px; overflow: hidden; margin: 0.6rem 0; }
+      .progress > div { height: 100%; background: #2563eb; width: 0%; transition: width 0.2s; }
+      .chips { display: flex; gap: 0.75rem; flex-wrap: wrap; margin: 0.5rem 0; }
+      .chip {
+        font-size: 0.75rem; padding: 0.2rem 0.6rem; border-radius: 999px;
+        border: 1px solid #2c3342; color: #8b93a1;
+      }
+      .chip.live { color: #4ade80; border-color: #14532d; background: #0c1f14; }
+      .chip.relay { color: #fbbf24; border-color: #713f12; background: #1c1608; }
+      .chip.auth { color: #93c5fd; border-color: #1e3a5f; background: #0c1727; }
+      .chip.err { color: #f87171; border-color: #7f1d1d; background: #200b0b; }
+
+      .controls { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
+      .muted { color: #6b7280; font-size: 0.82rem; }
+      .mono { font-family: ui-monospace, monospace; }
+      .statusline { margin-top: 0.5rem; font-size: 0.85rem; color: #8b93a1; min-height: 1.2em; }
+      .err { color: #f87171; }
       .ok { color: #4ade80; }
-      .bad { color: #f87171; }
+      .hidden { display: none; }
+      .row-sep { border-top: 1px solid #20242e; margin: 0.6rem 0; }
     </style>
   </head>
   <body>
-    <h1>SendBeam Desktop</h1>
-    <div class="sub">Thin shell over the shared Go engine — packages/engine</div>
+    <header>
+      <h1>SendBeam</h1>
+      <span class="sub">End-to-end encrypted, peer-to-peer file transfer — desktop</span>
+    </header>
 
-    <div class="card">
-      <h2>Engine</h2>
-      <div class="row"><span class="k">Go runtime</span><span class="v" id="go-version">…</span></div>
-      <div class="row"><span class="k">Engine module</span><span class="v" id="engine-ver">…</span></div>
-      <div class="row"><span class="k">Platform</span><span class="v" id="platform">…</span></div>
-      <div class="row"><span class="k">Protocol version</span><span class="v" id="caps-version">…</span></div>
-      <div class="row"><span class="k">Features</span><span class="v" id="caps-features">…</span></div>
+    <div class="tabs">
+      <button class="tab active" id="tab-send">Send</button>
+      <button class="tab" id="tab-receive">Receive</button>
     </div>
 
-    <div class="card">
-      <h2>Engine self-check</h2>
-      <p style="font-size: 0.85rem; color: #8b93a1; margin: 0 0 0.75rem;">
-        Runs a complete in-process transfer through the engine's public API:
-        SPAKE2 rendezvous, encrypted relay path, durable receive, whole-file
-        verification.
-      </p>
-      <button id="run">Run self-check</button>
-      <div id="selfcheck"></div>
-    </div>
+    <!-- SEND -->
+    <section class="panel active" id="panel-send">
+      <div class="card">
+        <h2>Files &amp; folders</h2>
+        <div class="drop" id="drop-send" data-file-drop-target>
+          Drop files or folders here, or click to pick
+        </div>
+        <ul class="file-list hidden" id="send-list"></ul>
+        <div class="statusline" id="send-sel-status"></div>
+        <div class="controls">
+          <button id="pick-send">Pick files &amp; folders</button>
+          <button id="start-send" disabled>Send</button>
+        </div>
+      </div>
+
+      <div class="card hidden" id="invite-card">
+        <h2>Invite</h2>
+        <div class="invite">
+          <div>
+            <div class="code mono" id="invite-code"></div>
+            <button class="ghost copy" id="copy-invite">Copy invite</button>
+            <div class="muted" id="invite-link"></div>
+          </div>
+          <img id="invite-qr" alt="Invite QR code" />
+        </div>
+        <div class="statusline" id="invite-status"></div>
+      </div>
+
+      <div class="card hidden" id="send-progress-card">
+        <h2>Transfer</h2>
+        <div class="chips" id="send-chips"></div>
+        <div class="progress"><div id="send-bar"></div></div>
+        <div class="row"><span class="k">Progress</span><span class="v" id="send-percent"></span></div>
+        <div class="row"><span class="k">Current file</span><span class="v" id="send-file"></span></div>
+        <div class="row"><span class="k">Speed / ETA</span><span class="v" id="send-rate"></span></div>
+        <div class="row"><span class="k">Aggregate</span><span class="v" id="send-aggregate"></span></div>
+        <div class="row"><span class="k">Security</span><span class="v mono" id="send-fingerprint"></span></div>
+        <div class="row-sep"></div>
+        <div class="controls">
+          <button id="send-pause">Pause</button>
+          <button id="send-resume" disabled>Resume</button>
+          <button class="danger" id="send-cancel">Cancel</button>
+        </div>
+        <div class="statusline" id="send-status"></div>
+      </div>
+    </section>
+
+    <!-- RECEIVE -->
+    <section class="panel" id="panel-receive">
+      <div class="card">
+        <h2>Receive</h2>
+        <label for="recv-code">Invite code (or paste the full invite link)</label>
+        <input type="text" id="recv-code" placeholder="e.g. 7-alpha-bravo" autocomplete="off" />
+        <label for="recv-dir">Save into</label>
+        <div style="display:flex; gap:0.5rem;">
+          <input type="text" id="recv-dir" placeholder="destination folder" autocomplete="off" style="flex:1" />
+          <button class="ghost" id="pick-dest">Choose…</button>
+        </div>
+        <div class="controls">
+          <button id="start-recv" disabled>Receive</button>
+        </div>
+        <div class="statusline" id="recv-status"></div>
+      </div>
+
+      <div class="card hidden" id="recv-progress-card">
+        <h2>Transfer</h2>
+        <div class="chips" id="recv-chips"></div>
+        <div class="progress"><div id="recv-bar"></div></div>
+        <div class="row"><span class="k">Progress</span><span class="v" id="recv-percent"></span></div>
+        <div class="row"><span class="k">Current file</span><span class="v" id="recv-file"></span></div>
+        <div class="row"><span class="k">Speed / ETA</span><span class="v" id="recv-rate"></span></div>
+        <div class="row"><span class="k">Aggregate</span><span class="v" id="recv-aggregate"></span></div>
+        <div class="row"><span class="k">Security</span><span class="v mono" id="recv-fingerprint"></span></div>
+        <div class="row"><span class="k">Saved to</span><span class="v" id="recv-out"></span></div>
+        <div class="row-sep"></div>
+        <div class="controls">
+          <button id="recv-pause">Pause</button>
+          <button id="recv-resume" disabled>Resume</button>
+          <button class="danger" id="recv-cancel">Cancel</button>
+        </div>
+        <div class="statusline" id="recv-status-line"></div>
+      </div>
+    </section>
 
     <script>
+      // Service FQNs (wails binds by full import path.Type.Method).
+      const SV = {
+        Service:     "github.com/sendbeam/desktop/internal/engine.Service",
+        Transfer:    "github.com/sendbeam/desktop/internal/engine.TransferService",
+      };
+      const call = (fqn, ...args) => wails.Call.ByName(fqn, ...args);
       const $ = (id) => document.getElementById(id);
 
-      async function loadInfo() {
-        try {
-          const info = await wails.Call.ByName("main.EngineService.Info");
-          $("go-version").textContent = info.goVersion;
-          $("engine-ver").textContent = info.engineVer || "linked";
-          $("platform").textContent = info.platform || navigator.platform;
-          const caps = await wails.Call.ByName("main.EngineService.Caps");
-          $("caps-version").textContent = caps.version;
-          $("caps-features").textContent = caps.features.join(", ");
-        } catch (err) {
-          $("go-version").textContent = "unavailable: " + err;
-        }
+      // ---- state ----
+      const state = {
+        mode: "send",
+        selected: [],
+        send: { id: null },
+        recv: { id: null },
+      };
+
+      // ---- tabs ----
+      function setMode(mode) {
+        state.mode = mode;
+        $("tab-send").classList.toggle("active", mode === "send");
+        $("tab-receive").classList.toggle("active", mode === "receive");
+        $("panel-send").classList.toggle("active", mode === "send");
+        $("panel-receive").classList.toggle("active", mode === "receive");
+      }
+      $("tab-send").addEventListener("click", () => setMode("send"));
+      $("tab-receive").addEventListener("click", () => setMode("receive"));
+
+      // ---- helpers ----
+      function humanBytes(n) {
+        if (n >= 1 << 30) return (n / (1 << 30)).toFixed(2) + " GiB";
+        if (n >= 1 << 20) return (n / (1 << 20)).toFixed(1) + " MiB";
+        if (n >= 1 << 10) return (n / (1 << 10)).toFixed(1) + " KiB";
+        return n + " B";
+      }
+      function humanRate(bps) {
+        if (!bps || bps <= 0) return "calculating…";
+        if (bps >= 1 << 20) return (bps / (1 << 20)).toFixed(1) + " MiB/s";
+        if (bps >= 1 << 10) return (bps / (1 << 10)).toFixed(1) + " KiB/s";
+        return Math.round(bps) + " B/s";
+      }
+      function basename(p) { return String(p).split(/[\\/]/).pop(); }
+      function totalSelected() {
+        let n = 0;
+        try { n = state.selected.reduce((a, p) => a + (p.size || 0), 0); } catch (e) {}
+        return n;
       }
 
-      async function runSelfCheck() {
-        const btn = $("run");
-        const out = $("selfcheck");
-        btn.disabled = true;
-        out.textContent = "running engine self-check…";
-        try {
-          const res = await wails.Call.ByName("main.EngineService.SelfCheck");
-          if (res.ok) {
-            out.innerHTML =
-              '<span class="ok">✓ verified</span> — ' +
-              res.files + " file, " + res.bytes + " bytes in " + res.elapsedMs + " ms";
-          } else {
-            out.innerHTML = '<span class="bad">✗ failed:</span> ' + res.failure;
-          }
-        } catch (err) {
-          out.innerHTML = '<span class="bad">✗ error:</span> ' + err;
-        } finally {
-          btn.disabled = false;
+      // ---- send selection ----
+      function renderSelection() {
+        const list = $("send-list");
+        list.innerHTML = "";
+        for (const p of state.selected) {
+          const li = document.createElement("li");
+          li.textContent = p.path;
+          const span = document.createElement("span");
+          span.textContent = p.size ? humanBytes(p.size) : "";
+          li.appendChild(span);
+          list.appendChild(li);
+        }
+        list.classList.toggle("hidden", state.selected.length === 0);
+        $("send-sel-status").textContent = state.selected.length
+          ? state.selected.length + " item(s) selected"
+          : "";
+        $("start-send").disabled = state.selected.length === 0;
+      }
+      async function pickSend() {
+        const res = await call(SV.Transfer + ".PickFiles");
+        if (res && res.error) { $("send-sel-status").textContent = res.error; return; }
+        if (res && res.paths && res.paths.length) {
+          state.selected = res.paths.map((p) => ({ path: p }));
+          renderSelection();
         }
       }
+      $("pick-send").addEventListener("click", pickSend);
+      $("drop-send").addEventListener("click", pickSend);
+      // Drag/drop is handled by the window: main.go forwards dropped paths to
+      // the service and emits a "drop" event so this panel can adopt the new
+      // transfer and show its invite.
+      wails.Events.On("sendbeam:transfer", (ev) => {
+        if (!ev || ev.kind !== "drop" || !ev.id) return;
+        if (state.send.id && state.send.id !== ev.id) return;
+        state.send.id = ev.id;
+        state.selected = (ev.files || []).map((p) => ({ path: p }));
+        renderSelection();
+        $("send-status").textContent = "Preparing secure channel…";
+        $("send-progress-card").classList.remove("hidden");
+        $("start-send").disabled = true;
+      });
+      $("start-send").addEventListener("click", () => {
+        if (!state.selected.length) return;
+        const paths = state.selected.map((p) => p.path);
+        call(SV.Transfer + ".Send", paths, "").then((h) => {
+          if (h && h.error) { $("send-status").textContent = h.error; return; }
+          state.send.id = h.id;
+          $("send-status").textContent = "Preparing secure channel…";
+          $("send-progress-card").classList.remove("hidden");
+          $("start-send").disabled = true;
+        }).catch((err) => { $("send-status").textContent = String(err); });
+      });
 
-      $("run").addEventListener("click", runSelfCheck);
-      loadInfo();
+      // ---- receive ----
+      function recvCanStart() {
+        return !!$("recv-code").value.trim() && !!$("recv-dir").value.trim();
+      }
+      function updateRecvStart() { $("start-recv").disabled = !recvCanStart(); }
+      $("recv-code").addEventListener("input", updateRecvStart);
+      $("recv-dir").addEventListener("input", updateRecvStart);
+      $("pick-dest").addEventListener("click", async () => {
+        const res = await call(SV.Transfer + ".PickDestination");
+        if (res && res.error) { $("recv-status").textContent = res.error; return; }
+        if (res && res.paths && res.paths.length) {
+          $("recv-dir").value = res.paths[0];
+          updateRecvStart();
+        }
+      });
+      $("start-recv").addEventListener("click", () => {
+        const code = $("recv-code").value.trim();
+        const dir = $("recv-dir").value.trim();
+        call(SV.Transfer + ".Receive", code, dir, "").then((h) => {
+          if (h && h.error) { $("recv-status").textContent = h.error; return; }
+          state.recv.id = h.id;
+          $("recv-status").textContent = "Joining " + code + "…";
+          $("recv-progress-card").classList.remove("hidden");
+          $("start-recv").disabled = true;
+        }).catch((err) => { $("recv-status").textContent = String(err); });
+      });
+
+      // ---- controls ----
+      function wireControls(prefix) {
+        const id = () => state[prefix].id;
+        $(prefix + "-pause").addEventListener("click", () => call(SV.Transfer + ".Pause", id()).catch((e) => console.error(e)));
+        $(prefix + "-resume").addEventListener("click", () => call(SV.Transfer + ".Resume", id()).catch((e) => console.error(e)));
+        $(prefix + "-cancel").addEventListener("click", () => call(SV.Transfer + ".Cancel", id()).catch((e) => console.error(e)));
+      }
+      wireControls("send");
+      wireControls("recv");
+
+      // ---- live events ----
+      function chips(ev) {
+        const out = [];
+        if (ev.phase) out.push('<span class="chip">' + ev.phase.replace(/-/g, " ") + "</span>");
+        if (ev.transport) out.push('<span class="chip relay">' + ev.transport + "</span>");
+        if (ev.fingerprint) out.push('<span class="chip auth">fingerprint ' + ev.fingerprint + "</span>");
+        if (ev.paused) out.push('<span class="chip err">paused</span>');
+        if (ev.canceled) out.push('<span class="chip err">canceled</span>');
+        if (ev.failed) out.push('<span class="chip err">failed</span>');
+        if (ev.state) out.push('<span class="chip live">' + ev.state + "</span>");
+        return out.join("");
+      }
+      function renderTransfer(ev, prefix) {
+        const p = prefix === "send" ? "send" : "recv";
+        const id = state[p].id;
+        if (ev.id !== id) return;
+
+        $(p + "-chips").innerHTML = chips(ev);
+        $(p + "-bar").style.width = Math.max(0, Math.min(100, ev.percent || 0)) + "%";
+        $(p + "-percent").textContent = (ev.percent || 0) + "% · " + humanBytes(ev.doneBytes || 0) + " / " + humanBytes(ev.totalBytes || 0);
+
+        let file = ev.currentFile || "";
+        if (ev.fileSize) file += " (" + humanBytes(ev.fileBytes || 0) + " / " + humanBytes(ev.fileSize) + ")";
+        $(p + "-file").textContent = file || "—";
+
+        let rate = humanRate(ev.rateBps);
+        if (ev.eta) rate += " · " + ev.eta;
+        $(p + "-rate").textContent = rate;
+
+        $(p + "-aggregate").textContent = (ev.filesDone || 0) + " / " + (ev.filesTotal || 0) + " files · " + humanBytes(ev.totalBytes || 0) + " total";
+        $(p + "-fingerprint").textContent = ev.fingerprint || "awaiting key confirmation…";
+
+        const paused = !!ev.paused;
+        $(p + "-pause").disabled = paused || ev.canceled || ev.failed;
+        $(p + "-resume").disabled = !paused || ev.canceled || ev.failed;
+        $(p + "-cancel").disabled = ev.canceled || ev.failed;
+
+        const status = p === "recv" ? $("recv-status-line") : $("send-status");
+        if (ev.kind === "done") {
+          status.innerHTML = '<span class="ok">✓ Verified transfer complete.</span>' +
+            (ev.outPath ? " Saved to " + ev.outPath + "." : "");
+          $(p + "-pause").disabled = $(p + "-resume").disabled = $(p + "-cancel").disabled = true;
+        } else if (ev.kind === "error") {
+          status.innerHTML = '<span class="err">✗ ' + (ev.error || "transfer failed") + "</span>";
+        } else if (ev.kind === "connect") {
+          status.textContent = "Secure channel established — transferring…";
+        } else if (ev.phase === "waiting") {
+          status.textContent = "Waiting for the peer to join…";
+        }
+      }
+      wails.Events.On("sendbeam:transfer", (ev) => {
+        if (!ev || !ev.id || !ev.kind) return;
+        if (ev.id === state.send.id) renderTransfer(ev, "send");
+        if (ev.id === state.recv.id) renderTransfer(ev, "recv");
+
+        if (ev.kind === "invite" && ev.id === state.send.id) {
+          $("invite-card").classList.remove("hidden");
+          $("invite-code").textContent = ev.code;
+          $("invite-link").textContent = ev.link || "";
+          $("invite-qr").src = ev.qr || "";
+          $("invite-status").textContent = "Share the code or link — the receiver can also scan the QR.";
+        }
+      });
+
+      // ---- copy invite ----
+      $("copy-invite").addEventListener("click", async () => {
+        const text = $("invite-code").textContent;
+        try {
+          await navigator.clipboard.writeText(text);
+          $("invite-status").textContent = "Invite code copied.";
+        } catch (e) {
+          // fallback for webviews without clipboard permission
+          const ta = document.createElement("textarea");
+          ta.value = text;
+          document.body.appendChild(ta);
+          ta.select();
+          try { document.execCommand("copy"); $("invite-status").textContent = "Invite code copied."; }
+          catch (err) { $("invite-status").textContent = "Copy failed — select the code manually."; }
+          document.body.removeChild(ta);
+        }
+      });
+
+      // ---- engine info ----
+      (async () => {
+        try {
+          const info = await call(SV.Service + ".Info");
+          document.title = "SendBeam Desktop — " + (info.engineVer ? "engine " + info.engineVer : "linked");
+        } catch (err) { /* shell info is non-critical */ }
+      })();
     </script>
   </body>
 </html>
