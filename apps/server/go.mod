@@ -11,7 +11,7 @@ require (
 
 require (
 	filippo.io/nistec v0.0.4 // indirect
-	golang.org/x/sys v0.36.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
 )
 
 replace github.com/sendbeam/wire => ../../packages/wire

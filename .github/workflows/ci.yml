@@ -94,7 +94,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        module: [packages/wire, apps/server, apps/cli]
+        module: [packages/wire, packages/engine, apps/server, apps/cli]
     # Build each module standalone (as it is published) rather than through the
     # workspace, so intra-repo replace directives are exercised the way a consumer
     # pulling one module would resolve them.

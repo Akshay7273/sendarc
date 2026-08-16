@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/sendbeam/cli/internal/rendezvous"
-	"github.com/sendbeam/cli/internal/wsclient"
+	"github.com/sendbeam/engine/rendezvous"
+	"github.com/sendbeam/engine/wsclient"
 )
 
 // blindHub is a minimal stand-in for the SendBeam signaling server, enough to drive one

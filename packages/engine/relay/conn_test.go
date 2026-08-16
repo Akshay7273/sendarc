@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sendbeam/cli/internal/rendezvous"
+	"github.com/sendbeam/engine/rendezvous"
 )
 
 type fakeSignal struct {

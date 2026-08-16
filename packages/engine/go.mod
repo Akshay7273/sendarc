@@ -1,17 +1,15 @@
-module github.com/sendbeam/cli
+module github.com/sendbeam/engine
 
 go 1.25.0
 
 require (
-	github.com/pion/stun/v3 v3.1.6
+	github.com/coder/websocket v1.8.15
 	github.com/pion/webrtc/v4 v4.2.18
-	github.com/sendbeam/engine v0.0.0
 	github.com/sendbeam/wire v0.0.0
 )
 
 require (
 	filippo.io/nistec v0.0.4 // indirect
-	github.com/coder/websocket v1.8.15 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/pion/datachannel v1.6.2 // indirect
 	github.com/pion/dtls/v3 v3.1.5 // indirect
@@ -25,6 +23,7 @@ require (
 	github.com/pion/sctp v1.11.1 // indirect
 	github.com/pion/sdp/v3 v3.0.19 // indirect
 	github.com/pion/srtp/v3 v3.0.12 // indirect
+	github.com/pion/stun/v3 v3.1.6 // indirect
 	github.com/pion/transport/v4 v4.0.2 // indirect
 	github.com/pion/turn/v5 v5.0.12 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
@@ -33,10 +32,5 @@ require (
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 )
-
-// The engine and wire crypto core are sibling modules in this repo. Local replaces keep them
-// resolvable both under the go.work workspace and in standalone module builds (as CI runs each
-// module).
-replace github.com/sendbeam/engine => ../../packages/engine
 
 replace github.com/sendbeam/wire => ../../packages/wire

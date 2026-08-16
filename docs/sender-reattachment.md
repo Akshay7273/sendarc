@@ -39,7 +39,7 @@ content digest. Any difference means a different source — that is the whole po
 The record's file set is platform-identical; only _how a restart locates the source_
 differs, and that is local state, never on the wire:
 
-- **CLI** (`apps/cli/internal/transfer/sender_state.go`): the record adds
+- **CLI** (`packages/engine/transfer/sender_state.go`): the record adds
   `paths` — the canonical sorted absolute source paths. The store keys records on
   disk as `<transferId>.json` and finds them by `PathKey`, the SHA-256 of the
   NUL-joined canonical sorted paths (domain prefix `sendbeam/sender-paths\x00`).

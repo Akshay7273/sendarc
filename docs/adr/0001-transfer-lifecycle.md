@@ -2,7 +2,7 @@
 
 Status: accepted
 Scope: v1.1 (SB-1101..SB-1105, SB-1107)
-Applies to: `packages/protocol`, `packages/wire`, `apps/web/src/lib/session/transfer.ts`, `apps/cli/internal/transfer`
+Applies to: `packages/protocol`, `packages/wire`, `apps/web/src/lib/session/transfer.ts`, `packages/engine/transfer`
 
 ## Context
 
