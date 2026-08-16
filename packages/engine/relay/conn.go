@@ -7,7 +7,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/sendbeam/cli/internal/rendezvous"
+	"github.com/sendbeam/engine/rendezvous"
 )
 
 const (

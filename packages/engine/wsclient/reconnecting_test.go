@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/sendbeam/cli/internal/rendezvous"
+	"github.com/sendbeam/engine/rendezvous"
 )
 
 // testResumeServer is a minimal localhost signaling server that supports the room resume flow:

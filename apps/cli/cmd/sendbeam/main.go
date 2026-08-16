@@ -23,9 +23,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/sendbeam/cli/internal/rendezvous"
-	"github.com/sendbeam/cli/internal/transfer"
-	"github.com/sendbeam/cli/internal/wsclient"
+	"github.com/sendbeam/engine/rendezvous"
+	"github.com/sendbeam/engine/transfer"
+	"github.com/sendbeam/engine/wsclient"
 	"github.com/sendbeam/wire"
 )
 

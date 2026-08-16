@@ -19,7 +19,7 @@ import (
 
 	"github.com/pion/stun/v3"
 
-	"github.com/sendbeam/cli/internal/diagnostics"
+	"github.com/sendbeam/engine/diagnostics"
 	"github.com/sendbeam/wire"
 )
 
