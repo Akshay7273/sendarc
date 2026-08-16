@@ -68,7 +68,7 @@ CI on Chromium and Firefox; timing is CI-host-dependent and not a spec number.
 
 ## Path-selection timing
 
-Measured separately from throughput (`apps/cli/internal/rtc/peer_bench_test.go`, loopback
+Measured separately from throughput (`packages/engine/rtc/peer_bench_test.go`, loopback
 direct) and guarding the adaptive racing policy's "connect fast" goal on a healthy direct
 path:
 

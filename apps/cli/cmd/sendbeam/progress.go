@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	clitransfer "github.com/sendbeam/cli/internal/transfer"
+	clitransfer "github.com/sendbeam/engine/transfer"
 	"github.com/sendbeam/wire"
 )
 

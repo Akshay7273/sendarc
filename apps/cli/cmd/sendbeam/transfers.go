@@ -9,8 +9,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sendbeam/cli/internal/rendezvous"
-	clitransfer "github.com/sendbeam/cli/internal/transfer"
+	"github.com/sendbeam/engine/rendezvous"
+	clitransfer "github.com/sendbeam/engine/transfer"
 	"github.com/sendbeam/wire"
 )
 

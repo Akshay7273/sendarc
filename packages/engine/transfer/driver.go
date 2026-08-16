@@ -14,10 +14,10 @@ import (
 	"sync"
 
 	"github.com/pion/webrtc/v4"
-	relaytransport "github.com/sendbeam/cli/internal/relay"
-	"github.com/sendbeam/cli/internal/rendezvous"
-	"github.com/sendbeam/cli/internal/rtc"
-	"github.com/sendbeam/cli/internal/supervisor"
+	relaytransport "github.com/sendbeam/engine/relay"
+	"github.com/sendbeam/engine/rendezvous"
+	"github.com/sendbeam/engine/rtc"
+	"github.com/sendbeam/engine/supervisor"
 	"github.com/sendbeam/wire"
 )
 

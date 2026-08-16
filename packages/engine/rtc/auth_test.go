@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sendbeam/cli/internal/rendezvous"
+	"github.com/sendbeam/engine/rendezvous"
 	"github.com/sendbeam/wire"
 )
 

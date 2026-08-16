@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/pion/webrtc/v4"
-	"github.com/sendbeam/cli/internal/rendezvous"
+	"github.com/sendbeam/engine/rendezvous"
 	"github.com/sendbeam/wire"
 )
 

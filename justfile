@@ -48,8 +48,8 @@ serve: build certs
 # Lint everything
 lint:
     pnpm -r lint
-    for m in packages/wire apps/server apps/cli; do ( cd "$m" && go vet ./... ) || exit 1; done
-    if command -v golangci-lint >/dev/null; then for m in packages/wire apps/server apps/cli; do ( cd "$m" && golangci-lint run ) || exit 1; done; else echo "golangci-lint not installed; ran go vet only"; fi
+    for m in packages/wire packages/engine apps/server apps/cli; do ( cd "$m" && go vet ./... ) || exit 1; done
+    if command -v golangci-lint >/dev/null; then for m in packages/wire packages/engine apps/server apps/cli; do ( cd "$m" && golangci-lint run ) || exit 1; done; else echo "golangci-lint not installed; ran go vet only"; fi
 
 # Typecheck TS + Svelte
 typecheck:
@@ -58,9 +58,9 @@ typecheck:
 # Run all tests
 test:
     pnpm -r test
-    for m in packages/wire apps/server apps/cli; do ( cd "$m" && go test ./... ) || exit 1; done
+    for m in packages/wire packages/engine apps/server apps/cli; do ( cd "$m" && go test ./... ) || exit 1; done
 
 # Format
 fmt:
     pnpm format
-    for m in packages/wire apps/server apps/cli; do ( cd "$m" && go fmt ./... ); done
+    for m in packages/wire packages/engine apps/server apps/cli; do ( cd "$m" && go fmt ./... ); done

@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sendbeam/cli/internal/rendezvous"
+	"github.com/sendbeam/engine/rendezvous"
 )
 
 // reconnectRetries bounds how many times a post-establishment socket drop is re-dialed and

@@ -4,9 +4,9 @@ import (
 	"sync"
 	"time"
 
-	relaytransport "github.com/sendbeam/cli/internal/relay"
-	"github.com/sendbeam/cli/internal/rtc"
-	"github.com/sendbeam/cli/internal/supervisor"
+	relaytransport "github.com/sendbeam/engine/relay"
+	"github.com/sendbeam/engine/rtc"
+	"github.com/sendbeam/engine/supervisor"
 	"github.com/sendbeam/wire"
 )
 
