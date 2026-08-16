@@ -25,15 +25,15 @@ Extract the engine into a new sibling module `packages/engine`
 (`github.com/sendbeam/engine`) with seven public packages, moved behavior-preservingly
 (no logic changes; only import paths changed):
 
-| Package          | Responsibility                                                        |
-| ---------------- | --------------------------------------------------------------------- |
-| `rendezvous`     | Blind rendezvous handshake (SPAKE2), capability negotiation, signaling messages |
-| `rtc`            | Authenticated WebRTC peer, data channel, ICE restart / recovery       |
-| `relay`          | Encrypted WebSocket relay transport                                    |
-| `supervisor`     | Path state machine; direct/relay switching and cutover safety          |
-| `transfer`       | End-to-end driver (`transfer.Run`), sources, durable receive (`DurableDestination`/`DurableStore`), sender restart state (`SenderStore`/`PrepareSender`), adaptive policy |
-| `diagnostics`    | Sanitized failure/telemetry snapshots                                  |
-| `wsclient`       | Reconnecting signaling websocket client                                |
+| Package       | Responsibility                                                                                                                                                            |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rendezvous`  | Blind rendezvous handshake (SPAKE2), capability negotiation, signaling messages                                                                                           |
+| `rtc`         | Authenticated WebRTC peer, data channel, ICE restart / recovery                                                                                                           |
+| `relay`       | Encrypted WebSocket relay transport                                                                                                                                       |
+| `supervisor`  | Path state machine; direct/relay switching and cutover safety                                                                                                             |
+| `transfer`    | End-to-end driver (`transfer.Run`), sources, durable receive (`DurableDestination`/`DurableStore`), sender restart state (`SenderStore`/`PrepareSender`), adaptive policy |
+| `diagnostics` | Sanitized failure/telemetry snapshots                                                                                                                                     |
+| `wsclient`    | Reconnecting signaling websocket client                                                                                                                                   |
 
 The engine depends only on `github.com/sendbeam/wire` (the crypto core) and third-party
 transport libraries (`pion/webrtc/v4`, `coder/websocket`). It is resolved both in the
