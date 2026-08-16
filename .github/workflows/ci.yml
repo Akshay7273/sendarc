@@ -126,6 +126,46 @@ jobs:
           version: v2.12.2
           working-directory: ${{ matrix.module }}
 
+  desktop:
+    # V14-PR02: the desktop shell. Server-tagged gates run headless (no GUI deps); the window
+    # build needs the Linux WebView stack, installed here. The window itself is exercised on
+    # real platform builds (V14-PR05); this job proves it compiles on a clean Ubuntu runner.
+    name: desktop (server gates + window build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: apps/desktop/go.sum
+
+      - name: Install Linux WebView deps (window build)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev libsoup-3.0-dev
+
+      - name: Vet (server)
+        run: go vet -tags server ./...
+
+      - name: Test (server)
+        run: go test -race -tags server ./...
+
+      - name: Build server
+        run: go build -tags server ./...
+
+      - name: Build window
+        run: go build ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.12.2
+          working-directory: apps/desktop
+
   campaign:
     # V13-PR08 heavyweight validation: the >= 100 GiB streamed resume campaign proves a very
     # large logical transfer resumes from a deep durable checkpoint with bounded memory and no
