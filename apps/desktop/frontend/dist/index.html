@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SendBeam Desktop</title>
+    <script type="module" src="/wails/runtime.js"></script>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 2rem;
+        background: #0f1115;
+        color: #e6e9ef;
+      }
+      h1 { font-size: 1.25rem; margin: 0 0 0.25rem; }
+      .sub { color: #8b93a1; font-size: 0.85rem; margin-bottom: 1.5rem; }
+      .card {
+        background: #171a21;
+        border: 1px solid #262b36;
+        border-radius: 10px;
+        padding: 1rem 1.25rem;
+        margin-bottom: 1rem;
+        max-width: 640px;
+      }
+      .card h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: #8b93a1; margin: 0 0 0.75rem; }
+      .row { display: flex; justify-content: space-between; padding: 0.2rem 0; font-size: 0.9rem; }
+      .row .k { color: #8b93a1; }
+      .row .v { color: #e6e9ef; word-break: break-all; text-align: right; }
+      button {
+        background: #2563eb;
+        color: white;
+        border: 0;
+        border-radius: 8px;
+        padding: 0.55rem 1.1rem;
+        font-size: 0.9rem;
+        cursor: pointer;
+      }
+      button:disabled { opacity: 0.5; cursor: default; }
+      #selfcheck { white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 0.8rem; color: #8b93a1; margin-top: 0.75rem; }
+      .ok { color: #4ade80; }
+      .bad { color: #f87171; }
+    </style>
+  </head>
+  <body>
+    <h1>SendBeam Desktop</h1>
+    <div class="sub">Thin shell over the shared Go engine — packages/engine</div>
+
+    <div class="card">
+      <h2>Engine</h2>
+      <div class="row"><span class="k">Go runtime</span><span class="v" id="go-version">…</span></div>
+      <div class="row"><span class="k">Engine module</span><span class="v" id="engine-ver">…</span></div>
+      <div class="row"><span class="k">Platform</span><span class="v" id="platform">…</span></div>
+      <div class="row"><span class="k">Protocol version</span><span class="v" id="caps-version">…</span></div>
+      <div class="row"><span class="k">Features</span><span class="v" id="caps-features">…</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Engine self-check</h2>
+      <p style="font-size: 0.85rem; color: #8b93a1; margin: 0 0 0.75rem;">
+        Runs a complete in-process transfer through the engine's public API:
+        SPAKE2 rendezvous, encrypted relay path, durable receive, whole-file
+        verification.
+      </p>
+      <button id="run">Run self-check</button>
+      <div id="selfcheck"></div>
+    </div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+
+      async function loadInfo() {
+        try {
+          const info = await wails.Call.ByName("main.EngineService.Info");
+          $("go-version").textContent = info.goVersion;
+          $("engine-ver").textContent = info.engineVer || "linked";
+          $("platform").textContent = info.platform || navigator.platform;
+          const caps = await wails.Call.ByName("main.EngineService.Caps");
+          $("caps-version").textContent = caps.version;
+          $("caps-features").textContent = caps.features.join(", ");
+        } catch (err) {
+          $("go-version").textContent = "unavailable: " + err;
+        }
+      }
+
+      async function runSelfCheck() {
+        const btn = $("run");
+        const out = $("selfcheck");
+        btn.disabled = true;
+        out.textContent = "running engine self-check…";
+        try {
+          const res = await wails.Call.ByName("main.EngineService.SelfCheck");
+          if (res.ok) {
+            out.innerHTML =
+              '<span class="ok">✓ verified</span> — ' +
+              res.files + " file, " + res.bytes + " bytes in " + res.elapsedMs + " ms";
+          } else {
+            out.innerHTML = '<span class="bad">✗ failed:</span> ' + res.failure;
+          }
+        } catch (err) {
+          out.innerHTML = '<span class="bad">✗ error:</span> ' + err;
+        } finally {
+          btn.disabled = false;
+        }
+      }
+
+      $("run").addEventListener("click", runSelfCheck);
+      loadInfo();
+    </script>
+  </body>
+</html>
