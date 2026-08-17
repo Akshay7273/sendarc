@@ -156,13 +156,13 @@ jobs:
             -o bin/sendbeam-desktop.exe .
 
       - name: Package Portable ZIP
-        shell: bash
+        shell: pwsh
         run: |
-          mkdir -p staging-portable artifacts
-          cp apps/desktop/bin/sendbeam-desktop.exe staging-portable/
-          cp LICENSE staging-portable/
-          cp README.md staging-portable/
-          ( cd staging-portable && zip -r "$GITHUB_WORKSPACE/artifacts/SendBeam-windows-amd64-portable.zip" . )
+          New-Item -ItemType Directory -Force -Path staging-portable, artifacts
+          Copy-Item apps/desktop/bin/sendbeam-desktop.exe staging-portable/
+          Copy-Item LICENSE staging-portable/
+          Copy-Item README.md staging-portable/
+          Compress-Archive -Path staging-portable/* -DestinationPath artifacts/SendBeam-windows-amd64-portable.zip -Force
 
       - name: Build NSIS Installer
         shell: bash
