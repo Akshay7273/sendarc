@@ -3,6 +3,11 @@
 // in the Go engine (packages/engine); these services are only a thin
 // presentation seam, exactly as the CLI consumes the engine through its
 // public API.
+//
+// Lifecycle & Network Recovery Architecture:
+// Desktop network disruption, host sleep/wake recovery, and transport reconnection
+// are driven automatically by the engine's adaptive supervisor and reconnecting
+// signaling transport (packages/engine/wsclient and packages/engine/transfer).
 package engine
 
 import (
@@ -125,6 +130,12 @@ type DurableInspectResult struct {
 	Files               []FileInfo `json:"files,omitempty"`
 }
 
+// completedDestination stores the verified final output path alongside its exact trusted destination root.
+type completedDestination struct {
+	Path string
+	Root string
+}
+
 // SignalDialer returns the signaling signal for one transfer side. The desktop
 // uses the same wsclient as the CLI (browser/CLI interop by construction);
 // tests inject loopback ends.
@@ -157,7 +168,7 @@ type TransferService struct {
 	revealMgr             *lifecycle.RevealManager
 	senderStore           *transfer.SenderStore
 	durableStoreFn        func(outDir string) (*transfer.DurableStore, error)
-	completedDestinations map[string]string
+	completedDestinations map[string]completedDestination
 }
 
 // NewTransferService builds the service. emit is the frontend sink (wails
@@ -183,7 +194,7 @@ func NewTransferService(emit func(name string, data any), dial SignalDialer) *Tr
 		revealMgr:             lifecycle.NewRevealManager(nil),
 		senderStore:           sStore,
 		durableStoreFn:        transfer.OpenStore,
-		completedDestinations: map[string]string{},
+		completedDestinations: map[string]completedDestination{},
 	}
 }
 
@@ -232,30 +243,10 @@ func (s *TransferService) openDurableStore(outDir string) (*transfer.DurableStor
 	return fn(outDir)
 }
 
-func (s *TransferService) recordCompleted(id, outPath string) {
+func (s *TransferService) recordCompleted(id string, dest completedDestination) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.completedDestinations[id] = outPath
-}
-
-func (s *TransferService) authorizedRoots() []string {
-	var roots []string
-	if s.configStore != nil {
-		if cfg, err := s.configStore.Load(); err == nil && cfg.DownloadDir != "" {
-			roots = append(roots, cfg.DownloadDir)
-		}
-	}
-	if userHome, err := os.UserHomeDir(); err == nil {
-		roots = append(roots, filepath.Join(userHome, "Downloads"))
-		roots = append(roots, filepath.Join(userHome, "Desktop"))
-	}
-	if wd, err := os.Getwd(); err == nil {
-		roots = append(roots, wd)
-	}
-	if tmp := os.TempDir(); tmp != "" {
-		roots = append(roots, tmp)
-	}
-	return roots
+	s.completedDestinations[id] = dest
 }
 
 func parseTURNServer(rawURL string) (urlNoUser, username, password string) {
@@ -317,28 +308,26 @@ func (s *TransferService) resolveICEServers() ([]webrtc.ICEServer, error) {
 		}
 		if strings.HasPrefix(raw, "turn:") || strings.HasPrefix(raw, "turns:") {
 			urlNoUser, username, pwd := parseTURNServer(raw)
+			if pwd != "" {
+				return nil, fmt.Errorf("turn server %q contains an embedded password; storing credentials in configuration is forbidden", raw)
+			}
 			srv := webrtc.ICEServer{
 				URLs: []string{urlNoUser},
 			}
 			if username != "" {
 				srv.Username = username
-				if pwd != "" {
-					srv.Credential = pwd
-					srv.CredentialType = webrtc.ICECredentialTypePassword
-				} else {
-					cred, err := cs.GetTurnCredential(urlNoUser, username)
-					if err != nil && !errors.Is(err, config.ErrSecretStoreUnavailable) {
-						cred, err = cs.GetTurnCredential(raw, username)
-					}
-					if err != nil {
-						if errors.Is(err, config.ErrSecretStoreUnavailable) {
-							return nil, fmt.Errorf("turn server %q requires credentials but protected secret store is unavailable: %w", raw, err)
-						}
-						return nil, fmt.Errorf("turn credential not found for %s (user %s): %w", raw, username, err)
-					}
-					srv.Credential = string(cred)
-					srv.CredentialType = webrtc.ICECredentialTypePassword
+				cred, err := cs.GetTurnCredential(urlNoUser, username)
+				if err != nil && !errors.Is(err, config.ErrSecretStoreUnavailable) {
+					cred, err = cs.GetTurnCredential(raw, username)
 				}
+				if err != nil {
+					if errors.Is(err, config.ErrSecretStoreUnavailable) {
+						return nil, fmt.Errorf("turn server %q requires credentials but protected secret store is unavailable: %w", raw, err)
+					}
+					return nil, fmt.Errorf("turn credential not found for %s (user %s): %w", raw, username, err)
+				}
+				srv.Credential = string(cred)
+				srv.CredentialType = webrtc.ICECredentialTypePassword
 			}
 			resolved = append(resolved, srv)
 		} else {
@@ -731,20 +720,21 @@ func (s *TransferService) DiscardAllInterrupted(outDir string) error {
 }
 
 // RevealCompleted reveals the verified completed transfer output in the OS file manager.
-// The backend derives the path from trusted transfer state rather than arbitrary frontend input.
+// The backend derives the path and bounds it strictly to the exact trusted destination root
+// recorded upon verified completion.
 func (s *TransferService) RevealCompleted(id string) error {
 	s.mu.Lock()
-	targetPath, ok := s.completedDestinations[id]
+	dest, ok := s.completedDestinations[id]
 	rm := s.revealMgr
 	s.mu.Unlock()
 
-	if !ok || targetPath == "" {
+	if !ok || dest.Path == "" || dest.Root == "" {
 		return fmt.Errorf("no verified completed output found for transfer %q", id)
 	}
 	if rm == nil {
 		rm = lifecycle.NewRevealManager(nil)
 	}
-	return rm.Reveal(targetPath, s.authorizedRoots()...)
+	return rm.Reveal(dest.Path, dest.Root)
 }
 
 // GetConfig returns the desktop persistent configuration.
@@ -774,36 +764,6 @@ func (s *TransferService) ActiveCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.runs)
-}
-
-// OnSuspend handles OS application suspend.
-func (s *TransferService) OnSuspend() {
-	if s.emit != nil {
-		s.emit(TransferEventName, &TransferEvent{
-			Kind:  "lifecycle",
-			Phase: "suspend",
-		})
-	}
-}
-
-// OnResume handles OS application resume from sleep.
-func (s *TransferService) OnResume() {
-	if s.emit != nil {
-		s.emit(TransferEventName, &TransferEvent{
-			Kind:  "lifecycle",
-			Phase: "resume",
-		})
-	}
-}
-
-// OnNetworkChange handles OS network changes.
-func (s *TransferService) OnNetworkChange() {
-	if s.emit != nil {
-		s.emit(TransferEventName, &TransferEvent{
-			Kind:  "lifecycle",
-			Phase: "network_change",
-		})
-	}
 }
 
 // Shutdown gracefully cancels active transfers and waits for bounded teardown.
@@ -1218,8 +1178,11 @@ func (r *transferRun) runReceive(ctx context.Context, code, destDir, server stri
 		outPath = destDir
 	}
 
-	// Record verified completed destination for safe RevealCompleted
-	r.svc.recordCompleted(r.id, outPath)
+	// Record verified completed destination bound strictly to its destination root
+	r.svc.recordCompleted(r.id, completedDestination{
+		Path: outPath,
+		Root: destDir,
+	})
 
 	r.publish("done", func(ev *TransferEvent) {
 		ev.Digest = out.Digest
@@ -1350,8 +1313,11 @@ func (r *transferRun) runResumeReceive(ctx context.Context, transferID, code, de
 		outPath = destDir
 	}
 
-	// Record verified completed destination for safe RevealCompleted
-	r.svc.recordCompleted(r.id, outPath)
+	// Record verified completed destination bound strictly to its destination root
+	r.svc.recordCompleted(r.id, completedDestination{
+		Path: outPath,
+		Root: destDir,
+	})
 
 	r.publish("done", func(ev *TransferEvent) {
 		ev.Digest = out.Digest

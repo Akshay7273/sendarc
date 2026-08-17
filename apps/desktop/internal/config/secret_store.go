@@ -4,6 +4,7 @@ package config
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -146,6 +147,9 @@ func NewDarwinKeychainSecretStore(serviceName string) *DarwinKeychainSecretStore
 
 // Get retrieves a generic password from the macOS Keychain.
 func (d *DarwinKeychainSecretStore) Get(key string) ([]byte, error) {
+	if !d.IsAvailable() {
+		return nil, ErrSecretStoreUnavailable
+	}
 	cmd := exec.Command("/usr/bin/security", "find-generic-password", "-s", d.serviceName, "-a", key, "-w")
 	out, err := cmd.Output()
 	if err != nil {
@@ -157,6 +161,9 @@ func (d *DarwinKeychainSecretStore) Get(key string) ([]byte, error) {
 
 // Set saves or updates a generic password in the macOS Keychain.
 func (d *DarwinKeychainSecretStore) Set(key string, secret []byte) error {
+	if !d.IsAvailable() {
+		return ErrSecretStoreUnavailable
+	}
 	if key == "" {
 		return errors.New("secret key cannot be empty")
 	}
@@ -169,14 +176,21 @@ func (d *DarwinKeychainSecretStore) Set(key string, secret []byte) error {
 
 // Delete removes a generic password from the macOS Keychain.
 func (d *DarwinKeychainSecretStore) Delete(key string) error {
+	if !d.IsAvailable() {
+		return nil
+	}
 	cmd := exec.Command("/usr/bin/security", "delete-generic-password", "-s", d.serviceName, "-a", key)
 	_ = cmd.Run()
 	return nil
 }
 
-// IsAvailable reports true when running on Darwin.
+// IsAvailable reports true on Darwin when security CLI is in PATH.
 func (d *DarwinKeychainSecretStore) IsAvailable() bool {
-	return runtime.GOOS == "darwin"
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+	_, err := exec.LookPath("security")
+	return err == nil
 }
 
 // BackendName returns "macos-keychain".
@@ -275,6 +289,16 @@ func (w *WindowsDPAPIStore) keyPath(key string) string {
 	return filepath.Join(w.storageDir, hex.EncodeToString(h[:])+".dpapi")
 }
 
+// EncodeDPAPICiphertextBlob formats DPAPI protected ciphertext into a Base64 string for disk storage.
+func EncodeDPAPICiphertextBlob(rawCiphertext []byte) string {
+	return base64.StdEncoding.EncodeToString(rawCiphertext)
+}
+
+// DecodeDPAPICiphertextBlob parses a Base64 string from disk into raw DPAPI ciphertext bytes.
+func DecodeDPAPICiphertextBlob(b64Ciphertext string) ([]byte, error) {
+	return base64.StdEncoding.DecodeString(strings.TrimSpace(b64Ciphertext))
+}
+
 // Get reads and decrypts a DPAPI-protected secret.
 func (w *WindowsDPAPIStore) Get(key string) ([]byte, error) {
 	if !w.IsAvailable() {
@@ -289,15 +313,22 @@ func (w *WindowsDPAPIStore) Get(key string) ([]byte, error) {
 		return nil, fmt.Errorf("read dpapi file: %w", err)
 	}
 
-	// Decrypt via PowerShell ProtectedData
-	script := fmt.Sprintf(`[Convert]::ToBase64String([System.Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String('%s'), $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser))`, strings.TrimSpace(string(encData)))
+	// Validate ciphertext format
+	if _, err := DecodeDPAPICiphertextBlob(string(encData)); err != nil {
+		return nil, fmt.Errorf("corrupt dpapi ciphertext file: %w", err)
+	}
+
+	// Unprotect via PowerShell ProtectedData reading Base64 ciphertext from stdin
+	// and outputting Base64 decrypted plaintext to stdout (no secrets in command line args).
+	script := `$in = [Console]::In.ReadToEnd().Trim(); if ([string]::IsNullOrEmpty($in)) { exit 1 }; $enc = [Convert]::FromBase64String($in); $raw = [System.Security.Cryptography.ProtectedData]::Unprotect($enc, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser); [Console]::Out.Write([Convert]::ToBase64String($raw))`
 	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
+	cmd.Stdin = strings.NewReader(strings.TrimSpace(string(encData)))
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("dpapi unprotect error: %w", err)
 	}
 	dec64 := strings.TrimSpace(string(out))
-	return hex.DecodeString(dec64)
+	return base64.StdEncoding.DecodeString(dec64)
 }
 
 // Set encrypts and writes a DPAPI-protected secret.
@@ -312,17 +343,24 @@ func (w *WindowsDPAPIStore) Set(key string, secret []byte) error {
 		return fmt.Errorf("create secrets dir: %w", err)
 	}
 
-	hexSecret := hex.EncodeToString(secret)
-	script := fmt.Sprintf(`[Convert]::ToBase64String([System.Security.Cryptography.ProtectedData]::Protect([System.Text.Encoding]::UTF8.GetBytes('%s'), $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser))`, hexSecret)
+	// Protect via PowerShell ProtectedData reading Base64 plaintext from stdin
+	// and outputting Base64 ciphertext to stdout (no secrets in command line args).
+	script := `$in = [Console]::In.ReadToEnd().Trim(); if ([string]::IsNullOrEmpty($in)) { exit 1 }; $raw = [Convert]::FromBase64String($in); $enc = [System.Security.Cryptography.ProtectedData]::Protect($raw, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser); [Console]::Out.Write([Convert]::ToBase64String($enc))`
 	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
+	cmd.Stdin = strings.NewReader(base64.StdEncoding.EncodeToString(secret))
 	out, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("dpapi protect error: %w", err)
 	}
 
+	b64Ciphertext := strings.TrimSpace(string(out))
+	if _, err := DecodeDPAPICiphertextBlob(b64Ciphertext); err != nil {
+		return fmt.Errorf("invalid dpapi output ciphertext: %w", err)
+	}
+
 	p := w.keyPath(key)
 	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, []byte(strings.TrimSpace(string(out))), 0o600); err != nil {
+	if err := os.WriteFile(tmp, []byte(b64Ciphertext), 0o600); err != nil {
 		return fmt.Errorf("write dpapi file: %w", err)
 	}
 	if err := os.Rename(tmp, p); err != nil {
@@ -341,9 +379,13 @@ func (w *WindowsDPAPIStore) Delete(key string) error {
 	return nil
 }
 
-// IsAvailable reports true when running on Windows.
+// IsAvailable reports true when running on Windows and PowerShell is in PATH.
 func (w *WindowsDPAPIStore) IsAvailable() bool {
-	return runtime.GOOS == "windows"
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	_, err := exec.LookPath("powershell")
+	return err == nil
 }
 
 // BackendName returns "windows-dpapi".

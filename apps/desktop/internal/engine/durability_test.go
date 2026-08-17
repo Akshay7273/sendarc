@@ -254,6 +254,52 @@ func TestDesktopDurableResumeHappyPath(t *testing.T) {
 	_ = hub
 }
 
+func TestDesktopRevealCompletedBoundToArbitraryDestination(t *testing.T) {
+	svc, sink, hub := newLoopbackService(t)
+	dir := t.TempDir()
+	// Destination chosen outside standard Downloads/Desktop/CWD/tmp
+	customDestDir := filepath.Join(dir, "custom_arbitrary_picker_destination_xyz")
+	if err := os.MkdirAll(customDestDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	srcFile := writePayload(t, dir, "arbitrary_doc.pdf", 64*1024)
+
+	send, err := svc.Send([]string{srcFile}, "wss://loopback/ws")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	invite := sink.waitFor(t, "invite", 10*time.Second)
+
+	recv, err := svc.Receive(invite.Code, customDestDir, "wss://loopback/ws")
+	if err != nil {
+		t.Fatalf("Receive: %v", err)
+	}
+
+	sink.waitForID(t, send.ID, "done", 10*time.Second)
+	sink.waitForID(t, recv.ID, "done", 10*time.Second)
+
+	var revealedPath string
+	rm := lifecycle.NewRevealManager(func(target string) error {
+		revealedPath = target
+		return nil
+	})
+	svc.SetRevealManager(rm)
+
+	// RevealCompleted succeeds because destination root was faithfully recorded
+	if err := svc.RevealCompleted(recv.ID); err != nil {
+		t.Fatalf("RevealCompleted on arbitrary custom destination failed: %v", err)
+	}
+
+	expected := filepath.Join(customDestDir, "arbitrary_doc.pdf")
+	realExpected, _ := filepath.EvalSymlinks(expected)
+	if revealedPath != realExpected && revealedPath != expected {
+		t.Errorf("revealedPath = %q, want %q", revealedPath, expected)
+	}
+
+	_ = hub
+}
+
 func TestDesktopDurableResumeRefusesCorruptJournal(t *testing.T) {
 	svc, sink, _ := newLoopbackService(t)
 	dir := t.TempDir()
@@ -411,6 +457,30 @@ func TestDesktopPersistedICEServersApplication(t *testing.T) {
 	}
 }
 
+func TestDesktopRejectEmbeddedTURNPassword(t *testing.T) {
+	dir := t.TempDir()
+	memSecret := config.NewMemorySecretStore()
+	cfgStore, err := config.NewStore(dir, memSecret)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	// Bypass Validate() to simulate malicious or legacy file with embedded password
+	cfg := config.DefaultConfig()
+	cfg.ICEServers = []string{"turn:beamuser:embeddedpwd@relay.custom.org:3478"}
+
+	svc := NewTransferService(nil, nil)
+	svc.SetConfigStore(cfgStore)
+
+	// Save raw config bypass
+	_ = os.WriteFile(cfgStore.ConfigPath(), []byte(`{"iceServers":["turn:beamuser:embeddedpwd@relay.custom.org:3478"]}`), 0o600)
+
+	_, err = svc.resolveICEServers()
+	if err == nil || !strings.Contains(err.Error(), "embedded password") {
+		t.Fatalf("resolveICEServers expected embedded password rejection error, got %v", err)
+	}
+}
+
 func TestDesktopTurnCredentialUnavailableDegradation(t *testing.T) {
 	dir := t.TempDir()
 	unavail := config.NewUnavailableSecretStore("explicit test unavailable")
@@ -431,26 +501,6 @@ func TestDesktopTurnCredentialUnavailableDegradation(t *testing.T) {
 	_, err = svc.resolveICEServers()
 	if err == nil || !strings.Contains(err.Error(), "protected secret store is unavailable") {
 		t.Fatalf("resolveICEServers expected secret store unavailable error, got %v", err)
-	}
-}
-
-func TestDesktopLifecycleHooks(t *testing.T) {
-	sink := &eventSink{}
-	svc := NewTransferService(sink.emit, nil)
-
-	// Call lifecycle hooks
-	svc.OnSuspend()
-	svc.OnResume()
-	svc.OnNetworkChange()
-
-	events := sink.all()
-	if len(events) != 3 {
-		t.Fatalf("expected 3 lifecycle events, got %d", len(events))
-	}
-	for i, ev := range events {
-		if ev.Kind != "lifecycle" {
-			t.Errorf("events[%d].Kind = %q, want 'lifecycle'", i, ev.Kind)
-		}
 	}
 }
 

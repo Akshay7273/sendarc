@@ -1,9 +1,11 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -43,7 +45,7 @@ func TestConfigStoreLoadSave(t *testing.T) {
 	// 2. Modify and save config
 	custom := loaded
 	custom.ServerURL = "wss://custom.example.com:9000/ws"
-	custom.ICEServers = []string{"stun:stun1.example.com:3478", "turn:turn.example.com:3478"}
+	custom.ICEServers = []string{"stun:stun1.example.com:3478", "turn:turnuser@turn.example.com:3478"}
 	custom.DownloadDir = filepath.Join(dir, "downloads")
 	custom.CloseToTray = true
 	custom.Theme = "dark"
@@ -132,11 +134,25 @@ func TestConfigValidation(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "valid STUN and TURN urls",
+			name: "valid STUN and username-only TURN urls",
 			mutate: func(c *DesktopConfig) {
-				c.ICEServers = []string{"stun:stun.example.com", "turns:turn.example.com:5349"}
+				c.ICEServers = []string{"stun:stun.example.com", "turn:beamuser@turn.example.com:3478", "turns:relay.example.com:5349"}
 			},
 			wantErr: false,
+		},
+		{
+			name: "embedded TURN password in config is forbidden",
+			mutate: func(c *DesktopConfig) {
+				c.ICEServers = []string{"turn:beamuser:plaintextpassword@turn.example.com:3478"}
+			},
+			wantErr: true,
+		},
+		{
+			name: "embedded TURNS password with slashes is forbidden",
+			mutate: func(c *DesktopConfig) {
+				c.ICEServers = []string{"turns://beamuser:secret123@relay.example.com:5349"}
+			},
+			wantErr: true,
 		},
 		{
 			name: "invalid theme",
@@ -304,5 +320,65 @@ func TestUnavailableSecretStoreRefusesPlaintextPersistence(t *testing.T) {
 		if e.Name() != ConfigFileName {
 			t.Fatalf("unexpected file %q created on disk when secret store is unavailable", e.Name())
 		}
+	}
+}
+
+func TestDPAPICiphertextBlobRoundTrip(t *testing.T) {
+	testPayloads := [][]byte{
+		[]byte("simple-ascii-secret"),
+		[]byte(""),
+		[]byte("\x00\x01\x02\x03\xff\xfe\xfd\x00binary-data"),
+		[]byte("unicode-🔑-secret-🔒-token"),
+		bytes.Repeat([]byte("A"), 4096),
+	}
+
+	for _, payload := range testPayloads {
+		encoded := EncodeDPAPICiphertextBlob(payload)
+		decoded, err := DecodeDPAPICiphertextBlob(encoded)
+		if err != nil {
+			t.Fatalf("DecodeDPAPICiphertextBlob error: %v", err)
+		}
+		if !bytes.Equal(decoded, payload) {
+			t.Fatalf("DPAPI round-trip mismatch: got %v, want %v", decoded, payload)
+		}
+	}
+
+	// Corrupt Base64 decoding fails safely
+	if _, err := DecodeDPAPICiphertextBlob("!!!not-valid-base64!!!"); err == nil {
+		t.Fatalf("DecodeDPAPICiphertextBlob on corrupt data expected error, got nil")
+	}
+}
+
+func TestConfigFileContainsNoSecrets(t *testing.T) {
+	dir := t.TempDir()
+	memSecret := NewMemorySecretStore()
+	store, err := NewStore(dir, memSecret)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	serverURL := "turn:relay.sendbeam.org:3478"
+	username := "beamuser"
+	secretPass := "ultra-confidential-password-xyz"
+
+	// 1. Save TURN password to SecretStore
+	if err := store.SaveTurnCredential(serverURL, username, []byte(secretPass)); err != nil {
+		t.Fatalf("SaveTurnCredential: %v", err)
+	}
+
+	// 2. Save desktop config with non-secret ICE server URL
+	cfg := DefaultConfig()
+	cfg.ICEServers = []string{"stun:stun1.example.com:3478", "turn:beamuser@relay.sendbeam.org:3478"}
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("Save config: %v", err)
+	}
+
+	// 3. Inspect raw desktop_config.json on disk
+	rawJSON, err := os.ReadFile(store.ConfigPath())
+	if err != nil {
+		t.Fatalf("ReadFile config: %v", err)
+	}
+	if strings.Contains(string(rawJSON), secretPass) {
+		t.Fatalf("desktop_config.json leaked secret password! content: %s", string(rawJSON))
 	}
 }

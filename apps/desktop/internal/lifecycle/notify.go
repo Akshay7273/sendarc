@@ -144,9 +144,13 @@ func (w *WindowsNotifier) NotifyFailure(title, message string) {
 	_ = cmd.Start()
 }
 
-// IsAvailable reports true on Windows.
+// IsAvailable reports true on Windows when PowerShell is available.
 func (w *WindowsNotifier) IsAvailable() bool {
-	return runtime.GOOS == "windows"
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	_, err := exec.LookPath("powershell")
+	return err == nil
 }
 
 // BackendName returns "windows-powershell".

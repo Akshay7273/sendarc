@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -234,5 +235,30 @@ func TestNotifiers(t *testing.T) {
 	}
 	if defNotif.BackendName() == "" {
 		t.Errorf("DefaultNotifier.BackendName() is empty")
+	}
+
+	// Platform Notifiers
+	darwinNotif := &DarwinNotifier{}
+	if runtime.GOOS != "darwin" && darwinNotif.IsAvailable() {
+		t.Errorf("DarwinNotifier.IsAvailable() must be false on non-darwin")
+	}
+	if darwinNotif.BackendName() != "darwin-osascript" {
+		t.Errorf("DarwinNotifier.BackendName() = %q, want darwin-osascript", darwinNotif.BackendName())
+	}
+
+	winNotif := &WindowsNotifier{}
+	if runtime.GOOS != "windows" && winNotif.IsAvailable() {
+		t.Errorf("WindowsNotifier.IsAvailable() must be false on non-windows")
+	}
+	if winNotif.BackendName() != "windows-powershell" {
+		t.Errorf("WindowsNotifier.BackendName() = %q, want windows-powershell", winNotif.BackendName())
+	}
+
+	linuxNotif := &LinuxNotifier{}
+	if runtime.GOOS != "linux" && linuxNotif.IsAvailable() {
+		t.Errorf("LinuxNotifier.IsAvailable() must be false on non-linux")
+	}
+	if linuxNotif.BackendName() != "linux-notify-send" {
+		t.Errorf("LinuxNotifier.BackendName() = %q, want linux-notify-send", linuxNotif.BackendName())
 	}
 }
