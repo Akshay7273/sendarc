@@ -9,11 +9,75 @@ on:
 permissions:
   contents: read
 
+# Concurrency configuration:
+# - PR runs: grouped by PR number with cancel-in-progress: true so new pushes cancel stale PR checks.
+# - Push runs (main): grouped by unique commit SHA with cancel-in-progress: false so every canonical main SHA receives its own durable validation without being cancelled by later pushes.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  metadata:
+    name: metadata & attribution hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify PR metadata and title formatting
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          echo "Validating PR #$PR_NUMBER title: '$PR_TITLE'"
+          # 1. Validate conventional commit format: type(scope)?: description
+          if ! echo "$PR_TITLE" | grep -Eq '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-zA-Z0-9_-]+\))?: .+'; then
+            echo "::error::PR title must follow Conventional Commits format (e.g. 'feat: description' or 'chore(ci): description')."
+            exit 1
+          fi
+
+          # 2. Check for manual/hardcoded PR number suffixes in PR title itself (GitHub appends ' (#<pr>)' automatically on squash merge)
+          if echo "$PR_TITLE" | grep -Eq '\(#[0-9]+\)$'; then
+            echo "::error::PR title should NOT include a manual '(#...)' suffix. GitHub adds ' (#$PR_NUMBER)' automatically upon squash merge."
+            exit 1
+          fi
+
+          # 3. Check for planning/internal task IDs in title
+          if echo "$PR_TITLE" | grep -Eiq 'V[0-9]+-PR[0-9]+'; then
+            echo "::error::PR title must not contain internal planning tags (e.g. V14-PR04)."
+            exit 1
+          fi
+
+      - name: Guard against AI/tool contributor attribution
+        run: |
+          # Check commit messages in the current branch/PR against known automated coding-agent attribution trailers
+          FORBIDDEN_PATTERNS='(Generated with Codebuff|Co-Authored-By:.*Codebuff|Freebuff|AI-generated-by|tool-generated-by|generated-by:)'
+
+          # Inspect commit range
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+            COMMITS=$(git rev-list "$BASE_SHA..$HEAD_SHA" || true)
+          else
+            # On direct push, check the pushed commits
+            COMMITS="${{ github.sha }}"
+          fi
+
+          for c in $COMMITS; do
+            MSG=$(git log -1 --format='%B' "$c")
+            AUTHOR=$(git log -1 --format='%an <%ae>' "$c")
+            COMMITTER=$(git log -1 --format='%cn <%ce>' "$c")
+
+            FULL_META="$AUTHOR"$'\n'"$COMMITTER"$'\n'"$MSG"
+            if echo "$FULL_META" | grep -Eiq "$FORBIDDEN_PATTERNS"; then
+              echo "::error::Commit $c contains forbidden automated agent attribution in metadata."
+              exit 1
+            fi
+          done
+          echo "Attribution hygiene check passed."
+
   web:
     name: web (lint, typecheck, test, build)
     runs-on: ubuntu-latest
@@ -165,27 +229,6 @@ jobs:
         with:
           version: v2.12.2
           working-directory: apps/desktop
-
-  campaign:
-    # V13-PR08 heavyweight validation: the >= 100 GiB streamed resume campaign proves a very
-    # large logical transfer resumes from a deep durable checkpoint with bounded memory and no
-    # full-file staging. Owned by CI, never the laptop (hashing 100+ GiB takes minutes).
-    name: campaign (100 GiB streamed resume)
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-          cache-dependency-path: packages/wire/go.sum
-
-      - name: Run 100 GiB campaign
-        working-directory: packages/wire
-        # go test's default 10-minute timeout killed the stream mid-run; the campaign needs
-        # the job's full budget (hashing 100+ GiB takes tens of minutes), so raise it.
-        run: go test -tags campaign -timeout 90m -run 'TestCampaign' -v ./...
 
   branding:
     name: branding (no stale SendArc references)

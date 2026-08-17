@@ -1,0 +1,36 @@
+name: campaign
+
+on:
+  schedule:
+    # Run weekly on Sunday at 04:00 UTC
+    - cron: '0 4 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: campaign-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  campaign:
+    # Heavyweight validation: the >= 100 GiB streamed resume campaign proves a very
+    # large logical transfer resumes from a deep durable checkpoint with bounded memory and no
+    # full-file staging. Owned by periodic CI and manual dispatch, never ordinary PR CI.
+    name: campaign (100 GiB streamed resume)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: packages/wire/go.sum
+
+      - name: Run 100 GiB campaign
+        working-directory: packages/wire
+        # go test's default 10-minute timeout killed the stream mid-run; the campaign needs
+        # the job's full budget (hashing 100+ GiB takes tens of minutes), so raise it.
+        run: go test -tags campaign -timeout 90m -run 'TestCampaign' -v ./...
