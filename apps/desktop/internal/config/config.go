@@ -73,6 +73,17 @@ func (c *DesktopConfig) Validate() error {
 			!strings.HasPrefix(ice, "turn:") && !strings.HasPrefix(ice, "turns:") {
 			return fmt.Errorf("invalid ice server url %q (must begin with stun:, stuns:, turn:, or turns)", ice)
 		}
+		// Embedded passwords in configuration are strictly forbidden to prevent plaintext secret leaks.
+		if strings.HasPrefix(ice, "turn:") || strings.HasPrefix(ice, "turns:") {
+			rest := strings.TrimPrefix(strings.TrimPrefix(ice, "turns:"), "turn:")
+			rest = strings.TrimPrefix(rest, "//")
+			if atIdx := strings.LastIndex(rest, "@"); atIdx != -1 {
+				userInfo := rest[:atIdx]
+				if strings.Contains(userInfo, ":") {
+					return fmt.Errorf("invalid ice server %q: embedded passwords are forbidden in configuration; store credentials through the protected credential store", ice)
+				}
+			}
+		}
 	}
 	if c.Theme != "" && c.Theme != "system" && c.Theme != "dark" && c.Theme != "light" {
 		return fmt.Errorf("invalid theme %q (must be system, dark, or light)", c.Theme)

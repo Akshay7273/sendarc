@@ -83,7 +83,7 @@ func main() {
 			Port: 18123,
 		},
 		Mac: application.MacOptions{
-			ApplicationShouldTerminateAfterLastWindowClosed: true,
+			ApplicationShouldTerminateAfterLastWindowClosed: false,
 		},
 	})
 
@@ -105,7 +105,31 @@ func main() {
 
 	win := app.Window.NewWithOptions(winOpts)
 
-	// Close-to-tray handling where supported
+	// System Tray: provides an authoritative reopen and quit mechanism so close-to-tray
+	// or start-minimized never creates an unreachable or un-restorable application.
+	systemTray := app.SystemTray.New()
+	trayMenu := app.NewMenu()
+	trayMenu.Add("Show SendBeam").OnClick(func(_ *application.Context) {
+		win.Show()
+		win.Focus()
+	})
+	trayMenu.Add("Quit SendBeam").OnClick(func(_ *application.Context) {
+		_ = transferSvc.Shutdown(3 * time.Second)
+		app.Quit()
+	})
+	systemTray.SetMenu(trayMenu)
+	systemTray.OnClick(func() {
+		win.Show()
+		win.Focus()
+	})
+
+	// macOS dock reopen hook
+	app.Event.OnApplicationEvent(events.Mac.ApplicationShouldHandleReopen, func(_ *application.ApplicationEvent) {
+		win.Show()
+		win.Focus()
+	})
+
+	// Close-to-tray handling: hides window into tray rather than destroying active transfers
 	if cfg.CloseToTray {
 		win.OnWindowEvent(events.Common.WindowClosing, func(e *application.WindowEvent) {
 			if cfg.CloseToTray {
