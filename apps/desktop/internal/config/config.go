@@ -61,7 +61,7 @@ func (c *DesktopConfig) Validate() error {
 	if c.ServerURL != "" {
 		u, err := url.Parse(c.ServerURL)
 		if err != nil || (u.Scheme != "ws" && u.Scheme != "wss" && u.Scheme != "http" && u.Scheme != "https") {
-			return fmt.Errorf("invalid server URL %q: must be a valid ws:// or wss:// URL", c.ServerURL)
+			return fmt.Errorf("invalid server url %q (must be a valid ws:// or wss:// url)", c.ServerURL)
 		}
 	}
 	for _, ice := range c.ICEServers {
@@ -71,11 +71,11 @@ func (c *DesktopConfig) Validate() error {
 		}
 		if !strings.HasPrefix(ice, "stun:") && !strings.HasPrefix(ice, "stuns:") &&
 			!strings.HasPrefix(ice, "turn:") && !strings.HasPrefix(ice, "turns:") {
-			return fmt.Errorf("invalid ice server URL %q: must begin with stun:, stuns:, turn:, or turns:", ice)
+			return fmt.Errorf("invalid ice server url %q (must begin with stun:, stuns:, turn:, or turns)", ice)
 		}
 	}
 	if c.Theme != "" && c.Theme != "system" && c.Theme != "dark" && c.Theme != "light" {
-		return fmt.Errorf("invalid theme %q: must be system, dark, or light", c.Theme)
+		return fmt.Errorf("invalid theme %q (must be system, dark, or light)", c.Theme)
 	}
 	return nil
 }

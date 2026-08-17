@@ -46,17 +46,17 @@ func NewUnavailableSecretStore(reason string) *UnavailableSecretStore {
 }
 
 // Get always returns an error indicating secret storage is unavailable.
-func (u *UnavailableSecretStore) Get(key string) ([]byte, error) {
+func (u *UnavailableSecretStore) Get(_ string) ([]byte, error) {
 	return nil, fmt.Errorf("%w: %s", ErrSecretStoreUnavailable, u.reason)
 }
 
 // Set always returns an error indicating secret storage is unavailable.
-func (u *UnavailableSecretStore) Set(key string, secret []byte) error {
+func (u *UnavailableSecretStore) Set(_ string, _ []byte) error {
 	return fmt.Errorf("%w: %s", ErrSecretStoreUnavailable, u.reason)
 }
 
 // Delete is an idempotent no-op on unavailable stores.
-func (u *UnavailableSecretStore) Delete(key string) error {
+func (u *UnavailableSecretStore) Delete(_ string) error {
 	return nil
 }
 

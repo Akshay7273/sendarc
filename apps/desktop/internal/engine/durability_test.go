@@ -115,9 +115,10 @@ func TestDesktopDurableListingAndInspect(t *testing.T) {
 
 	var recvItem, sendItem *DurableTransferItem
 	for i := range items {
-		if items[i].Role == "receive" {
+		switch items[i].Role {
+		case "receive":
 			recvItem = &items[i]
-		} else if items[i].Role == "send" {
+		case "send":
 			sendItem = &items[i]
 		}
 	}
@@ -283,7 +284,7 @@ func TestDesktopPathSafetyAndDestinationEscapeDefense(t *testing.T) {
 
 	// 3. RevealFile path validation
 	launcherCalled := false
-	rm := lifecycle.NewRevealManager(func(target string) error {
+	rm := lifecycle.NewRevealManager(func(_ string) error {
 		launcherCalled = true
 		return nil
 	})

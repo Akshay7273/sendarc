@@ -25,10 +25,10 @@ type Notifier interface {
 type SilentNotifier struct{}
 
 // NotifySuccess is a no-op for SilentNotifier.
-func (s *SilentNotifier) NotifySuccess(title, message, path string) {}
+func (s *SilentNotifier) NotifySuccess(_, _, _ string) {}
 
 // NotifyFailure is a no-op for SilentNotifier.
-func (s *SilentNotifier) NotifyFailure(title, message string) {}
+func (s *SilentNotifier) NotifyFailure(_, _ string) {}
 
 // TestNotifier records notifications in memory for assertions.
 type TestNotifier struct {
