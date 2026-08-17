@@ -10,6 +10,8 @@
 #     product_version        = dev
 #     display_version        = dev
 #     numeric_version        = 0.0.0
+#     macos_short_version    = 0.0.0
+#     macos_bundle_version   = 0.0.0
 #     windows_fixed_version  = 0.0.0.0
 #     win_major              = 0
 #     win_minor              = 0
@@ -21,6 +23,8 @@
 #     product_version        = X.Y.Z
 #     display_version        = X.Y.Z
 #     numeric_version        = X.Y.Z
+#     macos_short_version    = X.Y.Z
+#     macos_bundle_version   = X.Y.Z
 #     windows_fixed_version  = X.Y.Z.0
 #     win_major              = X
 #     win_minor              = Y
@@ -35,12 +39,14 @@ REF_NAME="${GITHUB_REF_NAME:-}"
 SHA="${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || echo "0000000000000000000000000000000000000000")}"
 SHORT_SHA="${SHA:0:12}"
 
-if [ "${REF_TYPE}" = "tag" ] && [[ "${REF_NAME}" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-  # Strip leading 'v' if present
+if [ "${REF_TYPE}" = "tag" ] && [[ "${REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  # Strip leading 'v'
   RAW_VER="${REF_NAME#v}"
   PRODUCT_VERSION="${RAW_VER}"
   DISPLAY_VERSION="${RAW_VER}"
   NUMERIC_VERSION="${RAW_VER}"
+  MACOS_SHORT_VERSION="${RAW_VER}"
+  MACOS_BUNDLE_VERSION="${RAW_VER}"
   DEB_VERSION="${RAW_VER}"
 
   # Parse semver components for Windows FixedFileInfo
@@ -54,6 +60,8 @@ else
   PRODUCT_VERSION="dev"
   DISPLAY_VERSION="dev"
   NUMERIC_VERSION="0.0.0"
+  MACOS_SHORT_VERSION="0.0.0"
+  MACOS_BUNDLE_VERSION="0.0.0"
   DEB_VERSION="0.0.0~dev+git.${SHORT_SHA}"
 
   WIN_MAJOR="0"
@@ -70,6 +78,8 @@ if [ "${OUTPUT_MODE}" = "--github-output" ] && [ -n "${GITHUB_OUTPUT:-}" ]; then
     echo "version=${PRODUCT_VERSION}"
     echo "display_version=${DISPLAY_VERSION}"
     echo "numeric_version=${NUMERIC_VERSION}"
+    echo "macos_short_version=${MACOS_SHORT_VERSION}"
+    echo "macos_bundle_version=${MACOS_BUNDLE_VERSION}"
     echo "windows_fixed_version=${WINDOWS_FIXED_VERSION}"
     echo "win_major=${WIN_MAJOR}"
     echo "win_minor=${WIN_MINOR}"
@@ -86,6 +96,8 @@ cat <<EOF
 version=${PRODUCT_VERSION}
 display_version=${DISPLAY_VERSION}
 numeric_version=${NUMERIC_VERSION}
+macos_short_version=${MACOS_SHORT_VERSION}
+macos_bundle_version=${MACOS_BUNDLE_VERSION}
 windows_fixed_version=${WINDOWS_FIXED_VERSION}
 win_major=${WIN_MAJOR}
 win_minor=${WIN_MINOR}
