@@ -45,15 +45,17 @@ The SendBeam Desktop application packages the Go transfer engine with native pla
 
 ## Authoritative Version Resolution Policy
 
-Build and packaging metadata is resolved deterministically through a single unified policy across all CLI and desktop platforms:
+Build and packaging metadata is resolved deterministically through [scripts/version-metadata.sh](scripts/version-metadata.sh) across all CLI and desktop platforms:
 
-| Version Category       | Untagged / Development Builds | Tagged Release Builds (`vX.Y.Z`) |
-| :--------------------- | :---------------------------- | :------------------------------- |
-| **Semantic / Display** | `dev`                         | `X.Y.Z`                          |
-| **Numeric Platform**   | `0.0.0`                       | `X.Y.Z`                          |
-| **Windows Fixed File** | `0.0.0.0`                     | `X.Y.Z.0`                        |
-| **Debian Package**     | `0.0.0~dev+git.<shortsha>`    | `X.Y.Z`                          |
-| **Git Commit**         | Exact 40-character commit SHA | Exact 40-character commit SHA    |
+| Version Field                | Untagged / Development / PR Builds | Tagged Release Builds (`vX.Y.Z`) | Description                                                          |
+| :--------------------------- | :--------------------------------- | :------------------------------- | :------------------------------------------------------------------- |
+| **Internal Product Version** | `dev`                              | `X.Y.Z`                          | Go `-ldflags` embedded product build version (`ProductVersion`)      |
+| **Display Version**          | `dev`                              | `X.Y.Z`                          | Human-facing CLI version UX and installer display string             |
+| **macOS Short Version**      | `0.0.0`                            | `X.Y.Z`                          | `CFBundleShortVersionString` (strictly `[0-9]+(\.[0-9]+)*`)          |
+| **macOS Bundle Version**     | `0.0.0`                            | `X.Y.Z`                          | `CFBundleVersion` (strictly numeric dotted version)                  |
+| **Windows Fixed Version**    | `0.0.0.0`                          | `X.Y.Z.0`                        | 4-part numeric PE `FixedFileInfo` (`FileVersion` / `ProductVersion`) |
+| **Debian Package Version**   | `0.0.0~dev+git.<shortsha>`         | `X.Y.Z`                          | Debian-compliant package version string                              |
+| **Git Commit**               | Exact 40-character commit SHA      | Exact 40-character commit SHA    | Full git commit SHA embedded via `-ldflags`                          |
 
 Wire protocol versioning remains immutable (`sendbeam/1`) and is decoupled from product release versions.
 
