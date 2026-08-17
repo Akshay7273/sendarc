@@ -1,3 +1,5 @@
+// Package lifecycle manages desktop lifecycle events, single-instance locking,
+// notifications, and OS integration.
 package lifecycle
 
 import (

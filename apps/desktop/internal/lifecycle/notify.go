@@ -1,3 +1,5 @@
+// Package lifecycle manages desktop lifecycle events, single-instance locking,
+// notifications, and OS integration.
 package lifecycle
 
 import (
@@ -22,8 +24,11 @@ type Notifier interface {
 // SilentNotifier is a no-op notifier for headless server mode or when notifications are disabled.
 type SilentNotifier struct{}
 
+// NotifySuccess is a no-op for SilentNotifier.
 func (s *SilentNotifier) NotifySuccess(title, message, path string) {}
-func (s *SilentNotifier) NotifyFailure(title, message string)       {}
+
+// NotifyFailure is a no-op for SilentNotifier.
+func (s *SilentNotifier) NotifyFailure(title, message string) {}
 
 // TestNotifier records notifications in memory for assertions.
 type TestNotifier struct {
@@ -36,6 +41,7 @@ func NewTestNotifier() *TestNotifier {
 	return &TestNotifier{}
 }
 
+// NotifySuccess records a success notification event.
 func (t *TestNotifier) NotifySuccess(title, message, path string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -47,6 +53,7 @@ func (t *TestNotifier) NotifySuccess(title, message, path string) {
 	})
 }
 
+// NotifyFailure records a failure notification event.
 func (t *TestNotifier) NotifyFailure(title, message string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -61,14 +68,14 @@ func (t *TestNotifier) NotifyFailure(title, message string) {
 func (t *TestNotifier) Events() []NotificationEvent {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	out := make([]NotificationEvent, len(t.events))
-	copy(out, t.events)
-	return out
+	cpy := make([]NotificationEvent, len(t.events))
+	copy(cpy, t.events)
+	return cpy
 }
 
 // Reset clears the recorded events.
 func (t *TestNotifier) Reset() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.events = nil
+	t.events = t.events[:0]
 }

@@ -1,3 +1,4 @@
+// Package config manages desktop persistent configuration and credentials.
 package config
 
 import (
@@ -70,7 +71,7 @@ func (c *DesktopConfig) Validate() error {
 		}
 		if !strings.HasPrefix(ice, "stun:") && !strings.HasPrefix(ice, "stuns:") &&
 			!strings.HasPrefix(ice, "turn:") && !strings.HasPrefix(ice, "turns:") {
-			return fmt.Errorf("invalid ICE server URL %q: must begin with stun:, stuns:, turn:, or turns:", ice)
+			return fmt.Errorf("invalid ice server URL %q: must begin with stun:, stuns:, turn:, or turns:", ice)
 		}
 	}
 	if c.Theme != "" && c.Theme != "system" && c.Theme != "dark" && c.Theme != "light" {
@@ -102,36 +103,46 @@ func NewStore(configDir string, secrets SecretStore) (*Store, error) {
 		}
 		configDir = filepath.Join(dir, AppDirName)
 	}
-	if err := os.MkdirAll(configDir, 0o700); err != nil {
-		return nil, fmt.Errorf("create config directory %s: %w", configDir, err)
+
+	absDir, err := filepath.Abs(configDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve absolute config dir: %w", err)
 	}
+
 	if secrets == nil {
 		secrets = DefaultSecretStore()
 	}
+
 	return &Store{
-		configDir:   configDir,
-		configPath:  filepath.Join(configDir, ConfigFileName),
+		configDir:   absDir,
+		configPath:  filepath.Join(absDir, ConfigFileName),
 		secretStore: secrets,
 	}, nil
 }
 
-// ConfigDir returns the configuration directory.
+// ConfigDir returns the directory containing the desktop configuration.
 func (s *Store) ConfigDir() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.configDir
 }
 
-// ConfigPath returns the path to the desktop_config.json file.
+// ConfigPath returns the path of the desktop configuration file.
 func (s *Store) ConfigPath() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.configPath
 }
 
-// SecretStore returns the underlying secret store.
-func (s *Store) SecretStore() SecretStore {
+// Secrets returns the associated SecretStore.
+func (s *Store) Secrets() SecretStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.secretStore
 }
 
-// Load reads and validates the configuration from disk. If the file does not exist,
-// it returns DefaultConfig() without creating the file.
+// Load reads and parses desktop preferences from disk. If the file does not
+// exist, it returns DefaultConfig() without creating the file.
 func (s *Store) Load() (DesktopConfig, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -141,25 +152,25 @@ func (s *Store) Load() (DesktopConfig, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return DefaultConfig(), nil
 		}
-		return DesktopConfig{}, fmt.Errorf("read config: %w", err)
+		return DefaultConfig(), fmt.Errorf("read desktop config: %w", err)
 	}
 
 	cfg := DefaultConfig()
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return DesktopConfig{}, fmt.Errorf("parse config %s: %w", s.configPath, err)
+		return DefaultConfig(), fmt.Errorf("decode desktop config: %w", err)
 	}
 
 	if err := cfg.Validate(); err != nil {
-		return DesktopConfig{}, fmt.Errorf("validate config: %w", err)
+		return DefaultConfig(), fmt.Errorf("invalid config on disk: %w", err)
 	}
 
 	return cfg, nil
 }
 
-// Save writes the configuration to disk atomically with 0600 permissions.
+// Save validates and atomically writes desktop preferences to disk with 0600 permissions.
 func (s *Store) Save(cfg DesktopConfig) error {
 	if err := cfg.Validate(); err != nil {
-		return fmt.Errorf("validate config: %w", err)
+		return err
 	}
 
 	s.mu.Lock()
@@ -171,73 +182,61 @@ func (s *Store) Save(cfg DesktopConfig) error {
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
+		return fmt.Errorf("encode desktop config: %w", err)
 	}
 	data = append(data, '\n')
 
-	// Atomic write: write to temp file in same directory, sync, and rename
-	tmpFile, err := os.CreateTemp(s.configDir, "config-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create temp config file: %w", err)
-	}
-	tmpName := tmpFile.Name()
-	defer func() {
-		_ = os.Remove(tmpName) // clean up if rename did not happen
-	}()
-
-	if err := tmpFile.Chmod(0o600); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("chmod temp config: %w", err)
+	tmpFile := s.configPath + ".tmp"
+	if err := os.WriteFile(tmpFile, data, 0o600); err != nil {
+		return fmt.Errorf("write temporary config: %w", err)
 	}
 
-	if _, err := tmpFile.Write(data); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("write temp config: %w", err)
-	}
-
-	if err := tmpFile.Sync(); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("sync temp config: %w", err)
-	}
-
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("close temp config: %w", err)
-	}
-
-	if err := os.Rename(tmpName, s.configPath); err != nil {
-		return fmt.Errorf("replace config file: %w", err)
+	if err := os.Rename(tmpFile, s.configPath); err != nil {
+		_ = os.Remove(tmpFile)
+		return fmt.Errorf("atomic rename config: %w", err)
 	}
 
 	return nil
 }
 
-// SaveTurnCredential securely persists a TURN authentication secret into the OS-protected
-// secret store under a key derived from server URL and username.
-func (s *Store) SaveTurnCredential(serverURL, username string, secret []byte) error {
-	if serverURL == "" || username == "" {
-		return errors.New("server URL and username are required")
+// SaveTurnCredential saves TURN server credentials in OS-protected secret storage.
+func (s *Store) SaveTurnCredential(serverURL, username string, credential []byte) error {
+	s.mu.RLock()
+	secrets := s.secretStore
+	s.mu.RUnlock()
+
+	if secrets == nil || !secrets.IsAvailable() {
+		return fmt.Errorf("%w: cannot store turn credentials", ErrSecretStoreUnavailable)
 	}
-	if len(secret) == 0 {
-		return errors.New("secret cannot be empty")
-	}
+
 	key := fmt.Sprintf("turn:%s:%s", serverURL, username)
-	return s.secretStore.Set(key, secret)
+	return secrets.Set(key, credential)
 }
 
-// GetTurnCredential retrieves a TURN credential from OS-protected storage.
+// GetTurnCredential retrieves TURN credentials from OS-protected secret storage.
 func (s *Store) GetTurnCredential(serverURL, username string) ([]byte, error) {
-	if serverURL == "" || username == "" {
-		return nil, errors.New("server URL and username are required")
+	s.mu.RLock()
+	secrets := s.secretStore
+	s.mu.RUnlock()
+
+	if secrets == nil || !secrets.IsAvailable() {
+		return nil, ErrSecretStoreUnavailable
 	}
+
 	key := fmt.Sprintf("turn:%s:%s", serverURL, username)
-	return s.secretStore.Get(key)
+	return secrets.Get(key)
 }
 
-// DeleteTurnCredential removes a TURN credential from OS-protected storage.
+// DeleteTurnCredential removes TURN credentials from OS-protected secret storage.
 func (s *Store) DeleteTurnCredential(serverURL, username string) error {
-	if serverURL == "" || username == "" {
-		return errors.New("server URL and username are required")
+	s.mu.RLock()
+	secrets := s.secretStore
+	s.mu.RUnlock()
+
+	if secrets == nil || !secrets.IsAvailable() {
+		return nil
 	}
+
 	key := fmt.Sprintf("turn:%s:%s", serverURL, username)
-	return s.secretStore.Delete(key)
+	return secrets.Delete(key)
 }

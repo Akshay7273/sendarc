@@ -1,3 +1,4 @@
+// Package config manages desktop persistent configuration and credentials.
 package config
 
 import (
@@ -44,22 +45,27 @@ func NewUnavailableSecretStore(reason string) *UnavailableSecretStore {
 	return &UnavailableSecretStore{reason: reason}
 }
 
+// Get always returns an error indicating secret storage is unavailable.
 func (u *UnavailableSecretStore) Get(key string) ([]byte, error) {
 	return nil, fmt.Errorf("%w: %s", ErrSecretStoreUnavailable, u.reason)
 }
 
+// Set always returns an error indicating secret storage is unavailable.
 func (u *UnavailableSecretStore) Set(key string, secret []byte) error {
 	return fmt.Errorf("%w: %s", ErrSecretStoreUnavailable, u.reason)
 }
 
+// Delete is an idempotent no-op on unavailable stores.
 func (u *UnavailableSecretStore) Delete(key string) error {
-	return nil // deleting from an unavailable store is an idempotent no-op
+	return nil
 }
 
+// IsAvailable reports false for unavailable stores.
 func (u *UnavailableSecretStore) IsAvailable() bool {
 	return false
 }
 
+// BackendName returns a descriptive unavailable status.
 func (u *UnavailableSecretStore) BackendName() string {
 	return "unavailable (" + u.reason + ")"
 }
@@ -75,6 +81,7 @@ func NewMemorySecretStore() *MemorySecretStore {
 	return &MemorySecretStore{secrets: make(map[string][]byte)}
 }
 
+// Get retrieves a stored secret by key.
 func (m *MemorySecretStore) Get(key string) ([]byte, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -87,6 +94,7 @@ func (m *MemorySecretStore) Get(key string) ([]byte, error) {
 	return cpy, nil
 }
 
+// Set stores a secret by key.
 func (m *MemorySecretStore) Set(key string, secret []byte) error {
 	if key == "" {
 		return errors.New("secret key cannot be empty")
@@ -99,6 +107,7 @@ func (m *MemorySecretStore) Set(key string, secret []byte) error {
 	return nil
 }
 
+// Delete removes a stored secret by key.
 func (m *MemorySecretStore) Delete(key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -106,10 +115,12 @@ func (m *MemorySecretStore) Delete(key string) error {
 	return nil
 }
 
+// IsAvailable reports true for in-memory stores.
 func (m *MemorySecretStore) IsAvailable() bool {
 	return true
 }
 
+// BackendName returns "memory".
 func (m *MemorySecretStore) BackendName() string {
 	return "memory"
 }
@@ -128,53 +139,54 @@ func NewDarwinKeychainSecretStore(serviceName string) *DarwinKeychainSecretStore
 	return &DarwinKeychainSecretStore{serviceName: serviceName}
 }
 
+// Get retrieves a generic password from the macOS Keychain.
 func (d *DarwinKeychainSecretStore) Get(key string) ([]byte, error) {
 	cmd := exec.Command("/usr/bin/security", "find-generic-password", "-s", d.serviceName, "-a", key, "-w")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, ErrSecretNotFound
 	}
-	return []byte(strings.TrimRight(string(out), "\r\n")), nil
+	trimmed := strings.TrimRight(string(out), "\r\n")
+	return []byte(trimmed), nil
 }
 
+// Set saves or updates a generic password in the macOS Keychain.
 func (d *DarwinKeychainSecretStore) Set(key string, secret []byte) error {
+	if key == "" {
+		return errors.New("secret key cannot be empty")
+	}
 	cmd := exec.Command("/usr/bin/security", "add-generic-password", "-U", "-s", d.serviceName, "-a", key, "-w", string(secret))
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("keychain set error: %w", err)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("keychain set error: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }
 
+// Delete removes a generic password from the macOS Keychain.
 func (d *DarwinKeychainSecretStore) Delete(key string) error {
 	cmd := exec.Command("/usr/bin/security", "delete-generic-password", "-s", d.serviceName, "-a", key)
-	_ = cmd.Run() // idempotent ignore if not found
+	_ = cmd.Run()
 	return nil
 }
 
+// IsAvailable reports true when running on Darwin.
 func (d *DarwinKeychainSecretStore) IsAvailable() bool {
-	_, err := exec.LookPath("/usr/bin/security")
-	return err == nil
+	return runtime.GOOS == "darwin"
 }
 
+// BackendName returns "macos-keychain".
 func (d *DarwinKeychainSecretStore) BackendName() string {
-	return "darwin-keychain"
+	return "macos-keychain"
 }
 
-// DefaultSecretStore returns the best available OS-protected secret store for the
-// current platform, or an UnavailableSecretStore with clear degradation rationale.
+// DefaultSecretStore resolves the appropriate OS-protected secret store
+// for the current platform. If none is available, it returns an UnavailableSecretStore
+// to fail closed rather than falling back to plaintext storage.
 func DefaultSecretStore() SecretStore {
 	switch runtime.GOOS {
 	case "darwin":
-		store := NewDarwinKeychainSecretStore("SendBeam")
-		if store.IsAvailable() {
-			return store
-		}
-		return NewUnavailableSecretStore("macOS security CLI not found")
-	case "windows":
-		return NewUnavailableSecretStore("Windows DPAPI integration disabled in current build")
-	case "linux":
-		return NewUnavailableSecretStore("Linux Secret Service daemon not available")
+		return NewDarwinKeychainSecretStore("SendBeam")
 	default:
-		return NewUnavailableSecretStore("unsupported operating system for protected credentials: " + runtime.GOOS)
+		return NewUnavailableSecretStore("native OS credential helper not configured for " + runtime.GOOS)
 	}
 }
