@@ -779,9 +779,9 @@ func (s *TransferService) ActiveCount() int {
 // OnSuspend handles OS application suspend.
 func (s *TransferService) OnSuspend() {
 	if s.emit != nil {
-		s.emit(TransferEventName, map[string]any{
-			"kind":  "lifecycle",
-			"event": "suspend",
+		s.emit(TransferEventName, &TransferEvent{
+			Kind:  "lifecycle",
+			Phase: "suspend",
 		})
 	}
 }
@@ -789,9 +789,9 @@ func (s *TransferService) OnSuspend() {
 // OnResume handles OS application resume from sleep.
 func (s *TransferService) OnResume() {
 	if s.emit != nil {
-		s.emit(TransferEventName, map[string]any{
-			"kind":  "lifecycle",
-			"event": "resume",
+		s.emit(TransferEventName, &TransferEvent{
+			Kind:  "lifecycle",
+			Phase: "resume",
 		})
 	}
 }
@@ -799,9 +799,9 @@ func (s *TransferService) OnResume() {
 // OnNetworkChange handles OS network changes.
 func (s *TransferService) OnNetworkChange() {
 	if s.emit != nil {
-		s.emit(TransferEventName, map[string]any{
-			"kind":  "lifecycle",
-			"event": "network_change",
+		s.emit(TransferEventName, &TransferEvent{
+			Kind:  "lifecycle",
+			Phase: "network_change",
 		})
 	}
 }

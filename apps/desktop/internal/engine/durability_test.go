@@ -442,6 +442,16 @@ func TestDesktopLifecycleHooks(t *testing.T) {
 	svc.OnSuspend()
 	svc.OnResume()
 	svc.OnNetworkChange()
+
+	events := sink.all()
+	if len(events) != 3 {
+		t.Fatalf("expected 3 lifecycle events, got %d", len(events))
+	}
+	for i, ev := range events {
+		if ev.Kind != "lifecycle" {
+			t.Errorf("events[%d].Kind = %q, want 'lifecycle'", i, ev.Kind)
+		}
+	}
 }
 
 func TestDesktopGracefulShutdown(t *testing.T) {
