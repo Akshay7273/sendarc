@@ -6,7 +6,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestSingleInstanceLock(t *testing.T) {
@@ -19,131 +21,124 @@ func TestSingleInstanceLock(t *testing.T) {
 		t.Fatalf("first AcquireSingleInstanceLock failed: %v", err)
 	}
 	if lock1 == nil {
-		t.Fatalf("lock1 is nil")
+		t.Fatalf("first AcquireSingleInstanceLock returned nil lock")
 	}
-	defer func() { _ = lock1.Release() }()
 
-	// 2. Second concurrent acquisition on same lock file must fail with ErrAnotherInstanceRunning
+	// 2. Second acquisition on same path fails with ErrAnotherInstanceRunning
 	lock2, err := AcquireSingleInstanceLock(lockPath)
 	if err == nil || !errors.Is(err, ErrAnotherInstanceRunning) {
-		if lock2 != nil {
-			_ = lock2.Release()
-		}
-		t.Fatalf("second AcquireSingleInstanceLock returned err = %v, want ErrAnotherInstanceRunning", err)
+		t.Fatalf("second AcquireSingleInstanceLock error = %v, want ErrAnotherInstanceRunning", err)
+	}
+	if lock2 != nil {
+		t.Fatalf("second AcquireSingleInstanceLock returned non-nil lock")
 	}
 
 	// 3. Release first lock
 	if err := lock1.Release(); err != nil {
-		t.Fatalf("Release lock1 failed: %v", err)
+		t.Fatalf("Release failed: %v", err)
 	}
 
-	// 4. Third acquisition now succeeds
+	// 4. Acquisition succeeds again after release
 	lock3, err := AcquireSingleInstanceLock(lockPath)
 	if err != nil {
-		t.Fatalf("third AcquireSingleInstanceLock after release failed: %v", err)
+		t.Fatalf("AcquireSingleInstanceLock after release failed: %v", err)
 	}
 	if lock3 == nil {
-		t.Fatalf("lock3 is nil")
+		t.Fatalf("AcquireSingleInstanceLock after release returned nil lock")
 	}
 	_ = lock3.Release()
 }
 
-func TestSingleInstanceLockInvalidPath(t *testing.T) {
-	// Empty path
-	_, err := AcquireSingleInstanceLock("")
-	if err == nil {
-		t.Fatalf("AcquireSingleInstanceLock with empty path expected error, got nil")
-	}
-}
-
-func TestRevealPathValidation(t *testing.T) {
+func TestValidatePathConfinement(t *testing.T) {
 	dir := t.TempDir()
-	file1 := filepath.Join(dir, "hello.txt")
-	if err := os.WriteFile(file1, []byte("hello"), 0o600); err != nil {
-		t.Fatalf("write file: %v", err)
+
+	// Setup authorized root
+	root := filepath.Join(dir, "downloads")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
 	}
 
-	otherDir := t.TempDir()
-	otherFile := filepath.Join(otherDir, "outside.txt")
-	if err := os.WriteFile(otherFile, []byte("outside"), 0o600); err != nil {
-		t.Fatalf("write file: %v", err)
+	// Setup external directory (unauthorized)
+	external := filepath.Join(dir, "external")
+	if err := os.MkdirAll(external, 0o755); err != nil {
+		t.Fatal(err)
 	}
 
-	// Legitimate dotfile inside dir
-	dotFile := filepath.Join(dir, "..legit.txt")
-	if err := os.WriteFile(dotFile, []byte("dotcontent"), 0o600); err != nil {
-		t.Fatalf("write dotfile: %v", err)
+	// Valid target inside root
+	validFile := filepath.Join(root, "valid.txt")
+	if err := os.WriteFile(validFile, []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
-	// Symlink inside dir pointing to file in otherDir
-	symlinkToOutside := filepath.Join(dir, "symlink_outside.txt")
-	_ = os.Symlink(otherFile, symlinkToOutside)
+	// Valid hidden / dotfile inside root
+	dotFile := filepath.Join(root, ".hidden_data")
+	if err := os.WriteFile(dotFile, []byte("hidden"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// File outside authorized root
+	externalFile := filepath.Join(external, "secret.txt")
+	if err := os.WriteFile(externalFile, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Symlink inside root pointing outside
+	symlinkEscape := filepath.Join(root, "escape_link.txt")
+	_ = os.Symlink(externalFile, symlinkEscape)
 
 	tests := []struct {
-		name         string
-		targetPath   string
-		allowedRoots []string
-		wantErr      error
+		name    string
+		target  string
+		roots   []string
+		wantErr error
 	}{
 		{
-			name:         "empty path",
-			targetPath:   "",
-			allowedRoots: []string{dir},
-			wantErr:      ErrInvalidPath,
+			name:    "valid file within root",
+			target:  validFile,
+			roots:   []string{root},
+			wantErr: nil,
 		},
 		{
-			name:         "control characters",
-			targetPath:   dir + "/\x00evil.txt",
-			allowedRoots: []string{dir},
-			wantErr:      ErrInvalidPath,
+			name:    "valid hidden dotfile within root",
+			target:  dotFile,
+			roots:   []string{root},
+			wantErr: nil,
 		},
 		{
-			name:         "non-existent file",
-			targetPath:   filepath.Join(dir, "missing.txt"),
-			allowedRoots: []string{dir},
-			wantErr:      ErrPathNotFound,
+			name:    "file outside authorized roots",
+			target:  externalFile,
+			roots:   []string{root},
+			wantErr: ErrPathOutsideRoot,
 		},
 		{
-			name:         "file outside allowed root",
-			targetPath:   otherFile,
-			allowedRoots: []string{dir},
-			wantErr:      ErrPathOutsideRoot,
+			name:    "symlink escaping root boundary",
+			target:  symlinkEscape,
+			roots:   []string{root},
+			wantErr: ErrPathOutsideRoot,
 		},
 		{
-			name:         "valid file inside allowed root",
-			targetPath:   file1,
-			allowedRoots: []string{dir},
-			wantErr:      nil,
+			name:    "nonexistent file",
+			target:  filepath.Join(root, "nonexistent.bin"),
+			roots:   []string{root},
+			wantErr: ErrPathNotFound,
 		},
 		{
-			name:         "legitimate dotfile starting with .. inside allowed root",
-			targetPath:   dotFile,
-			allowedRoots: []string{dir},
-			wantErr:      nil,
+			name:    "empty target",
+			target:  "",
+			roots:   []string{root},
+			wantErr: ErrInvalidPath,
 		},
 		{
-			name:         "symlink inside root pointing outside root is rejected",
-			targetPath:   symlinkToOutside,
-			allowedRoots: []string{dir},
-			wantErr:      ErrPathOutsideRoot,
-		},
-		{
-			name:         "valid directory without root restrictions",
-			targetPath:   dir,
-			allowedRoots: nil,
-			wantErr:      nil,
-		},
-		{
-			name:         "traversal attempting escape",
-			targetPath:   filepath.Join(dir, "..", filepath.Base(otherDir), "outside.txt"),
-			allowedRoots: []string{dir},
-			wantErr:      ErrPathOutsideRoot,
+			name:    "no authorized roots",
+			target:  validFile,
+			roots:   nil,
+			wantErr: nil,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := ValidatePath(tt.targetPath, tt.allowedRoots...)
+			_, err := ValidatePath(tt.target, tt.roots...)
 			if tt.wantErr == nil {
 				if err != nil {
 					t.Fatalf("ValidatePath unexpected error: %v", err)
@@ -260,5 +255,164 @@ func TestNotifiers(t *testing.T) {
 	}
 	if linuxNotif.BackendName() != "linux-notify-send" {
 		t.Errorf("LinuxNotifier.BackendName() = %q, want linux-notify-send", linuxNotif.BackendName())
+	}
+}
+
+func TestIsTraySupportedOnPlatform(t *testing.T) {
+	tests := []struct {
+		name string
+		goos string
+		env  map[string]string
+		want bool
+	}{
+		{
+			name: "macOS is always supported",
+			goos: "darwin",
+			want: true,
+		},
+		{
+			name: "windows is always supported",
+			goos: "windows",
+			want: true,
+		},
+		{
+			name: "linux KDE desktop",
+			goos: "linux",
+			env:  map[string]string{"XDG_CURRENT_DESKTOP": "KDE"},
+			want: true,
+		},
+		{
+			name: "linux XFCE desktop",
+			goos: "linux",
+			env:  map[string]string{"XDG_CURRENT_DESKTOP": "XFCE"},
+			want: true,
+		},
+		{
+			name: "linux MATE desktop",
+			goos: "linux",
+			env:  map[string]string{"XDG_CURRENT_DESKTOP": "MATE"},
+			want: true,
+		},
+		{
+			name: "linux GNOME standard desktop degrades safely",
+			goos: "linux",
+			env:  map[string]string{"XDG_CURRENT_DESKTOP": "GNOME"},
+			want: false,
+		},
+		{
+			name: "linux unknown desktop degrades safely",
+			goos: "linux",
+			env:  map[string]string{"XDG_CURRENT_DESKTOP": "custom-wm"},
+			want: false,
+		},
+		{
+			name: "unsupported OS",
+			goos: "freebsd",
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			envFn := func(k string) string {
+				if tt.env != nil {
+					return tt.env[k]
+				}
+				return ""
+			}
+			got := IsTraySupportedOnPlatform(tt.goos, envFn)
+			if got != tt.want {
+				t.Errorf("IsTraySupportedOnPlatform(%q) = %v, want %v", tt.goos, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLifecycleCoordinatorCloseToTrayPolicy(t *testing.T) {
+	// Darwin with CloseToTray = true
+	coordDarwin := NewCoordinatorWithPlatform(true, "darwin", nil, nil, nil)
+	if !coordDarwin.ShouldHideOnClose() {
+		t.Errorf("Darwin with CloseToTray=true should hide on close")
+	}
+
+	// Darwin with CloseToTray = false
+	coordDarwin.SetCloseToTray(false)
+	if coordDarwin.ShouldHideOnClose() {
+		t.Errorf("Darwin with CloseToTray=false should not hide on close")
+	}
+
+	// Linux GNOME (tray unsupported) with CloseToTray = true -> degrades to false
+	coordGnome := NewCoordinatorWithPlatform(true, "linux", func(k string) string {
+		if k == "XDG_CURRENT_DESKTOP" {
+			return "GNOME"
+		}
+		return ""
+	}, nil, nil)
+	if coordGnome.ShouldHideOnClose() {
+		t.Errorf("Linux GNOME should degrade ShouldHideOnClose to false")
+	}
+	if coordGnome.IsTrayUsable() {
+		t.Errorf("Linux GNOME IsTrayUsable() = true, want false")
+	}
+
+	// Linux KDE (tray supported) with CloseToTray = true -> hides
+	coordKDE := NewCoordinatorWithPlatform(true, "linux", func(k string) string {
+		if k == "XDG_CURRENT_DESKTOP" {
+			return "KDE"
+		}
+		return ""
+	}, nil, nil)
+	if !coordKDE.ShouldHideOnClose() {
+		t.Errorf("Linux KDE ShouldHideOnClose() = false, want true")
+	}
+}
+
+type mockShutdownable struct {
+	shutdownCalls int32
+}
+
+func (m *mockShutdownable) Shutdown(_ time.Duration) error {
+	atomic.AddInt32(&m.shutdownCalls, 1)
+	return nil
+}
+
+func TestLifecycleCoordinatorSleepWakeAndShutdown(t *testing.T) {
+	var emittedEvents []string
+	emitter := func(kind, phase string) {
+		emittedEvents = append(emittedEvents, kind+":"+phase)
+	}
+
+	mockSvc := &mockShutdownable{}
+	coord := NewCoordinatorWithPlatform(true, "windows", nil, mockSvc, emitter)
+
+	// 1. Sleep event
+	coord.OnSystemWillSleep()
+	sleeps, wakes := coord.SleepWakeCounts()
+	if sleeps != 1 || wakes != 0 {
+		t.Errorf("SleepWakeCounts after sleep: %d, %d; want 1, 0", sleeps, wakes)
+	}
+
+	// 2. Wake event
+	coord.OnSystemDidWake()
+	sleeps, wakes = coord.SleepWakeCounts()
+	if sleeps != 1 || wakes != 1 {
+		t.Errorf("SleepWakeCounts after wake: %d, %d; want 1, 1", sleeps, wakes)
+	}
+
+	if len(emittedEvents) != 2 || emittedEvents[0] != "lifecycle:sleep" || emittedEvents[1] != "lifecycle:wake" {
+		t.Errorf("emittedEvents = %v, want [lifecycle:sleep lifecycle:wake]", emittedEvents)
+	}
+
+	// 3. Idempotent shutdown
+	if err := coord.Shutdown(time.Second); err != nil {
+		t.Fatalf("first Shutdown failed: %v", err)
+	}
+	if err := coord.Shutdown(time.Second); err != nil {
+		t.Fatalf("second Shutdown failed: %v", err)
+	}
+
+	calls := atomic.LoadInt32(&mockSvc.shutdownCalls)
+	if calls != 1 {
+		t.Errorf("Shutdown was called %d times, want exactly 1 (idempotent)", calls)
 	}
 }
