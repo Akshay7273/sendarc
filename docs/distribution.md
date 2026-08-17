@@ -27,44 +27,46 @@ Each CLI archive contains:
 
 ### 2. Desktop Distributions
 
-The SendBeam Desktop application (built with Wails v3) packages the Go transfer engine with native platform presentation:
+The SendBeam Desktop application packages the Go transfer engine with native platform presentation:
 
-| Platform              | Format         | Artifact Name                          | Description                                                   |
-| :-------------------- | :------------- | :------------------------------------- | :------------------------------------------------------------ |
-| **Windows** (amd64)   | Portable ZIP   | `SendBeam-windows-amd64-portable.zip`  | Self-contained executable archive with license and metadata   |
-| **Windows** (amd64)   | NSIS Installer | `SendBeam-windows-amd64-installer.exe` | Windows installer with Start Menu shortcuts and uninstaller   |
-| **macOS** (Universal) | App Archive    | `SendBeam-macos-universal.zip`         | Mach-O Universal bundle (`arm64` + `amd64`) in `SendBeam.app` |
-| **macOS** (Universal) | DMG Image      | `SendBeam-macos-universal.dmg`         | Disk image with drag-and-drop Applications shortcut           |
-| **Linux** (amd64)     | Debian Package | `sendbeam-desktop_1.4.0_amd64.deb`     | Debian/Ubuntu `.deb` with `.desktop` menu entry and icons     |
-| **Linux** (amd64)     | AppImage       | `SendBeam-linux-amd64.AppImage`        | Portable Linux executable with embedded runtime               |
+| Platform              | Format         | Development Artifact Name                             | Tagged Release Artifact Name           | Description                                                   |
+| :-------------------- | :------------- | :---------------------------------------------------- | :------------------------------------- | :------------------------------------------------------------ |
+| **Windows** (amd64)   | Portable ZIP   | `SendBeam-windows-amd64-portable.zip`                 | `SendBeam-windows-amd64-portable.zip`  | Self-contained executable archive with license and metadata   |
+| **Windows** (amd64)   | NSIS Installer | `SendBeam-windows-amd64-installer.exe`                | `SendBeam-windows-amd64-installer.exe` | Windows installer with Start Menu shortcuts and uninstaller   |
+| **macOS** (Universal) | App Archive    | `SendBeam-macos-universal.zip`                        | `SendBeam-macos-universal.zip`         | Mach-O Universal bundle (`arm64` + `amd64`) in `SendBeam.app` |
+| **macOS** (Universal) | DMG Image      | `SendBeam-macos-universal.dmg`                        | `SendBeam-macos-universal.dmg`         | Disk image with drag-and-drop Applications shortcut           |
+| **Linux** (amd64)     | Debian Package | `sendbeam-desktop_0.0.0~dev+git.<shortsha>_amd64.deb` | `sendbeam-desktop_<ver>_amd64.deb`     | Debian/Ubuntu `.deb` with `.desktop` menu entry and icons     |
+| **Linux** (amd64)     | AppImage       | `SendBeam-linux-amd64.AppImage`                       | `SendBeam-linux-amd64.AppImage`        | Portable Linux executable with embedded runtime               |
 
 > [!NOTE]
-> CI distribution artifacts are unsigned validation packages. Official code signing (Authenticode, Apple Developer ID, Notarization) and trusted release channels will be enabled in subsequent milestones.
+> CI distribution artifacts are unsigned validation packages stored as GitHub Actions workflow artifacts (retained for 14 days). Formal GitHub Releases, production code signing (Authenticode, Apple Developer ID, Notarization), and auto-updater channels belong to future milestones.
 
 ---
 
-## Build Metadata and Versioning
+## Authoritative Version Resolution Policy
 
-Build metadata is decoupled from the immutable wire protocol version (`sendbeam/1`).
+Build and packaging metadata is resolved deterministically through a single unified policy across all CLI and desktop platforms:
 
-### Product Version Metadata
+| Version Category       | Untagged / Development Builds | Tagged Release Builds (`vX.Y.Z`) |
+| :--------------------- | :---------------------------- | :------------------------------- |
+| **Semantic / Display** | `dev`                         | `X.Y.Z`                          |
+| **Numeric Platform**   | `0.0.0`                       | `X.Y.Z`                          |
+| **Windows Fixed File** | `0.0.0.0`                     | `X.Y.Z.0`                        |
+| **Debian Package**     | `0.0.0~dev+git.<shortsha>`    | `X.Y.Z`                          |
+| **Git Commit**         | Exact 40-character commit SHA | Exact 40-character commit SHA    |
 
-Binaries embed the following metadata injected via `-ldflags`:
+Wire protocol versioning remains immutable (`sendbeam/1`) and is decoupled from product release versions.
 
-- **Product Version**: Release tag (e.g. `1.4.0`) or `dev` fallback.
-- **Git Commit**: Exact git commit SHA (e.g. `1e937f5e07ea...`) or short SHA.
-- **Go Version**: Active Go toolchain version (from `runtime.Version()`).
-- **Platform**: Target OS and Architecture (from `runtime.GOOS/runtime.GOARCH`).
-
-### CLI Version Commands
+### CLI Version UX
 
 ```bash
+# Development build:
 sendbeam version
 # Output: sendbeam dev (1e937f5e07ea)
-# Tagged: sendbeam 1.4.0 (1e937f5e07ea)
 
-sendbeam --version
-# Output: sendbeam dev (1e937f5e07ea)
+# Tagged release build:
+sendbeam version
+# Output: sendbeam 1.4.0 (1e937f5e07ea)
 ```
 
 ---
@@ -75,7 +77,7 @@ Packaging is automated in `.github/workflows/distribution.yml` across native Git
 
 - `ubuntu-24.04` (Linux packaging + GTK/WebKit)
 - `macos-latest` (Universal Mach-O + DMG creation)
-- `windows-latest` (Windows PE + NSIS compilation)
+- `windows-latest` (Windows PE resource embedding + NSIS compilation)
 
 ### Checksum Manifest
 

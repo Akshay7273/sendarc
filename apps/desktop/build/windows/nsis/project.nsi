@@ -1,12 +1,29 @@
 Unicode true
 
-!define INFO_PROJECTNAME    "SendBeam"
-!define INFO_COMPANYNAME    "SendBeam"
-!define INFO_PRODUCTNAME    "SendBeam"
-!define INFO_PRODUCTVERSION "1.4.0"
-!define INFO_COPYRIGHT      "Copyright (c) 2026 Akshay7273"
-!define PRODUCT_EXECUTABLE  "sendbeam-desktop.exe"
-!define UNINST_KEY_NAME     "SendBeam"
+!ifndef INFO_PROJECTNAME
+  !define INFO_PROJECTNAME    "SendBeam"
+!endif
+!ifndef INFO_COMPANYNAME
+  !define INFO_COMPANYNAME    "Akshay7273"
+!endif
+!ifndef INFO_PRODUCTNAME
+  !define INFO_PRODUCTNAME    "SendBeam"
+!endif
+!ifndef INFO_PRODUCTVERSION
+  !define INFO_PRODUCTVERSION "dev"
+!endif
+!ifndef INFO_FIXEDVERSION
+  !define INFO_FIXEDVERSION    "0.0.0.0"
+!endif
+!ifndef INFO_COPYRIGHT
+  !define INFO_COPYRIGHT      "Copyright (c) 2026 Akshay7273"
+!endif
+!ifndef PRODUCT_EXECUTABLE
+  !define PRODUCT_EXECUTABLE  "sendbeam-desktop.exe"
+!endif
+!ifndef UNINST_KEY_NAME
+  !define UNINST_KEY_NAME     "SendBeam"
+!endif
 !define REQUEST_EXECUTION_LEVEL "user"
 
 !ifndef OUTPUT_FILE
@@ -19,13 +36,14 @@ Unicode true
   !define ICON_FILE "..\icon.ico"
 !endif
 
-VIProductVersion "${INFO_PRODUCTVERSION}.0"
-VIFileVersion    "${INFO_PRODUCTVERSION}.0"
+VIProductVersion "${INFO_FIXEDVERSION}"
+VIFileVersion    "${INFO_FIXEDVERSION}"
 
 VIAddVersionKey "CompanyName"     "${INFO_COMPANYNAME}"
 VIAddVersionKey "FileDescription" "${INFO_PRODUCTNAME} Installer"
 VIAddVersionKey "ProductVersion"  "${INFO_PRODUCTVERSION}"
-VIAddVersionKey "FileVersion"     "${INFO_PRODUCTVERSION}"
+VIAddVersionKey "DisplayVersion"  "${INFO_PRODUCTVERSION}"
+VIAddVersionKey "FileVersion"     "${INFO_FIXEDVERSION}"
 VIAddVersionKey "LegalCopyright"  "${INFO_COPYRIGHT}"
 VIAddVersionKey "ProductName"     "${INFO_PRODUCTNAME}"
 

@@ -20,3 +20,5 @@ apps/desktop/build/
 *.dmg
 *.zip
 *.tar.gz
+*.sh
+scripts/

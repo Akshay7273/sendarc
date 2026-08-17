@@ -1,10 +1,10 @@
 version: '3'
 
 info:
-  companyName: 'SendBeam'
+  companyName: 'Akshay7273'
   productName: 'SendBeam'
   productIdentifier: 'com.sendbeam.desktop'
   description: 'Secure, end-to-end-encrypted, peer-to-peer file transfer'
   copyright: 'Copyright (c) 2026 Akshay7273'
   comments: 'SendBeam Desktop Application'
-  version: '1.4.0'
+  version: 'dev'
