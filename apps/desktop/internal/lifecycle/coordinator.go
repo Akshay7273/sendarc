@@ -15,8 +15,8 @@ type Shutdownable interface {
 	Shutdown(timeout time.Duration) error
 }
 
-// LifecycleEventEmitter is the sink for emitting desktop-wide lifecycle updates.
-type LifecycleEventEmitter func(kind, phase string)
+// EventEmitter is the sink for emitting desktop-wide lifecycle updates.
+type EventEmitter func(kind, phase string)
 
 // Coordinator coordinates application window hooks, power sleep/wake events,
 // tray reachability policies, and bounded idempotent teardown.
@@ -27,18 +27,18 @@ type Coordinator struct {
 	shutdownOnce sync.Once
 	shutdownErr  error
 	service      Shutdownable
-	emitter      LifecycleEventEmitter
+	emitter      EventEmitter
 	sleepCount   int
 	wakeCount    int
 }
 
 // NewCoordinator creates a new lifecycle coordinator.
-func NewCoordinator(closeToTray bool, svc Shutdownable, emitter LifecycleEventEmitter) *Coordinator {
+func NewCoordinator(closeToTray bool, svc Shutdownable, emitter EventEmitter) *Coordinator {
 	return NewCoordinatorWithPlatform(closeToTray, runtime.GOOS, os.Getenv, svc, emitter)
 }
 
 // NewCoordinatorWithPlatform creates a coordinator with explicit platform and env parameters for unit testing.
-func NewCoordinatorWithPlatform(closeToTray bool, goos string, env func(string) string, svc Shutdownable, emitter LifecycleEventEmitter) *Coordinator {
+func NewCoordinatorWithPlatform(closeToTray bool, goos string, env func(string) string, svc Shutdownable, emitter EventEmitter) *Coordinator {
 	trayUsable := IsTraySupportedOnPlatform(goos, env)
 	return &Coordinator{
 		closeToTray:  closeToTray,

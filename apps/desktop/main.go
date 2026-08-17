@@ -127,12 +127,13 @@ func main() {
 	systemTray := app.SystemTray.New()
 	systemTray.SetTooltip("SendBeam")
 
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		systemTray.SetTemplateIcon(icons.SystrayMacTemplate)
-	} else if runtime.GOOS == "windows" {
+	case "windows":
 		systemTray.SetIcon(icons.SystrayLight)
 		systemTray.SetDarkModeIcon(icons.SystrayDark)
-	} else {
+	default:
 		systemTray.SetIcon(icons.SystrayLight)
 	}
 
