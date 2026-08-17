@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=SendBeam
+Comment=Secure, end-to-end-encrypted, peer-to-peer file transfer
+Exec=sendbeam-desktop %U
+Icon=sendbeam-desktop
+Terminal=false
+Type=Application
+Categories=Network;FileTransfer;Utility;
+StartupWMClass=SendBeam

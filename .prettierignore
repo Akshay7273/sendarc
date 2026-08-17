@@ -7,5 +7,16 @@ infra/certs/
 test-vectors/
 
 # SendBeam brand assets (SVG/PNG exports are not formatted source)
+*.svg
 apps/web/src/lib/assets/*.svg
 assets/brand/*.png
+apps/desktop/build/
+*.ico
+*.icns
+*.png
+*.syso
+*.AppImage
+*.deb
+*.dmg
+*.zip
+*.tar.gz

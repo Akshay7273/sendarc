@@ -1,0 +1,35 @@
+name: 'sendbeam-desktop'
+arch: 'amd64'
+platform: 'linux'
+version: '1.4.0'
+section: 'net'
+priority: 'optional'
+maintainer: 'Akshay <https://github.com/Akshay7273/sendbeam>'
+description: 'SendBeam Desktop — Secure, peer-to-peer file transfer'
+vendor: 'SendBeam'
+homepage: 'https://omnitrix.space'
+license: 'MIT'
+contents:
+  - src: '../../../bin/sendbeam-desktop'
+    dst: '/usr/bin/sendbeam-desktop'
+    file_info:
+      mode: 0755
+  - src: '../sendbeam-desktop.desktop'
+    dst: '/usr/share/applications/sendbeam-desktop.desktop'
+  - src: '../sendbeam-desktop.png'
+    dst: '/usr/share/icons/hicolor/512x512/apps/sendbeam-desktop.png'
+  - src: '../../icons/256x256.png'
+    dst: '/usr/share/icons/hicolor/256x256/apps/sendbeam-desktop.png'
+  - src: '../../icons/128x128.png'
+    dst: '/usr/share/icons/hicolor/128x128/apps/sendbeam-desktop.png'
+  - src: '../../icons/64x64.png'
+    dst: '/usr/share/icons/hicolor/64x64/apps/sendbeam-desktop.png'
+  - src: '../../icons/32x32.png'
+    dst: '/usr/share/icons/hicolor/32x32/apps/sendbeam-desktop.png'
+  - src: '../../icons/16x16.png'
+    dst: '/usr/share/icons/hicolor/16x16/apps/sendbeam-desktop.png'
+  - src: '../../../LICENSE'
+    dst: '/usr/share/doc/sendbeam-desktop/copyright'
+depends:
+  - libgtk-4-1 | libgtk-3-0
+  - libwebkitgtk-6.0-4 | libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37

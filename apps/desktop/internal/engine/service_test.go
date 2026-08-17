@@ -7,11 +7,20 @@ import (
 	"github.com/sendbeam/engine/rendezvous"
 )
 
-// TestServiceInfo confirms the service reports a live runtime.
+// TestServiceInfo confirms the service reports a live runtime and build metadata.
 func TestServiceInfo(t *testing.T) {
 	info := NewService().Info()
 	if info.GoVersion == "" {
 		t.Fatal("GoVersion empty")
+	}
+	if info.ProductVersion == "" {
+		t.Fatal("ProductVersion empty")
+	}
+	if info.Commit == "" {
+		t.Fatal("Commit empty")
+	}
+	if info.Platform == "" {
+		t.Fatal("Platform empty")
 	}
 }
 

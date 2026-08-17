@@ -10,6 +10,11 @@ import (
 	"syscall"
 )
 
+const (
+	// ERROR_SHARING_VIOLATION is the Win32 error code 32 (0x20).
+	errorSharingViolation = syscall.Errno(32)
+)
+
 // AcquireSingleInstanceLock on Windows opens the file with exclusive access (no sharing),
 // preventing another instance from opening or acquiring it.
 func AcquireSingleInstanceLock(path string) (*SingleInstanceLock, error) {
@@ -38,7 +43,7 @@ func AcquireSingleInstanceLock(path string) (*SingleInstanceLock, error) {
 		0,
 	)
 	if err != nil {
-		if errors.Is(err, syscall.ERROR_SHARING_VIOLATION) || errors.Is(err, syscall.ERROR_ACCESS_DENIED) {
+		if errors.Is(err, errorSharingViolation) || errors.Is(err, syscall.ERROR_ACCESS_DENIED) {
 			return nil, ErrAnotherInstanceRunning
 		}
 		return nil, fmt.Errorf("open exclusive lock file: %w", err)
