@@ -13,22 +13,49 @@ package main
 
 import (
 	"embed"
+	"errors"
+	"fmt"
 	"log"
+	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
 
+	"github.com/sendbeam/desktop/internal/config"
 	"github.com/sendbeam/desktop/internal/engine"
+	"github.com/sendbeam/desktop/internal/lifecycle"
 )
 
 //go:embed all:frontend/dist
 var assets embed.FS
 
 func main() {
+	// Single-instance lock: ensure only one authoritative desktop process runs
+	// to prevent racing on transfer journals, config, or destinations.
+	lockPath := filepath.Join(os.TempDir(), "sendbeam.lock")
+	if configDir, err := os.UserConfigDir(); err == nil {
+		lockPath = filepath.Join(configDir, config.AppDirName, "sendbeam.lock")
+	}
+	lock, err := lifecycle.AcquireSingleInstanceLock(lockPath)
+	if err != nil {
+		if errors.Is(err, lifecycle.ErrAnotherInstanceRunning) {
+			fmt.Fprintln(os.Stderr, "SendBeam Desktop: another instance is already running; focusing existing process.")
+			os.Exit(0)
+		}
+		log.Printf("Warning: single-instance lock unavailable: %v", err)
+	}
+	if lock != nil {
+		defer func() { _ = lock.Release() }()
+	}
+
 	transferSvc := engine.NewTransferService(
 		// Emit every transfer snapshot to the frontend.
 		func(name string, data any) {
-			application.Get().Event.Emit(name, data)
+			if app := application.Get(); app != nil && app.Event != nil {
+				app.Event.Emit(name, data)
+			}
 		},
 		// Real signaling server (same wsclient the CLI uses → browser/CLI interop).
 		nil,
@@ -79,20 +106,27 @@ func main() {
 		}
 		h, err := transferSvc.Drop(paths)
 		if err != nil {
-			application.Get().Event.Emit(engine.TransferEventName, map[string]any{
-				"kind":  "error",
-				"error": err.Error(),
-			})
+			if a := application.Get(); a != nil && a.Event != nil {
+				a.Event.Emit(engine.TransferEventName, map[string]any{
+					"kind":  "error",
+					"error": err.Error(),
+				})
+			}
 			return
 		}
-		application.Get().Event.Emit(engine.TransferEventName, map[string]any{
-			"kind":  "drop",
-			"id":    h.ID,
-			"files": paths,
-		})
+		if a := application.Get(); a != nil && a.Event != nil {
+			a.Event.Emit(engine.TransferEventName, map[string]any{
+				"kind":  "drop",
+				"id":    h.ID,
+				"files": paths,
+			})
+		}
 	})
 
 	if err := app.Run(); err != nil {
 		log.Fatal(err)
 	}
+
+	// Bounded graceful teardown upon exit: cancel active transfers cleanly
+	_ = transferSvc.Shutdown(3 * time.Second)
 }

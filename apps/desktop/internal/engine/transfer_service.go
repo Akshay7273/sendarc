@@ -14,11 +14,14 @@ import (
 	"math"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/pion/webrtc/v4"
+	"github.com/sendbeam/desktop/internal/config"
+	"github.com/sendbeam/desktop/internal/lifecycle"
 	"github.com/sendbeam/engine/rendezvous"
 	"github.com/sendbeam/engine/transfer"
 	"github.com/sendbeam/engine/wsclient"
@@ -82,12 +85,44 @@ type TransferEvent struct {
 	Paused      bool    `json:"paused,omitempty"`
 	Canceled    bool    `json:"canceled,omitempty"`
 	Failed      bool    `json:"failed,omitempty"`
+	Resumed     bool    `json:"resumed,omitempty"`
 
 	// Terminal (kind=done/error).
 	Digest  string `json:"digest,omitempty"`
 	OutDir  string `json:"outDir,omitempty"`
 	OutPath string `json:"outPath,omitempty"`
 	Error   string `json:"error,omitempty"`
+}
+
+// DurableTransferItem describes an interrupted transfer (sender or receiver)
+// surfaced to the desktop management UI.
+type DurableTransferItem struct {
+	TransferID     string   `json:"transferId"`
+	Role           string   `json:"role"` // send | receive
+	TotalBytes     int64    `json:"totalBytes"`
+	CommittedBytes int64    `json:"committedBytes"`
+	Files          int      `json:"files"`
+	CreatedAt      int64    `json:"createdAt"`
+	UpdatedAt      int64    `json:"updatedAt"`
+	Status         string   `json:"status"`
+	Resumable      bool     `json:"resumable"`
+	Paths          []string `json:"paths,omitempty"`
+}
+
+// DurableInspectResult is the diagnostic outcome of inspecting a durable journal.
+type DurableInspectResult struct {
+	TransferID          string     `json:"transferId"`
+	TotalBytes          int64      `json:"totalBytes"`
+	CommittedBytes      int64      `json:"committedBytes"`
+	CreatedAt           int64      `json:"createdAt"`
+	UpdatedAt           int64      `json:"updatedAt"`
+	ProtocolVersion     string     `json:"protocolVersion"`
+	ManifestFingerprint string     `json:"manifestFingerprint"`
+	JournalPath         string     `json:"journalPath"`
+	PartialDir          string     `json:"partialDir"`
+	Resumable           bool       `json:"resumable"`
+	Problems            []string   `json:"problems,omitempty"`
+	Files               []FileInfo `json:"files,omitempty"`
 }
 
 // SignalDialer returns the signaling signal for one transfer side. The desktop
@@ -116,6 +151,12 @@ type TransferService struct {
 	mu   sync.Mutex
 	next int
 	runs map[string]*transferRun
+
+	configStore    *config.Store
+	notifier       lifecycle.Notifier
+	revealMgr      *lifecycle.RevealManager
+	senderStore    *transfer.SenderStore
+	durableStoreFn func(outDir string) (*transfer.DurableStore, error)
 }
 
 // NewTransferService builds the service. emit is the frontend sink (wails
@@ -125,7 +166,68 @@ func NewTransferService(emit func(name string, data any), dial SignalDialer) *Tr
 	if dial == nil {
 		dial = defaultDialer
 	}
-	return &TransferService{emit: emit, dial: dial, runs: map[string]*transferRun{}}
+	cfgStore, _ := config.NewStore("", nil)
+	sStoreDir, _ := transfer.SenderStoreDir()
+	var sStore *transfer.SenderStore
+	if sStoreDir != "" {
+		sStore, _ = transfer.OpenSenderStore(sStoreDir)
+	}
+
+	return &TransferService{
+		emit:           emit,
+		dial:           dial,
+		runs:           map[string]*transferRun{},
+		configStore:    cfgStore,
+		notifier:       &lifecycle.SilentNotifier{},
+		revealMgr:      lifecycle.NewRevealManager(nil),
+		senderStore:    sStore,
+		durableStoreFn: transfer.OpenStore,
+	}
+}
+
+// SetNotifier sets the notification sink.
+func (s *TransferService) SetNotifier(n lifecycle.Notifier) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.notifier = n
+}
+
+// SetRevealManager sets the reveal manager.
+func (s *TransferService) SetRevealManager(r *lifecycle.RevealManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.revealMgr = r
+}
+
+// SetConfigStore sets the config store.
+func (s *TransferService) SetConfigStore(cs *config.Store) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.configStore = cs
+}
+
+// SetSenderStore sets the sender store for tests.
+func (s *TransferService) SetSenderStore(ss *transfer.SenderStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.senderStore = ss
+}
+
+// SetDurableStoreFn overrides the durable store factory for tests.
+func (s *TransferService) SetDurableStoreFn(fn func(outDir string) (*transfer.DurableStore, error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.durableStoreFn = fn
+}
+
+func (s *TransferService) openDurableStore(outDir string) (*transfer.DurableStore, error) {
+	s.mu.Lock()
+	fn := s.durableStoreFn
+	s.mu.Unlock()
+	if fn == nil {
+		fn = transfer.OpenStore
+	}
+	return fn(outDir)
 }
 
 // setLoopbackConfig is the test seam for the loopback relay: host-only ICE and
@@ -165,6 +267,7 @@ type transferRun struct {
 	paused      bool
 	canceled    bool
 	failed      bool
+	resumed     bool
 	transport   string
 	fingerprint string
 
@@ -185,7 +288,14 @@ func (s *TransferService) Send(paths []string, server string) (Handle, error) {
 		return Handle{}, errors.New("no files or folders selected")
 	}
 	if server == "" {
-		server = DefaultServer
+		if s.configStore != nil {
+			if cfg, err := s.configStore.Load(); err == nil && cfg.ServerURL != "" {
+				server = cfg.ServerURL
+			}
+		}
+		if server == "" {
+			server = DefaultServer
+		}
 	}
 	if err := validatePaths(paths); err != nil {
 		return Handle{}, err
@@ -206,7 +316,7 @@ func (s *TransferService) Send(paths []string, server string) (Handle, error) {
 	}
 	_ = total
 
-	go r.runSend(r.ctx, server, sources)
+	go r.runSend(r.ctx, server, sources, paths)
 	return Handle{ID: id, Role: "send"}, nil
 }
 
@@ -219,10 +329,24 @@ func (s *TransferService) Receive(code string, destDir string, server string) (H
 	}
 	code = normalizeCode(code)
 	if destDir == "" {
-		destDir = "."
+		if s.configStore != nil {
+			if cfg, err := s.configStore.Load(); err == nil && cfg.DownloadDir != "" {
+				destDir = cfg.DownloadDir
+			}
+		}
+		if destDir == "" {
+			destDir = "."
+		}
 	}
 	if server == "" {
-		server = DefaultServer
+		if s.configStore != nil {
+			if cfg, err := s.configStore.Load(); err == nil && cfg.ServerURL != "" {
+				server = cfg.ServerURL
+			}
+		}
+		if server == "" {
+			server = DefaultServer
+		}
 	}
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return Handle{}, fmt.Errorf("create destination: %w", err)
@@ -236,7 +360,7 @@ func (s *TransferService) Receive(code string, destDir string, server string) (H
 
 // Drop starts a send for paths dropped onto the window, mirroring Send.
 func (s *TransferService) Drop(paths []string) (Handle, error) {
-	return s.Send(paths, DefaultServer)
+	return s.Send(paths, "")
 }
 
 // Pause pauses the transfer with id (both sides stop producing new data).
@@ -252,6 +376,300 @@ func (s *TransferService) Resume(id string) error {
 // Cancel cancels the transfer with id.
 func (s *TransferService) Cancel(id string) error {
 	return s.control(id, func(c transfer.Controls) error { return c.Cancel("canceled by user") })
+}
+
+// ListInterrupted surfaces interrupted durable receive journals and sender records.
+func (s *TransferService) ListInterrupted(outDir string) ([]DurableTransferItem, error) {
+	if outDir == "" {
+		if s.configStore != nil {
+			if cfg, err := s.configStore.Load(); err == nil && cfg.DownloadDir != "" {
+				outDir = cfg.DownloadDir
+			}
+		}
+		if outDir == "" {
+			outDir = "."
+		}
+	}
+
+	var items []DurableTransferItem
+
+	// 1. Durable receive entries
+	if store, err := s.openDurableStore(outDir); err == nil {
+		if entries, err := store.List(); err == nil {
+			for _, e := range entries {
+				item := DurableTransferItem{
+					TransferID:     e.TransferID,
+					Role:           "receive",
+					TotalBytes:     e.TotalSize,
+					CommittedBytes: e.CommittedBytes,
+					Files:          e.Files,
+					CreatedAt:      e.UpdatedAt,
+					UpdatedAt:      e.UpdatedAt,
+					Status:         durableStatus(e),
+					Resumable:      e.JournalOK && e.PartialOK && e.HasResumeSecret,
+				}
+				items = append(items, item)
+			}
+		}
+	}
+
+	// 2. Interrupted sender records
+	s.mu.Lock()
+	sstore := s.senderStore
+	s.mu.Unlock()
+	if sstore != nil {
+		if senderEntries, err := sstore.List(); err == nil {
+			for _, e := range senderEntries {
+				item := DurableTransferItem{
+					TransferID:     e.TransferID,
+					Role:           "send",
+					TotalBytes:     e.TotalSize,
+					CommittedBytes: 0,
+					Files:          e.Files,
+					CreatedAt:      e.CreatedAt,
+					UpdatedAt:      e.UpdatedAt,
+					Status:         senderStatus(e),
+					Resumable:      e.RecordOK && e.HasResumeSecret,
+					Paths:          e.Paths,
+				}
+				items = append(items, item)
+			}
+		}
+	}
+
+	return items, nil
+}
+
+// InspectInterrupted checks the consistency of one interrupted receive journal.
+func (s *TransferService) InspectInterrupted(transferID string, outDir string) (DurableInspectResult, error) {
+	if transferID == "" {
+		return DurableInspectResult{}, errors.New("transfer id is required")
+	}
+	if outDir == "" {
+		if s.configStore != nil {
+			if cfg, err := s.configStore.Load(); err == nil && cfg.DownloadDir != "" {
+				outDir = cfg.DownloadDir
+			}
+		}
+		if outDir == "" {
+			outDir = "."
+		}
+	}
+	store, err := s.openDurableStore(outDir)
+	if err != nil {
+		return DurableInspectResult{}, err
+	}
+	ins, err := store.Inspect(transferID)
+	if err != nil {
+		return DurableInspectResult{}, err
+	}
+
+	res := DurableInspectResult{
+		TransferID:          ins.Journal.TransferID,
+		TotalBytes:          ins.Total,
+		CommittedBytes:      ins.Committed,
+		CreatedAt:           ins.Journal.CreatedAt,
+		UpdatedAt:           ins.Journal.UpdatedAt,
+		ProtocolVersion:     ins.Journal.ProtocolVersion,
+		ManifestFingerprint: ins.Journal.ManifestFingerprint,
+		JournalPath:         ins.JournalPath,
+		PartialDir:          ins.PartialDir,
+		Resumable:           ins.Resumable,
+		Problems:            ins.Problems,
+	}
+	for _, f := range ins.Journal.Files {
+		res.Files = append(res.Files, FileInfo{Name: f.Name, Size: f.Size})
+	}
+	return res, nil
+}
+
+// ResumeInterrupted resumes an interrupted receive transfer using its stored credentials.
+func (s *TransferService) ResumeInterrupted(transferID string, code string, destDir string, server string) (Handle, error) {
+	if transferID == "" {
+		return Handle{}, errors.New("transfer id is required")
+	}
+	if code == "" {
+		return Handle{}, errors.New("an invite code from the sender is required to resume")
+	}
+	code = normalizeCode(code)
+	if destDir == "" {
+		if s.configStore != nil {
+			if cfg, err := s.configStore.Load(); err == nil && cfg.DownloadDir != "" {
+				destDir = cfg.DownloadDir
+			}
+		}
+		if destDir == "" {
+			destDir = "."
+		}
+	}
+	if server == "" {
+		if s.configStore != nil {
+			if cfg, err := s.configStore.Load(); err == nil && cfg.ServerURL != "" {
+				server = cfg.ServerURL
+			}
+		}
+		if server == "" {
+			server = DefaultServer
+		}
+	}
+
+	store, err := s.openDurableStore(destDir)
+	if err != nil {
+		return Handle{}, err
+	}
+	ins, err := store.Inspect(transferID)
+	if err != nil {
+		return Handle{}, err
+	}
+	if !ins.Resumable {
+		return Handle{}, fmt.Errorf("transfer %s is not resumable: %s", transferID, strings.Join(ins.Problems, "; "))
+	}
+	if ins.Journal.ResumeSecret == nil {
+		return Handle{}, fmt.Errorf("transfer %s has no resume credential (legacy state); restart required", transferID)
+	}
+	secret, err := wire.DecodeResumeSecretEnvelope(&wire.ResumeSecretEnvelope{
+		Version: ins.Journal.ResumeSecret.Version,
+		Value:   ins.Journal.ResumeSecret.Value,
+	})
+	if err != nil {
+		return Handle{}, fmt.Errorf("decode resume credential for %s: %w", transferID, err)
+	}
+
+	id := s.newID()
+	r := s.newRun(id, wire.RoleJoiner)
+	go r.runResumeReceive(r.ctx, transferID, code, destDir, server, secret, ins)
+	return Handle{ID: id, Role: "receive"}, nil
+}
+
+// DiscardInterrupted removes persistent state for one transfer id (idempotent).
+func (s *TransferService) DiscardInterrupted(transferID string, outDir string) error {
+	if transferID == "" {
+		return errors.New("transfer id is required")
+	}
+	if outDir == "" {
+		if s.configStore != nil {
+			if cfg, err := s.configStore.Load(); err == nil && cfg.DownloadDir != "" {
+				outDir = cfg.DownloadDir
+			}
+		}
+		if outDir == "" {
+			outDir = "."
+		}
+	}
+
+	// Discard receive journal + partials
+	if store, err := s.openDurableStore(outDir); err == nil {
+		_ = store.Discard(transferID)
+	}
+	// Discard sender record
+	s.mu.Lock()
+	sstore := s.senderStore
+	s.mu.Unlock()
+	if sstore != nil {
+		_ = sstore.Discard(transferID)
+	}
+	return nil
+}
+
+// DiscardAllInterrupted removes all durable transfer journals and sender records (idempotent).
+func (s *TransferService) DiscardAllInterrupted(outDir string) error {
+	if outDir == "" {
+		if s.configStore != nil {
+			if cfg, err := s.configStore.Load(); err == nil && cfg.DownloadDir != "" {
+				outDir = cfg.DownloadDir
+			}
+		}
+		if outDir == "" {
+			outDir = "."
+		}
+	}
+	if store, err := s.openDurableStore(outDir); err == nil {
+		_ = store.DiscardAll()
+	}
+	s.mu.Lock()
+	sstore := s.senderStore
+	s.mu.Unlock()
+	if sstore != nil {
+		_ = sstore.DiscardAll()
+	}
+	return nil
+}
+
+// RevealFile reveals the verified output file in the OS file manager.
+func (s *TransferService) RevealFile(filePath string) error {
+	s.mu.Lock()
+	rm := s.revealMgr
+	s.mu.Unlock()
+	if rm == nil {
+		rm = lifecycle.NewRevealManager(nil)
+	}
+	return rm.Reveal(filePath)
+}
+
+// GetConfig returns the desktop persistent configuration.
+func (s *TransferService) GetConfig() (config.DesktopConfig, error) {
+	s.mu.Lock()
+	cs := s.configStore
+	s.mu.Unlock()
+	if cs == nil {
+		return config.DefaultConfig(), nil
+	}
+	return cs.Load()
+}
+
+// SaveConfig saves the desktop persistent configuration.
+func (s *TransferService) SaveConfig(cfg config.DesktopConfig) error {
+	s.mu.Lock()
+	cs := s.configStore
+	s.mu.Unlock()
+	if cs == nil {
+		return errors.New("config store not available")
+	}
+	return cs.Save(cfg)
+}
+
+// ActiveCount returns the number of in-flight transfers.
+func (s *TransferService) ActiveCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.runs)
+}
+
+// Shutdown gracefully cancels active transfers and waits for bounded teardown.
+func (s *TransferService) Shutdown(timeout time.Duration) error {
+	s.mu.Lock()
+	runs := make([]*transferRun, 0, len(s.runs))
+	for _, r := range s.runs {
+		runs = append(runs, r)
+	}
+	s.mu.Unlock()
+
+	if len(runs) == 0 {
+		return nil
+	}
+
+	for _, r := range runs {
+		r.canc()
+		r.mu.Lock()
+		ctrl := r.controls
+		r.mu.Unlock()
+		if ctrl != nil {
+			_ = ctrl.Cancel("application shutting down")
+		}
+	}
+
+	deadline := time.Now().Add(timeout)
+	for {
+		s.mu.Lock()
+		remaining := len(s.runs)
+		s.mu.Unlock()
+		if remaining == 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	return nil
 }
 
 // control looks up the live Controls for id and applies fn.
@@ -318,6 +736,7 @@ func (r *transferRun) publish(kind string, mut ...func(*TransferEvent)) {
 		Paused:      r.paused,
 		Canceled:    r.canceled,
 		Failed:      r.failed,
+		Resumed:     r.resumed,
 		RemainingMS: -1,
 	}
 	if r.totalBytes > 0 {
@@ -387,12 +806,15 @@ func (r *transferRun) recordSample(bytes int64) {
 }
 
 // runSend drives the offerer side of the transfer.
-func (r *transferRun) runSend(ctx context.Context, server string, sources []wire.FileSource) {
+func (r *transferRun) runSend(ctx context.Context, server string, sources []wire.FileSource, paths []string) {
 	defer r.svc.remove(r)
 
 	sig, err := r.svc.dial(ctx, server, wire.RoleOfferer)
 	if err != nil {
 		r.fail("dial: " + err.Error())
+		if r.svc.notifier != nil {
+			r.svc.notifier.NotifyFailure("Transfer Failed", "dial: "+err.Error())
+		}
 		return
 	}
 	defer sig.Close()
@@ -407,9 +829,46 @@ func (r *transferRun) runSend(ctx context.Context, server string, sources []wire
 		r.publish("progress")
 	}
 
+	var transferID string
+	var onSendManifest func(wire.Manifest) error
+	var resumeCtx *transfer.ResumeContext
+	reused := false
+	r.svc.mu.Lock()
+	sstore := r.svc.senderStore
+	r.svc.mu.Unlock()
+	if sstore != nil {
+		var prepErr error
+		transferID, onSendManifest, reused, prepErr = transfer.PrepareSender(sstore, paths, sources)
+		if prepErr != nil {
+			r.fail("prepare sender: " + prepErr.Error())
+			if r.svc.notifier != nil {
+				r.svc.notifier.NotifyFailure("Transfer Failed", "prepare sender: "+prepErr.Error())
+			}
+			return
+		}
+		if reused {
+			if srec, ok, lookupErr := sstore.Lookup(transfer.PathKey(paths)); lookupErr == nil && ok && srec.ResumeSecret != nil {
+				if secret, err := wire.DecodeResumeSecretEnvelope(srec.ResumeSecret); err == nil {
+					resumeCtx = &transfer.ResumeContext{
+						TransferID:          srec.TransferID,
+						ManifestFingerprint: srec.ManifestFingerprint,
+						Role:                wire.RoleOfferer,
+						ResumeSecret:        secret,
+					}
+				}
+			}
+		}
+	}
+
+	caps := rendezvous.DefaultCaps()
+	if resumeCtx != nil {
+		caps.Features = append(caps.Features, wire.ResumeAuthCapability)
+	}
+
 	spec := transfer.Spec{
 		Session: rendezvous.Options{
-			Role: rendezvous.RoleOfferer,
+			Role:      rendezvous.RoleOfferer,
+			LocalCaps: &caps,
 			OnPhase: func(p rendezvous.Phase) {
 				r.publish("phase", func(ev *TransferEvent) { ev.Phase = string(p) })
 			},
@@ -422,11 +881,33 @@ func (r *transferRun) runSend(ctx context.Context, server string, sources []wire
 			},
 		},
 		Sources:        sources,
+		TransferID:     transferID,
+		OnSendManifest: onSendManifest,
+		OnResumeCredential: func(manifest wire.Manifest, resumeRoot []byte) error {
+			if sstore != nil {
+				return sstore.AttachResumeSecret(manifest, resumeRoot, !reused)
+			}
+			return nil
+		},
+		Resume: resumeCtx,
+		OnResume: func(res transfer.ResumeResult) {
+			if res.Authenticated {
+				r.mu.Lock()
+				r.resumed = true
+				r.mu.Unlock()
+				r.publish("progress", func(ev *TransferEvent) { ev.Resumed = true })
+			}
+		},
 		ForceRelay:     r.svc.forceRelay,
 		ICEServers:     r.svc.iceServers,
 		OnTransport:    r.onTransport,
 		OnConnect:      func() { r.publish("connect") },
 		OnFileProgress: r.onFileProgress,
+		OnResumeProgress: func(reusedBytes int64) {
+			r.mu.Lock()
+			r.reused = reusedBytes
+			r.mu.Unlock()
+		},
 		OnProgress: func(n int64) {
 			r.mu.Lock()
 			r.doneBytes = n
@@ -446,6 +927,9 @@ func (r *transferRun) runSend(ctx context.Context, server string, sources []wire
 	out, err := transfer.Run(ctx, sig, spec)
 	if err != nil {
 		r.fail(err.Error())
+		if r.svc.notifier != nil {
+			r.svc.notifier.NotifyFailure("Transfer Failed", err.Error())
+		}
 		return
 	}
 	r.mu.Lock()
@@ -459,17 +943,24 @@ func (r *transferRun) runSend(ctx context.Context, server string, sources []wire
 	r.doneBytes = done
 	// Verified success: every file in the set completed.
 	r.filesDone = len(out.Files)
+	if out.Handshake != nil {
+		r.fingerprint = fingerprint(out.Handshake.Master)
+	}
 	r.mu.Unlock()
 
-	if out.Handshake != nil {
-		r.mu.Lock()
-		r.fingerprint = fingerprint(out.Handshake.Master)
-		r.mu.Unlock()
+	if sstore != nil && transferID != "" {
+		_ = sstore.Discard(transferID)
 	}
+
 	r.publish("done", func(ev *TransferEvent) {
 		ev.Digest = out.Digest
 		ev.Percent = 100
 	})
+
+	if r.svc.notifier != nil {
+		summary := fmt.Sprintf("Sent %d file(s) (%s)", len(out.Files), humanBytes(r.totalBytes))
+		r.svc.notifier.NotifySuccess("Transfer Complete", summary, "")
+	}
 }
 
 // runReceive drives the joiner side of the transfer.
@@ -479,6 +970,9 @@ func (r *transferRun) runReceive(ctx context.Context, code, destDir, server stri
 	sig, err := r.svc.dial(ctx, server, wire.RoleJoiner)
 	if err != nil {
 		r.fail("dial: " + err.Error())
+		if r.svc.notifier != nil {
+			r.svc.notifier.NotifyFailure("Transfer Failed", "dial: "+err.Error())
+		}
 		return
 	}
 	defer sig.Close()
@@ -535,6 +1029,9 @@ func (r *transferRun) runReceive(ctx context.Context, code, destDir, server stri
 	out, err := transfer.Run(ctx, sig, spec)
 	if err != nil {
 		r.fail(err.Error())
+		if r.svc.notifier != nil {
+			r.svc.notifier.NotifyFailure("Transfer Failed", err.Error())
+		}
 		return
 	}
 	r.mu.Lock()
@@ -544,6 +1041,12 @@ func (r *transferRun) runReceive(ctx context.Context, code, destDir, server stri
 		r.fingerprint = fingerprint(out.Handshake.Master)
 	}
 	r.mu.Unlock()
+
+	outPath := out.Path
+	if len(out.Files) > 1 {
+		outPath = destDir
+	}
+
 	r.publish("done", func(ev *TransferEvent) {
 		ev.Digest = out.Digest
 		ev.OutDir = destDir
@@ -552,6 +1055,144 @@ func (r *transferRun) runReceive(ctx context.Context, code, destDir, server stri
 		}
 		ev.Percent = 100
 	})
+
+	if r.svc.notifier != nil {
+		label := out.Name
+		if len(out.Files) > 1 {
+			label = fmt.Sprintf("%d files", len(out.Files))
+		}
+		summary := fmt.Sprintf("Received %s (%s) into %s", label, humanBytes(out.Size), destDir)
+		r.svc.notifier.NotifySuccess("Transfer Complete", summary, outPath)
+	}
+}
+
+// runResumeReceive drives an interrupted receive transfer resumption.
+func (r *transferRun) runResumeReceive(ctx context.Context, transferID, code, destDir, server string, secret []byte, ins *transfer.Inspect) {
+	defer r.svc.remove(r)
+
+	sig, err := r.svc.dial(ctx, server, wire.RoleJoiner)
+	if err != nil {
+		r.fail("dial: " + err.Error())
+		if r.svc.notifier != nil {
+			r.svc.notifier.NotifyFailure("Transfer Failed", "dial: "+err.Error())
+		}
+		return
+	}
+	defer sig.Close()
+
+	lastProgress := time.Time{}
+	emitProgress := func() {
+		now := time.Now()
+		if now.Sub(lastProgress) < 200*time.Millisecond {
+			return
+		}
+		lastProgress = now
+		r.publish("progress")
+	}
+
+	caps := rendezvous.DefaultCaps()
+	caps.Features = append(caps.Features, wire.ResumeAuthCapability)
+
+	resumeCtx := &transfer.ResumeContext{
+		TransferID:          transferID,
+		ManifestFingerprint: ins.Journal.ManifestFingerprint,
+		Role:                wire.RoleJoiner,
+		ResumeSecret:        secret,
+	}
+
+	spec := transfer.Spec{
+		Session: rendezvous.Options{
+			Role:      rendezvous.RoleJoiner,
+			Code:      code,
+			LocalCaps: &caps,
+			OnPhase: func(p rendezvous.Phase) {
+				r.publish("phase", func(ev *TransferEvent) { ev.Phase = string(p) })
+			},
+		},
+		DestDir:    destDir,
+		ForceRelay: r.svc.forceRelay,
+		ICEServers: r.svc.iceServers,
+		Resume:     resumeCtx,
+		OnResume: func(res transfer.ResumeResult) {
+			if res.Authenticated {
+				r.mu.Lock()
+				r.resumed = true
+				r.mu.Unlock()
+				r.publish("progress", func(ev *TransferEvent) { ev.Resumed = true })
+			}
+		},
+		OnManifestSet: func(m wire.Manifest) {
+			r.mu.Lock()
+			r.files = r.files[:0]
+			r.totalBytes = m.TotalSize
+			for _, f := range m.Files {
+				r.files = append(r.files, FileInfo{Name: f.Name, Size: f.Size})
+			}
+			r.mu.Unlock()
+			r.publish("manifest")
+		},
+		OnTransport:    r.onTransport,
+		OnConnect:      func() { r.publish("connect") },
+		OnFileProgress: r.onFileProgress,
+		OnResumeProgress: func(reusedBytes int64) {
+			r.mu.Lock()
+			r.reused = reusedBytes
+			r.mu.Unlock()
+		},
+		OnProgress: func(n int64) {
+			r.mu.Lock()
+			r.doneBytes = n
+			r.recordSample(n)
+			r.mu.Unlock()
+			emitProgress()
+		},
+		OnControls: func(c transfer.Controls) {
+			r.mu.Lock()
+			r.controls = c
+			r.mu.Unlock()
+			r.publish("connect")
+		},
+		OnStateChange: r.onState,
+	}
+
+	out, err := transfer.Run(ctx, sig, spec)
+	if err != nil {
+		r.fail(err.Error())
+		if r.svc.notifier != nil {
+			r.svc.notifier.NotifyFailure("Transfer Failed", err.Error())
+		}
+		return
+	}
+	r.mu.Lock()
+	r.doneBytes = out.Size
+	r.filesDone = len(out.Files)
+	if out.Handshake != nil {
+		r.fingerprint = fingerprint(out.Handshake.Master)
+	}
+	r.mu.Unlock()
+
+	outPath := out.Path
+	if len(out.Files) > 1 {
+		outPath = destDir
+	}
+
+	r.publish("done", func(ev *TransferEvent) {
+		ev.Digest = out.Digest
+		ev.OutDir = destDir
+		if len(out.Files) == 1 {
+			ev.OutPath = out.Path
+		}
+		ev.Percent = 100
+	})
+
+	if r.svc.notifier != nil {
+		label := out.Name
+		if len(out.Files) > 1 {
+			label = fmt.Sprintf("%d files", len(out.Files))
+		}
+		summary := fmt.Sprintf("Received %s (%s) into %s", label, humanBytes(out.Size), destDir)
+		r.svc.notifier.NotifySuccess("Transfer Complete", summary, outPath)
+	}
 }
 
 func (r *transferRun) onTransport(path string) {
@@ -596,6 +1237,26 @@ func (r *transferRun) fail(why string) {
 	r.failed = true
 	r.mu.Unlock()
 	r.publish("error", func(ev *TransferEvent) { ev.Error = why })
+}
+
+// durableStatus renders receiver-side state class.
+func durableStatus(entry transfer.DurableEntry) string {
+	switch {
+	case !entry.PartialOK:
+		return "Partial data missing — inspect/discard"
+	case !entry.HasResumeSecret:
+		return "Legacy — restart required"
+	default:
+		return "Ready to resume"
+	}
+}
+
+// senderStatus renders sender-side state class.
+func senderStatus(entry transfer.SenderEntry) string {
+	if !entry.HasResumeSecret {
+		return "Legacy — restart required (no resume credential)"
+	}
+	return "Ready to resume (re-run to resume with receiver)"
 }
 
 // fingerprint renders the SAS fingerprint from the session master, matching
@@ -648,7 +1309,7 @@ func qrDataURL(link string) string {
 
 // validatePaths rejects symbolic links and missing paths up front with the
 // engine's rules (NewOSFileSources re-validates; this keeps picker feedback
-// instant).
+// instant). Also verifies canonical relative path safety to prevent destination escape.
 func validatePaths(paths []string) error {
 	for _, p := range paths {
 		info, err := os.Lstat(p)
@@ -661,8 +1322,27 @@ func validatePaths(paths []string) error {
 		if !info.IsDir() && !info.Mode().IsRegular() {
 			return fmt.Errorf("not a regular file or folder: %s", p)
 		}
+		// Validate base filename cannot contain traversal or invalid characters
+		base := filepath.Base(p)
+		if _, err := wire.NormalizeTransferPath(base); err != nil {
+			return fmt.Errorf("invalid file path %s: %w", p, err)
+		}
 	}
 	return nil
+}
+
+// humanBytes formats byte counts cleanly.
+func humanBytes(n int64) string {
+	if n >= 1<<30 {
+		return fmt.Sprintf("%.2f GiB", float64(n)/float64(1<<30))
+	}
+	if n >= 1<<20 {
+		return fmt.Sprintf("%.1f MiB", float64(n)/float64(1<<20))
+	}
+	if n >= 1<<10 {
+		return fmt.Sprintf("%.1f KiB", float64(n)/float64(1<<10))
+	}
+	return fmt.Sprintf("%d B", n)
 }
 
 // formatETA renders a duration like the CLI (e.g. "2m 5s remaining").
