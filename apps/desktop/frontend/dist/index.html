@@ -1,105 +1,303 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SendBeam Desktop</title>
-    <script type="module" src="/wails/runtime.js"></script>
     <style>
       :root {
-        color-scheme: dark;
-        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        --bg: #0d1117;
+        --card-bg: #161b22;
+        --border: #30363d;
+        --text: #c9d1d9;
+        --text-heading: #f0f6fc;
+        --text-muted: #8b949e;
+        --primary: #388bfd;
+        --primary-hover: #58a6ff;
+        --primary-active: #1f6feb;
+        --accent: #238636;
+        --accent-hover: #2ea043;
+        --danger: #da3633;
+        --danger-hover: #f85149;
+        --surface: #21262d;
+        --surface-border: #363b42;
+        --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       }
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        padding: 1.5rem 2rem 3rem;
-        background: #0f1115;
-        color: #e6e9ef;
-      }
-      header { display: flex; align-items: baseline; gap: 0.75rem; margin-bottom: 1.25rem; }
-      h1 { font-size: 1.3rem; margin: 0; }
-      .sub { color: #8b93a1; font-size: 0.85rem; }
 
-      .tabs { display: flex; gap: 0.5rem; margin-bottom: 1.25rem; }
-      .tab {
-        background: #171a21; border: 1px solid #262b36; color: #8b93a1;
-        border-radius: 8px; padding: 0.45rem 1.1rem; font-size: 0.9rem; cursor: pointer;
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--font);
+        font-size: 14px;
+        line-height: 1.5;
+        padding: 1.5rem;
+        user-select: none;
+        -webkit-user-select: none;
       }
-      .tab.active { color: #e6e9ef; border-color: #2563eb; background: #1c2330; }
+
+      header {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        margin-bottom: 1.25rem;
+        padding-bottom: 0.75rem;
+        border-bottom: 1px solid var(--border);
+      }
+      header h1 {
+        font-size: 1.25rem;
+        font-weight: 600;
+        color: var(--text-heading);
+        letter-spacing: -0.01em;
+      }
+      header .sub {
+        font-size: 0.8rem;
+        color: var(--text-muted);
+      }
+
+      .tabs {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 1.25rem;
+      }
+      .tab {
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--text-muted);
+        padding: 0.4rem 1rem;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .tab:hover {
+        background: var(--surface);
+        color: var(--text);
+      }
+      .tab.active {
+        background: var(--surface);
+        border-color: var(--primary);
+        color: var(--text-heading);
+      }
+
       .panel { display: none; }
       .panel.active { display: block; }
 
       .card {
-        background: #171a21; border: 1px solid #262b36; border-radius: 10px;
-        padding: 1rem 1.25rem; margin-bottom: 1rem; max-width: 720px;
+        background: var(--card-bg);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 1.25rem;
+        margin-bottom: 1.25rem;
       }
-      .card h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: #8b93a1; margin: 0 0 0.75rem; }
-      .row { display: flex; justify-content: space-between; gap: 1rem; padding: 0.2rem 0; font-size: 0.9rem; }
-      .row .k { color: #8b93a1; flex: 0 0 auto; }
-      .row .v { color: #e6e9ef; word-break: break-all; text-align: right; }
-
-      button {
-        background: #2563eb; color: white; border: 0; border-radius: 8px;
-        padding: 0.55rem 1.1rem; font-size: 0.9rem; cursor: pointer;
+      .card h2 {
+        font-size: 0.95rem;
+        font-weight: 600;
+        color: var(--text-heading);
+        margin-bottom: 0.75rem;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
       }
-      button:disabled { opacity: 0.5; cursor: default; }
-      button.ghost { background: #1f2430; border: 1px solid #2c3342; color: #c9d1dd; }
-      button.danger { background: #7f1d1d; }
-
-      input[type="text"] {
-        background: #0f1115; border: 1px solid #2c3342; color: #e6e9ef;
-        border-radius: 8px; padding: 0.55rem 0.75rem; font-size: 0.9rem; width: 100%;
-      }
-      label { display: block; font-size: 0.8rem; color: #8b93a1; margin: 0.75rem 0 0.3rem; }
 
       .drop {
-        border: 2px dashed #2c3342; border-radius: 10px; padding: 1.75rem;
-        text-align: center; color: #8b93a1; font-size: 0.9rem; cursor: pointer;
-        transition: border-color 0.15s, background 0.15s;
+        border: 2px dashed var(--border);
+        border-radius: 6px;
+        padding: 2rem 1rem;
+        text-align: center;
+        color: var(--text-muted);
+        background: rgba(22, 27, 34, 0.5);
+        cursor: pointer;
+        transition: all 0.15s ease;
       }
-      .drop.over, .drop:hover { border-color: #2563eb; background: #151b27; color: #c9d1dd; }
+      .drop:hover {
+        border-color: var(--primary);
+        color: var(--text);
+        background: rgba(56, 139, 253, 0.05);
+      }
 
-      .file-list { margin: 0.75rem 0 0; padding: 0; list-style: none; max-height: 10rem; overflow: auto; }
-      .file-list li { font-size: 0.82rem; color: #b9c0cc; padding: 0.2rem 0; border-bottom: 1px solid #20242e; word-break: break-all; }
-      .file-list li span { color: #6b7280; margin-left: 0.5rem; }
+      .file-list {
+        list-style: none;
+        margin-top: 0.75rem;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        max-height: 140px;
+        overflow-y: auto;
+      }
+      .file-list li {
+        padding: 0.4rem 0.75rem;
+        border-bottom: 1px solid var(--surface-border);
+        display: flex;
+        justify-content: space-between;
+        font-size: 0.85rem;
+      }
+      .file-list li:last-child { border-bottom: none; }
 
-      .invite { display: flex; gap: 1.25rem; align-items: flex-start; }
-      .invite .code { font-size: 1.6rem; font-weight: 600; letter-spacing: 0.03em; font-family: ui-monospace, monospace; }
-      .invite img { width: 180px; height: 180px; border-radius: 8px; background: white; padding: 6px; }
-      .invite .copy { margin-top: 0.5rem; }
+      label {
+        display: block;
+        font-size: 0.8rem;
+        color: var(--text-muted);
+        margin: 0.75rem 0 0.25rem 0;
+      }
+      input[type="text"], input[type="password"], textarea {
+        width: 100%;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        color: var(--text-heading);
+        padding: 0.5rem 0.75rem;
+        font-size: 0.85rem;
+        font-family: inherit;
+        outline: none;
+        transition: border-color 0.15s;
+      }
+      input[type="text"]:focus, input[type="password"]:focus, textarea:focus {
+        border-color: var(--primary);
+      }
 
-      .progress { height: 10px; background: #0f1115; border-radius: 6px; overflow: hidden; margin: 0.6rem 0; }
-      .progress > div { height: 100%; background: #2563eb; width: 0%; transition: width 0.2s; }
-      .chips { display: flex; gap: 0.75rem; flex-wrap: wrap; margin: 0.5rem 0; }
+      button {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 0.45rem 0.9rem;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      button:hover:not(:disabled) {
+        background: var(--surface-border);
+        border-color: var(--text-muted);
+      }
+      button:active:not(:disabled) {
+        background: var(--primary-active);
+        border-color: var(--primary);
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      button.primary {
+        background: var(--accent);
+        border-color: rgba(240, 246, 252, 0.1);
+        color: #ffffff;
+      }
+      button.primary:hover:not(:disabled) {
+        background: var(--accent-hover);
+      }
+      button.danger {
+        background: transparent;
+        border-color: var(--danger);
+        color: var(--danger-hover);
+      }
+      button.danger:hover:not(:disabled) {
+        background: var(--danger);
+        color: #ffffff;
+      }
+      button.ghost {
+        background: transparent;
+        border-color: transparent;
+        color: var(--primary-hover);
+        padding: 0.25rem 0.5rem;
+      }
+      button.ghost:hover:not(:disabled) {
+        text-decoration: underline;
+      }
+
+      .controls { display: flex; gap: 0.5rem; margin-top: 0.75rem; align-items: center; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; }
+      .statusline { margin-top: 0.5rem; font-size: 0.85rem; color: var(--text-muted); min-height: 1.2em; }
+      .err { color: #f85149; }
+      .ok { color: #56d364; }
+      .hidden { display: none !important; }
+      .row-sep { border-top: 1px solid var(--border); margin: 0.75rem 0; }
+
+      .invite {
+        display: flex;
+        gap: 1.5rem;
+        align-items: center;
+      }
+      .invite .code {
+        font-size: 1.4rem;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        color: var(--text-heading);
+        margin-bottom: 0.4rem;
+      }
+      .invite img {
+        width: 110px;
+        height: 110px;
+        border-radius: 6px;
+        background: #ffffff;
+        padding: 4px;
+      }
+
+      .progress {
+        width: 100%;
+        height: 8px;
+        background: var(--surface);
+        border-radius: 4px;
+        overflow: hidden;
+        margin: 0.75rem 0;
+      }
+      .progress div {
+        height: 100%;
+        background: var(--primary);
+        width: 0%;
+        transition: width 0.2s ease;
+      }
+
+      .row {
+        display: flex;
+        justify-content: space-between;
+        font-size: 0.85rem;
+        margin-bottom: 0.35rem;
+      }
+      .row .k { color: var(--text-muted); }
+      .row .v { color: var(--text-heading); font-weight: 500; }
+
+      .chips { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
       .chip {
-        font-size: 0.75rem; padding: 0.2rem 0.6rem; border-radius: 999px;
-        border: 1px solid #2c3342; color: #8b93a1;
+        font-size: 0.75rem;
+        padding: 0.15rem 0.5rem;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--text-muted);
       }
-      .chip.live { color: #4ade80; border-color: #14532d; background: #0c1f14; }
-      .chip.relay { color: #fbbf24; border-color: #713f12; background: #1c1608; }
-      .chip.auth { color: #93c5fd; border-color: #1e3a5f; background: #0c1727; }
-      .chip.err { color: #f87171; border-color: #7f1d1d; background: #200b0b; }
+      .chip.live { color: #58a6ff; border-color: #1f6feb; }
+      .chip.relay { color: #d29922; border-color: #9e6a03; }
+      .chip.auth { color: #7ee787; border-color: #238636; }
+      .chip.err { color: #f85149; border-color: #da3633; }
 
-      .controls { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
-      .muted { color: #6b7280; font-size: 0.82rem; }
-      .mono { font-family: ui-monospace, monospace; }
-      .statusline { margin-top: 0.5rem; font-size: 0.85rem; color: #8b93a1; min-height: 1.2em; }
-      .err { color: #f87171; }
-      .ok { color: #4ade80; }
-      .hidden { display: none; }
-      .row-sep { border-top: 1px solid #20242e; margin: 0.6rem 0; }
+      .table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 0.5rem;
+        font-size: 0.85rem;
+      }
+      .table th, .table td {
+        padding: 0.5rem 0.75rem;
+        text-align: left;
+        border-bottom: 1px solid var(--border);
+      }
+      .table th { color: var(--text-muted); font-weight: 500; }
+      .table tr:last-child td { border-bottom: none; }
     </style>
   </head>
   <body>
     <header>
       <h1>SendBeam</h1>
-      <span class="sub">End-to-end encrypted, peer-to-peer file transfer — desktop</span>
+      <span class="sub">End-to-end encrypted, peer-to-peer file transfer</span>
     </header>
 
     <div class="tabs">
       <button class="tab active" id="tab-send">Send</button>
       <button class="tab" id="tab-receive">Receive</button>
+      <button class="tab" id="tab-interrupted">Interrupted</button>
+      <button class="tab" id="tab-settings">Settings</button>
     </div>
 
     <!-- SEND -->
@@ -107,13 +305,13 @@
       <div class="card">
         <h2>Files &amp; folders</h2>
         <div class="drop" id="drop-send" data-file-drop-target>
-          Drop files or folders here, or click to pick
+          Drop files or folders here, or click to choose
         </div>
         <ul class="file-list hidden" id="send-list"></ul>
         <div class="statusline" id="send-sel-status"></div>
         <div class="controls">
-          <button id="pick-send">Pick files &amp; folders</button>
-          <button id="start-send" disabled>Send</button>
+          <button id="pick-send">Choose files &amp; folders…</button>
+          <button class="primary" id="start-send" disabled>Start Transfer</button>
         </div>
       </div>
 
@@ -122,8 +320,8 @@
         <div class="invite">
           <div>
             <div class="code mono" id="invite-code"></div>
-            <button class="ghost copy" id="copy-invite">Copy invite</button>
-            <div class="muted" id="invite-link"></div>
+            <button class="ghost copy" id="copy-invite">Copy code</button>
+            <div class="statusline" id="invite-link" style="word-break: break-all;"></div>
           </div>
           <img id="invite-qr" alt="Invite QR code" />
         </div>
@@ -153,15 +351,15 @@
     <section class="panel" id="panel-receive">
       <div class="card">
         <h2>Receive</h2>
-        <label for="recv-code">Invite code (or paste the full invite link)</label>
+        <label for="recv-code">Invite code (or full join link)</label>
         <input type="text" id="recv-code" placeholder="e.g. 7-alpha-bravo" autocomplete="off" />
-        <label for="recv-dir">Save into</label>
+        <label for="recv-dir">Destination folder</label>
         <div style="display:flex; gap:0.5rem;">
-          <input type="text" id="recv-dir" placeholder="destination folder" autocomplete="off" style="flex:1" />
+          <input type="text" id="recv-dir" placeholder="download folder" autocomplete="off" style="flex:1" />
           <button class="ghost" id="pick-dest">Choose…</button>
         </div>
         <div class="controls">
-          <button id="start-recv" disabled>Receive</button>
+          <button class="primary" id="start-recv" disabled>Receive Transfer</button>
         </div>
         <div class="statusline" id="recv-status"></div>
       </div>
@@ -181,40 +379,100 @@
           <button id="recv-pause">Pause</button>
           <button id="recv-resume" disabled>Resume</button>
           <button class="danger" id="recv-cancel">Cancel</button>
+          <button class="ghost hidden" id="recv-reveal">Reveal in Folder</button>
         </div>
         <div class="statusline" id="recv-status-line"></div>
       </div>
     </section>
 
+    <!-- INTERRUPTED / DURABLE TRANSFERS -->
+    <section class="panel" id="panel-interrupted">
+      <div class="card">
+        <h2>
+          <span>Interrupted Transfers</span>
+          <div>
+            <button class="ghost" id="refresh-durable">Refresh</button>
+            <button class="danger ghost" id="discard-all-durable">Discard All</button>
+          </div>
+        </h2>
+        <div id="durable-list-container">
+          <p class="statusline" id="durable-empty">Scanning for interrupted transfers…</p>
+          <table class="table hidden" id="durable-table">
+            <thead>
+              <tr>
+                <th>Role</th>
+                <th>Transfer ID</th>
+                <th>Files</th>
+                <th>Progress</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="durable-tbody"></tbody>
+          </table>
+        </div>
+        <div class="statusline" id="durable-status"></div>
+      </div>
+    </section>
+
+    <!-- SETTINGS -->
+    <section class="panel" id="panel-settings">
+      <div class="card">
+        <h2>Preferences &amp; Network</h2>
+        <label for="cfg-server">Signaling Server URL</label>
+        <input type="text" id="cfg-server" placeholder="wss://localhost:8443/ws" />
+
+        <label for="cfg-ice">ICE Servers (STUN / TURN, one per line)</label>
+        <textarea id="cfg-ice" rows="3" placeholder="stun:stun.l.google.com:19302"></textarea>
+
+        <label for="cfg-downdir">Default Download Folder</label>
+        <div style="display:flex; gap:0.5rem;">
+          <input type="text" id="cfg-downdir" placeholder="Downloads" style="flex:1" />
+          <button class="ghost" id="cfg-pick-dir">Browse…</button>
+        </div>
+
+        <label style="display: flex; align-items: center; gap: 0.5rem; margin-top: 1rem; cursor: not-allowed; opacity: 0.8;">
+          <input type="checkbox" id="cfg-auto-accept" disabled />
+          <span>Auto-Accept Incoming Transfers (Strictly disabled by default for security)</span>
+        </label>
+
+        <div class="controls" style="margin-top: 1.25rem;">
+          <button class="primary" id="save-settings">Save Settings</button>
+          <button id="reset-settings">Reload</button>
+        </div>
+        <div class="statusline" id="settings-status"></div>
+      </div>
+    </section>
+
     <script>
-      // Service FQNs (wails binds by full import path.Type.Method).
       const SV = {
-        Service:     "github.com/sendbeam/desktop/internal/engine.Service",
-        Transfer:    "github.com/sendbeam/desktop/internal/engine.TransferService",
+        Service:  "github.com/sendbeam/desktop/internal/engine.Service",
+        Transfer: "github.com/sendbeam/desktop/internal/engine.TransferService",
       };
       const call = (fqn, ...args) => wails.Call.ByName(fqn, ...args);
       const $ = (id) => document.getElementById(id);
 
-      // ---- state ----
       const state = {
         mode: "send",
         selected: [],
         send: { id: null },
-        recv: { id: null },
+        recv: { id: null, outPath: null },
       };
 
-      // ---- tabs ----
       function setMode(mode) {
         state.mode = mode;
-        $("tab-send").classList.toggle("active", mode === "send");
-        $("tab-receive").classList.toggle("active", mode === "receive");
-        $("panel-send").classList.toggle("active", mode === "send");
-        $("panel-receive").classList.toggle("active", mode === "receive");
+        ["send", "receive", "interrupted", "settings"].forEach((m) => {
+          $("tab-" + m).classList.toggle("active", mode === m);
+          $("panel-" + m).classList.toggle("active", mode === m);
+        });
+        if (mode === "interrupted") loadDurableList();
+        if (mode === "settings") loadSettings();
       }
       $("tab-send").addEventListener("click", () => setMode("send"));
       $("tab-receive").addEventListener("click", () => setMode("receive"));
+      $("tab-interrupted").addEventListener("click", () => setMode("interrupted"));
+      $("tab-settings").addEventListener("click", () => setMode("settings"));
 
-      // ---- helpers ----
       function humanBytes(n) {
         if (n >= 1 << 30) return (n / (1 << 30)).toFixed(2) + " GiB";
         if (n >= 1 << 20) return (n / (1 << 20)).toFixed(1) + " MiB";
@@ -227,14 +485,8 @@
         if (bps >= 1 << 10) return (bps / (1 << 10)).toFixed(1) + " KiB/s";
         return Math.round(bps) + " B/s";
       }
-      function basename(p) { return String(p).split(/[\\/]/).pop(); }
-      function totalSelected() {
-        let n = 0;
-        try { n = state.selected.reduce((a, p) => a + (p.size || 0), 0); } catch (e) {}
-        return n;
-      }
 
-      // ---- send selection ----
+      // SEND
       function renderSelection() {
         const list = $("send-list");
         list.innerHTML = "";
@@ -247,9 +499,7 @@
           list.appendChild(li);
         }
         list.classList.toggle("hidden", state.selected.length === 0);
-        $("send-sel-status").textContent = state.selected.length
-          ? state.selected.length + " item(s) selected"
-          : "";
+        $("send-sel-status").textContent = state.selected.length ? state.selected.length + " item(s) selected" : "";
         $("start-send").disabled = state.selected.length === 0;
       }
       async function pickSend() {
@@ -262,9 +512,7 @@
       }
       $("pick-send").addEventListener("click", pickSend);
       $("drop-send").addEventListener("click", pickSend);
-      // Drag/drop is handled by the window: main.go forwards dropped paths to
-      // the service and emits a "drop" event so this panel can adopt the new
-      // transfer and show its invite.
+
       wails.Events.On("sendbeam:transfer", (ev) => {
         if (!ev || ev.kind !== "drop" || !ev.id) return;
         if (state.send.id && state.send.id !== ev.id) return;
@@ -275,6 +523,7 @@
         $("send-progress-card").classList.remove("hidden");
         $("start-send").disabled = true;
       });
+
       $("start-send").addEventListener("click", () => {
         if (!state.selected.length) return;
         const paths = state.selected.map((p) => p.path);
@@ -287,13 +536,14 @@
         }).catch((err) => { $("send-status").textContent = String(err); });
       });
 
-      // ---- receive ----
+      // RECEIVE
       function recvCanStart() {
-        return !!$("recv-code").value.trim() && !!$("recv-dir").value.trim();
+        return !!$("recv-code").value.trim();
       }
       function updateRecvStart() { $("start-recv").disabled = !recvCanStart(); }
       $("recv-code").addEventListener("input", updateRecvStart);
       $("recv-dir").addEventListener("input", updateRecvStart);
+
       $("pick-dest").addEventListener("click", async () => {
         const res = await call(SV.Transfer + ".PickDestination");
         if (res && res.error) { $("recv-status").textContent = res.error; return; }
@@ -302,6 +552,7 @@
           updateRecvStart();
         }
       });
+
       $("start-recv").addEventListener("click", () => {
         const code = $("recv-code").value.trim();
         const dir = $("recv-dir").value.trim();
@@ -314,7 +565,15 @@
         }).catch((err) => { $("recv-status").textContent = String(err); });
       });
 
-      // ---- controls ----
+      $("recv-reveal").addEventListener("click", () => {
+        if (state.recv.outPath) {
+          call(SV.Transfer + ".RevealFile", state.recv.outPath).catch((e) => {
+            $("recv-status-line").textContent = "Reveal failed: " + e;
+          });
+        }
+      });
+
+      // CONTROLS
       function wireControls(prefix) {
         const id = () => state[prefix].id;
         $(prefix + "-pause").addEventListener("click", () => call(SV.Transfer + ".Pause", id()).catch((e) => console.error(e)));
@@ -324,7 +583,6 @@
       wireControls("send");
       wireControls("recv");
 
-      // ---- live events ----
       function chips(ev) {
         const out = [];
         if (ev.phase) out.push('<span class="chip">' + ev.phase.replace(/-/g, " ") + "</span>");
@@ -336,6 +594,7 @@
         if (ev.state) out.push('<span class="chip live">' + ev.state + "</span>");
         return out.join("");
       }
+
       function renderTransfer(ev, prefix) {
         const p = prefix === "send" ? "send" : "recv";
         const id = state[p].id;
@@ -366,6 +625,10 @@
           status.innerHTML = '<span class="ok">✓ Verified transfer complete.</span>' +
             (ev.outPath ? " Saved to " + ev.outPath + "." : "");
           $(p + "-pause").disabled = $(p + "-resume").disabled = $(p + "-cancel").disabled = true;
+          if (p === "recv" && (ev.outPath || ev.outDir)) {
+            state.recv.outPath = ev.outPath || ev.outDir;
+            $("recv-reveal").classList.remove("hidden");
+          }
         } else if (ev.kind === "error") {
           status.innerHTML = '<span class="err">✗ ' + (ev.error || "transfer failed") + "</span>";
         } else if (ev.kind === "connect") {
@@ -374,6 +637,7 @@
           status.textContent = "Waiting for the peer to join…";
         }
       }
+
       wails.Events.On("sendbeam:transfer", (ev) => {
         if (!ev || !ev.id || !ev.kind) return;
         if (ev.id === state.send.id) renderTransfer(ev, "send");
@@ -388,14 +652,12 @@
         }
       });
 
-      // ---- copy invite ----
       $("copy-invite").addEventListener("click", async () => {
         const text = $("invite-code").textContent;
         try {
           await navigator.clipboard.writeText(text);
           $("invite-status").textContent = "Invite code copied.";
         } catch (e) {
-          // fallback for webviews without clipboard permission
           const ta = document.createElement("textarea");
           ta.value = text;
           document.body.appendChild(ta);
@@ -406,12 +668,117 @@
         }
       });
 
-      // ---- engine info ----
+      // DURABLE / INTERRUPTED
+      async function loadDurableList() {
+        try {
+          const items = await call(SV.Transfer + ".ListInterrupted", "");
+          const tbody = $("durable-tbody");
+          tbody.innerHTML = "";
+          if (!items || items.length === 0) {
+            $("durable-empty").classList.remove("hidden");
+            $("durable-empty").textContent = "No interrupted transfers found.";
+            $("durable-table").classList.add("hidden");
+            return;
+          }
+          $("durable-empty").classList.add("hidden");
+          $("durable-table").classList.remove("hidden");
+          for (const item of items) {
+            const tr = document.createElement("tr");
+            tr.innerHTML = `
+              <td><span class="chip">${item.role}</span></td>
+              <td class="mono">${item.transferId.slice(0, 8)}…</td>
+              <td>${item.files}</td>
+              <td>${humanBytes(item.committedBytes)} / ${humanBytes(item.totalBytes)}</td>
+              <td>${item.status}</td>
+              <td>
+                <button class="ghost" data-action="inspect" data-id="${item.transferId}">Inspect</button>
+                <button class="ghost danger" data-action="discard" data-id="${item.transferId}">Discard</button>
+              </td>
+            `;
+            tbody.appendChild(tr);
+          }
+        } catch (err) {
+          $("durable-empty").classList.remove("hidden");
+          $("durable-empty").textContent = "Failed to load transfers: " + err;
+        }
+      }
+
+      $("durable-tbody").addEventListener("click", async (e) => {
+        const btn = e.target.closest("button");
+        if (!btn) return;
+        const id = btn.dataset.id;
+        const action = btn.dataset.action;
+        if (action === "discard") {
+          try {
+            await call(SV.Transfer + ".DiscardInterrupted", id, "");
+            $("durable-status").textContent = "Discarded transfer " + id;
+            loadDurableList();
+          } catch (err) { $("durable-status").textContent = "Discard error: " + err; }
+        } else if (action === "inspect") {
+          try {
+            const ins = await call(SV.Transfer + ".InspectInterrupted", id, "");
+            alert("Transfer ID: " + ins.transferId + "\nResumable: " + ins.resumable + "\nProblems: " + (ins.problems ? ins.problems.join(", ") : "none"));
+          } catch (err) { $("durable-status").textContent = "Inspect error: " + err; }
+        }
+      });
+
+      $("refresh-durable").addEventListener("click", loadDurableList);
+      $("discard-all-durable").addEventListener("click", async () => {
+        if (!confirm("Discard all interrupted transfers and partial files?")) return;
+        try {
+          await call(SV.Transfer + ".DiscardAllInterrupted", "");
+          $("durable-status").textContent = "All interrupted transfers discarded.";
+          loadDurableList();
+        } catch (err) { $("durable-status").textContent = "Discard all error: " + err; }
+      });
+
+      // SETTINGS
+      async function loadSettings() {
+        try {
+          const cfg = await call(SV.Transfer + ".GetConfig");
+          if (cfg) {
+            $("cfg-server").value = cfg.serverUrl || "";
+            $("cfg-ice").value = (cfg.iceServers || []).join("\n");
+            $("cfg-downdir").value = cfg.downloadDir || "";
+            $("cfg-auto-accept").checked = false; // Strictly false
+          }
+        } catch (err) {
+          $("settings-status").textContent = "Load error: " + err;
+        }
+      }
+
+      $("cfg-pick-dir").addEventListener("click", async () => {
+        const res = await call(SV.Transfer + ".PickDestination");
+        if (res && res.paths && res.paths.length) {
+          $("cfg-downdir").value = res.paths[0];
+        }
+      });
+
+      $("save-settings").addEventListener("click", async () => {
+        const server = $("cfg-server").value.trim();
+        const ice = $("cfg-ice").value.split("\n").map((s) => s.trim()).filter(Boolean);
+        const downdir = $("cfg-downdir").value.trim();
+        const cfg = {
+          serverUrl: server,
+          iceServers: ice,
+          downloadDir: downdir,
+          autoAccept: false,
+        };
+        try {
+          await call(SV.Transfer + ".SaveConfig", cfg);
+          $("settings-status").innerHTML = '<span class="ok">✓ Settings saved successfully.</span>';
+        } catch (err) {
+          $("settings-status").innerHTML = '<span class="err">✗ ' + err + '</span>';
+        }
+      });
+
+      $("reset-settings").addEventListener("click", loadSettings);
+
       (async () => {
         try {
           const info = await call(SV.Service + ".Info");
           document.title = "SendBeam Desktop — " + (info.engineVer ? "engine " + info.engineVer : "linked");
-        } catch (err) { /* shell info is non-critical */ }
+        } catch (err) {}
       })();
     </script>
   </body>
