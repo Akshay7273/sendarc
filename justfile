@@ -39,7 +39,7 @@ build:
 
 # Build and install the CLI into ~/.local/bin (on PATH), so it runs as `sendbeam`
 install-cli:
-    go build -o ~/.local/bin/sendbeam ./apps/cli/cmd/sendbeam
+    go build -ldflags "-X main.Version=dev -X main.GitCommit=$(git rev-parse HEAD 2>/dev/null || echo unknown)" -o ~/.local/bin/sendbeam ./apps/cli/cmd/sendbeam
 
 # Run the production-style server (serves the built web bundle over TLS)
 serve: build certs
@@ -49,8 +49,8 @@ serve: build certs
 lint:
     pnpm -r lint
     for m in packages/wire packages/engine apps/server apps/cli; do ( cd "$m" && go vet ./... ) || exit 1; done
-    ( cd apps/desktop && go vet -tags server ./... ) || exit 1
-    if command -v golangci-lint >/dev/null; then for m in packages/wire packages/engine apps/server apps/cli; do ( cd "$m" && golangci-lint run ) || exit 1; done; ( cd apps/desktop && golangci-lint run --build-tags server ) || exit 1; else echo "golangci-lint not installed; ran go vet only"; fi
+    ( cd apps/desktop && CGO_ENABLED=0 go vet -tags server ./... ) || exit 1
+    if command -v golangci-lint >/dev/null; then for m in packages/wire packages/engine apps/server apps/cli; do ( cd "$m" && golangci-lint run ) || exit 1; done; ( cd apps/desktop && CGO_ENABLED=0 golangci-lint run --build-tags server ) || exit 1; else echo "golangci-lint not installed; ran go vet only"; fi
 
 # Typecheck TS + Svelte
 typecheck:
@@ -60,7 +60,7 @@ typecheck:
 test:
     pnpm -r test
     for m in packages/wire packages/engine apps/server apps/cli; do ( cd "$m" && go test ./... ) || exit 1; done
-    ( cd apps/desktop && go test -tags server ./... ) || exit 1
+    ( cd apps/desktop && CGO_ENABLED=0 go test -tags server ./... ) || exit 1
 
 # Format
 fmt:

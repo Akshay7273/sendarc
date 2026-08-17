@@ -6,7 +6,7 @@ logic lives in the engine; the desktop is a thin presentation seam over the same
 the CLI consumes, so a desktop peer interoperates with CLI and browser peers of the same
 deployment out of the box.
 
-## Core transfer product (V14-PR03)
+## Core transfer product
 
 - **Send** — pick multiple files and folders with the native dialog, or drag and drop them
   onto the window. A sender gets an invite: a code, a copyable join link, and a scannable
@@ -25,6 +25,11 @@ deployment out of the box.
 
 - `main.go` — Wails application: window (with file drop enabled), services, embedded
   frontend. Forwards dropped files to the service.
+- `build/` — packaging configuration and assets:
+  - `appicon.png`, `icons/` — multi-resolution icon assets
+  - `windows/` — Windows manifest, version info, icon, and NSIS installer scripts
+  - `darwin/` — macOS `Info.plist`, `icons.icns`, and DMG assets
+  - `linux/` — Linux `.desktop` entry, icons, AppImage AppRun, and Debian packaging metadata
 - `internal/engine/` —
   - `service.go` — `EngineService` (`Info`, `Caps`, `SelfCheck`).
   - `transfer_service.go` — `TransferService` (`Send`, `Receive`, `Pause`, `Resume`,
@@ -35,7 +40,9 @@ deployment out of the box.
     cancel, QR, invite links) and a real-WebSocket interop transfer.
 - `frontend/dist/` — the product UI (plain HTML/JS over the Wails runtime bridge).
 
-## Build
+## Build and Packaging
+
+### Source Builds
 
 ```bash
 # Native window (needs platform WebView deps, e.g. libgtk-4-dev + libwebkitgtk-6.0-dev on Linux)
@@ -44,6 +51,26 @@ go build -o sendbeam-desktop .
 # Headless server (no GUI deps; used by CI and tests)
 go build -tags server -o sendbeam-desktop-server .
 ```
+
+### Native Packaging
+
+#### Windows (AMD64)
+
+- **Portable ZIP**: `SendBeam-windows-amd64-portable.zip` containing `sendbeam-desktop.exe`, `LICENSE`, and `README.md`.
+- **NSIS Installer**: `SendBeam-windows-amd64-installer.exe` compiled via NSIS (`makensis build/windows/nsis/project.nsi`).
+
+#### macOS (Universal: ARM64 + AMD64)
+
+- **Universal Application**: Compile `darwin/arm64` and `darwin/amd64` slices with `CGO_ENABLED=1`, merge with `lipo -create`, and construct `SendBeam.app`.
+- **DMG**: Package `SendBeam-macos-universal.dmg` with `hdiutil create`.
+
+#### Linux (AMD64)
+
+- **AppImage**: Standalone executable bundle `SendBeam-linux-amd64.AppImage`.
+- **Debian package**: Native `.deb` package `sendbeam-desktop_1.4.0_amd64.deb` containing desktop launcher, icons, and binaries.
+
+> [!NOTE]
+> Public signed installers and automated update channels will be published in a future milestone. Current packaging targets are unsigned validation builds.
 
 ## Test
 

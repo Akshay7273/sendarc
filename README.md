@@ -5,7 +5,7 @@
 <h1 align="center">SendBeam</h1>
 
 <p align="center">
-  <strong>Encrypted peer-to-peer file transfer for the browser and the terminal. No accounts, no uploads, no server-side storage.</strong>
+  <strong>Encrypted peer-to-peer file transfer for the web, the terminal, and the desktop. No accounts, no uploads, no server-side storage.</strong>
 </p>
 
 <p align="center">
@@ -18,7 +18,9 @@
 <p align="center">
   <a href="https://omnitrix.space"><strong>Live demo</strong></a>
   · <a href="#quick-start">Quick start</a>
+  · <a href="#browser">Browser</a>
   · <a href="#cli">CLI</a>
+  · <a href="#desktop">Desktop</a>
   · <a href="#self-hosting">Self-hosting</a>
   · <a href="#security">Security</a>
   · <a href="#documentation">Documentation</a>
@@ -27,14 +29,14 @@
 
 ## About
 
-SendBeam is an open-source, end-to-end-encrypted file transfer application for the browser
-and the command line. Files stream directly between two peers over WebRTC; a blind
+SendBeam is an open-source, end-to-end-encrypted file transfer application for the browser,
+the command line, and the desktop. Files stream directly between two peers over WebRTC; a blind
 rendezvous server negotiates the connection and never stores, inspects, or decrypts file
 data. When a direct path is blocked by a restrictive NAT, an encrypted relay on the server
 carries opaque ciphertext while the transfer stays end-to-end-encrypted.
 
-Two clients share one wire protocol: the web application and a Go CLI. Send from a browser
-tab and receive in the CLI — or any other combination — with the same invite code, even
+All clients share one wire protocol: web, Go CLI, and native desktop. Send from a browser
+tab and receive in the CLI or desktop — or any other combination — with the same invite code, even
 across different networks.
 
 The design is documented in the [protocol specification](docs/protocol.md) and the
@@ -97,6 +99,26 @@ and resumes automatically when you rejoin the same room, and
 `sendbeam transfers list|inspect|resume|discard` manages that state (see
 [docs/durable-receive.md](docs/durable-receive.md)).
 
+## Desktop
+
+SendBeam Desktop provides a native desktop interface for Windows, macOS, and Linux built
+on Wails v3, running the shared Go engine.
+
+- **Native system UX.** OS drag-and-drop file transfers, system native file pickers, and system tray integration.
+- **Unified protocol.** Interoperates seamlessly with browser and CLI peers.
+- **Cross-platform packaging.** Windows portable ZIP & NSIS installer, macOS Universal application (.app & .dmg), and Linux AppImage & Debian package (.deb).
+
+> [!NOTE]
+> Public signed installers and automated update channels will be published in a future release. Current packages can be built from source or downloaded from CI artifacts.
+
+```bash
+# Build desktop native binary (requires platform WebView dependencies)
+cd apps/desktop
+go build -o sendbeam-desktop .
+```
+
+See [apps/desktop/README.md](apps/desktop/README.md) and [docs/distribution.md](docs/distribution.md) for platform-specific packaging instructions.
+
 ## Self-hosting
 
 Prefer your own infrastructure? The single container runs the web app, the signaling
@@ -132,6 +154,7 @@ Full analysis, accepted limitations, and the trust boundary are in the
 ## Documentation
 
 - [Self-hosting](docs/HOSTING.md) — deployment, TLS, STUN/TURN, relay limits, metrics
+- [Distribution](docs/distribution.md) — multi-platform packaging, artifacts, and build metadata
 - [Protocol specification](docs/protocol.md) — `sendbeam/1` wire protocol
 - [Threat model](docs/threat-model.md) — trust boundary, attacks, mitigations
 - [Compatibility matrix](docs/compat-matrix.md) — NAT topologies, degraded networks, browsers
