@@ -18,10 +18,12 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
+	"github.com/wailsapp/wails/v3/pkg/icons"
 
 	"github.com/sendbeam/desktop/internal/config"
 	"github.com/sendbeam/desktop/internal/engine"
@@ -66,6 +68,21 @@ func main() {
 
 	cfg, _ := transferSvc.GetConfig()
 
+	// Lifecycle Coordinator: manages cancellable window closing hooks,
+	// system power sleep/wake notifications, and bounded idempotent shutdown.
+	lifecycleCoord := lifecycle.NewCoordinator(
+		cfg.CloseToTray,
+		transferSvc,
+		func(kind, phase string) {
+			if app := application.Get(); app != nil && app.Event != nil {
+				app.Event.Emit(engine.TransferEventName, map[string]any{
+					"kind":  kind,
+					"phase": phase,
+				})
+			}
+		},
+	)
+
 	app := application.New(application.Options{
 		Name:        "SendBeam Desktop",
 		Description: "Secure, end-to-end-encrypted, peer-to-peer file transfer",
@@ -106,15 +123,27 @@ func main() {
 	win := app.Window.NewWithOptions(winOpts)
 
 	// System Tray: provides an authoritative reopen and quit mechanism so close-to-tray
-	// or start-minimized never creates an unreachable or un-restorable application.
+	// or start-minimized maintains an easily discoverable and restorable window state.
 	systemTray := app.SystemTray.New()
+	systemTray.SetTooltip("SendBeam")
+
+	switch runtime.GOOS {
+	case "darwin":
+		systemTray.SetTemplateIcon(icons.SystrayMacTemplate)
+	case "windows":
+		systemTray.SetIcon(icons.SystrayLight)
+		systemTray.SetDarkModeIcon(icons.SystrayDark)
+	default:
+		systemTray.SetIcon(icons.SystrayLight)
+	}
+
 	trayMenu := app.NewMenu()
 	trayMenu.Add("Show SendBeam").OnClick(func(_ *application.Context) {
 		win.Show()
 		win.Focus()
 	})
 	trayMenu.Add("Quit SendBeam").OnClick(func(_ *application.Context) {
-		_ = transferSvc.Shutdown(3 * time.Second)
+		_ = lifecycleCoord.Shutdown(3 * time.Second)
 		app.Quit()
 	})
 	systemTray.SetMenu(trayMenu)
@@ -123,21 +152,28 @@ func main() {
 		win.Focus()
 	})
 
-	// macOS dock reopen hook
+	// macOS dock click reopen hook
 	app.Event.OnApplicationEvent(events.Mac.ApplicationShouldHandleReopen, func(_ *application.ApplicationEvent) {
 		win.Show()
 		win.Focus()
 	})
 
-	// Close-to-tray handling: hides window into tray rather than destroying active transfers
-	if cfg.CloseToTray {
-		win.OnWindowEvent(events.Common.WindowClosing, func(e *application.WindowEvent) {
-			if cfg.CloseToTray {
-				win.Hide()
-				e.Cancel()
-			}
-		})
-	}
+	// Wire real system sleep/wake notifications provided by Wails v3
+	app.Event.OnApplicationEvent(events.Common.SystemWillSleep, func(_ *application.ApplicationEvent) {
+		lifecycleCoord.OnSystemWillSleep()
+	})
+	app.Event.OnApplicationEvent(events.Common.SystemDidWake, func(_ *application.ApplicationEvent) {
+		lifecycleCoord.OnSystemDidWake()
+	})
+
+	// Cancellable window closing hook: uses RegisterHook so e.Cancel() properly suppresses window destruction
+	// when CloseToTray is active and tray access is known usable.
+	win.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {
+		if lifecycleCoord.ShouldHideOnClose() {
+			win.Hide()
+			e.Cancel()
+		}
+	})
 
 	// Forward OS file drops to a new send. Dropped paths are absolute; the
 	// engine's source expansion handles files and folders identically. The
@@ -172,5 +208,5 @@ func main() {
 	}
 
 	// Bounded graceful teardown upon exit: cancel active transfers cleanly
-	_ = transferSvc.Shutdown(3 * time.Second)
+	_ = lifecycleCoord.Shutdown(3 * time.Second)
 }
