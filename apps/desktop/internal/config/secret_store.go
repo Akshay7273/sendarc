@@ -2,9 +2,14 @@
 package config
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -179,13 +184,196 @@ func (d *DarwinKeychainSecretStore) BackendName() string {
 	return "macos-keychain"
 }
 
+// LinuxSecretServiceStore manages credentials via the FreeDesktop Secret Service
+// standard using the `secret-tool` CLI utility.
+type LinuxSecretServiceStore struct {
+	serviceName string
+}
+
+// NewLinuxSecretServiceStore creates a Linux Secret Service store.
+func NewLinuxSecretServiceStore(serviceName string) *LinuxSecretServiceStore {
+	if serviceName == "" {
+		serviceName = "SendBeam"
+	}
+	return &LinuxSecretServiceStore{serviceName: serviceName}
+}
+
+// Get retrieves a secret from Secret Service.
+func (l *LinuxSecretServiceStore) Get(key string) ([]byte, error) {
+	if !l.IsAvailable() {
+		return nil, ErrSecretStoreUnavailable
+	}
+	cmd := exec.Command("secret-tool", "lookup", "service", l.serviceName, "key", key)
+	out, err := cmd.Output()
+	if err != nil || len(out) == 0 {
+		return nil, ErrSecretNotFound
+	}
+	return out, nil
+}
+
+// Set saves a secret into Secret Service.
+func (l *LinuxSecretServiceStore) Set(key string, secret []byte) error {
+	if !l.IsAvailable() {
+		return ErrSecretStoreUnavailable
+	}
+	if key == "" {
+		return errors.New("secret key cannot be empty")
+	}
+	cmd := exec.Command("secret-tool", "store", "--label="+l.serviceName, "service", l.serviceName, "key", key)
+	cmd.Stdin = bytes.NewReader(secret)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("secret-tool set error: %s (%w)", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// Delete clears a secret from Secret Service.
+func (l *LinuxSecretServiceStore) Delete(key string) error {
+	if !l.IsAvailable() {
+		return nil
+	}
+	cmd := exec.Command("secret-tool", "clear", "service", l.serviceName, "key", key)
+	_ = cmd.Run()
+	return nil
+}
+
+// IsAvailable reports true if running on Linux and secret-tool is in PATH.
+func (l *LinuxSecretServiceStore) IsAvailable() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	_, err := exec.LookPath("secret-tool")
+	return err == nil
+}
+
+// BackendName returns "linux-secret-service".
+func (l *LinuxSecretServiceStore) BackendName() string {
+	return "linux-secret-service"
+}
+
+// WindowsDPAPIStore uses Windows Data Protection API (DPAPI) to encrypt secrets
+// at rest scoped to the current user.
+type WindowsDPAPIStore struct {
+	storageDir string
+}
+
+// NewWindowsDPAPIStore creates a Windows DPAPI store. If storageDir is empty,
+// it uses %APPDATA%\sendbeam\secrets.
+func NewWindowsDPAPIStore(storageDir string) *WindowsDPAPIStore {
+	if storageDir == "" {
+		if configDir, err := os.UserConfigDir(); err == nil {
+			storageDir = filepath.Join(configDir, AppDirName, "secrets")
+		} else {
+			storageDir = filepath.Join(os.TempDir(), "sendbeam_secrets")
+		}
+	}
+	return &WindowsDPAPIStore{storageDir: storageDir}
+}
+
+func (w *WindowsDPAPIStore) keyPath(key string) string {
+	h := sha256.Sum256([]byte(key))
+	return filepath.Join(w.storageDir, hex.EncodeToString(h[:])+".dpapi")
+}
+
+// Get reads and decrypts a DPAPI-protected secret.
+func (w *WindowsDPAPIStore) Get(key string) ([]byte, error) {
+	if !w.IsAvailable() {
+		return nil, ErrSecretStoreUnavailable
+	}
+	p := w.keyPath(key)
+	encData, err := os.ReadFile(p)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ErrSecretNotFound
+		}
+		return nil, fmt.Errorf("read dpapi file: %w", err)
+	}
+
+	// Decrypt via PowerShell ProtectedData
+	script := fmt.Sprintf(`[Convert]::ToBase64String([System.Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String('%s'), $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser))`, strings.TrimSpace(string(encData)))
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("dpapi unprotect error: %w", err)
+	}
+	dec64 := strings.TrimSpace(string(out))
+	return hex.DecodeString(dec64)
+}
+
+// Set encrypts and writes a DPAPI-protected secret.
+func (w *WindowsDPAPIStore) Set(key string, secret []byte) error {
+	if !w.IsAvailable() {
+		return ErrSecretStoreUnavailable
+	}
+	if key == "" {
+		return errors.New("secret key cannot be empty")
+	}
+	if err := os.MkdirAll(w.storageDir, 0o700); err != nil {
+		return fmt.Errorf("create secrets dir: %w", err)
+	}
+
+	hexSecret := hex.EncodeToString(secret)
+	script := fmt.Sprintf(`[Convert]::ToBase64String([System.Security.Cryptography.ProtectedData]::Protect([System.Text.Encoding]::UTF8.GetBytes('%s'), $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser))`, hexSecret)
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("dpapi protect error: %w", err)
+	}
+
+	p := w.keyPath(key)
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strings.TrimSpace(string(out))), 0o600); err != nil {
+		return fmt.Errorf("write dpapi file: %w", err)
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename dpapi file: %w", err)
+	}
+	return nil
+}
+
+// Delete removes a DPAPI-protected secret.
+func (w *WindowsDPAPIStore) Delete(key string) error {
+	if !w.IsAvailable() {
+		return nil
+	}
+	_ = os.Remove(w.keyPath(key))
+	return nil
+}
+
+// IsAvailable reports true when running on Windows.
+func (w *WindowsDPAPIStore) IsAvailable() bool {
+	return runtime.GOOS == "windows"
+}
+
+// BackendName returns "windows-dpapi".
+func (w *WindowsDPAPIStore) BackendName() string {
+	return "windows-dpapi"
+}
+
 // DefaultSecretStore resolves the appropriate OS-protected secret store
 // for the current platform. If none is available, it returns an UnavailableSecretStore
 // to fail closed rather than falling back to plaintext storage.
 func DefaultSecretStore() SecretStore {
 	switch runtime.GOOS {
 	case "darwin":
-		return NewDarwinKeychainSecretStore("SendBeam")
+		store := NewDarwinKeychainSecretStore("SendBeam")
+		if store.IsAvailable() {
+			return store
+		}
+		return NewUnavailableSecretStore("macOS Keychain unavailable")
+	case "windows":
+		store := NewWindowsDPAPIStore("")
+		if store.IsAvailable() {
+			return store
+		}
+		return NewUnavailableSecretStore("Windows DPAPI unavailable")
+	case "linux":
+		store := NewLinuxSecretServiceStore("SendBeam")
+		if store.IsAvailable() {
+			return store
+		}
+		return NewUnavailableSecretStore("Secret Service / secret-tool not available in Linux desktop session")
 	default:
 		return NewUnavailableSecretStore("native OS credential helper not configured for " + runtime.GOOS)
 	}

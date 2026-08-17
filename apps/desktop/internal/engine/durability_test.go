@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pion/webrtc/v4"
 	"github.com/sendbeam/desktop/internal/config"
 	"github.com/sendbeam/desktop/internal/lifecycle"
 	"github.com/sendbeam/engine/transfer"
@@ -198,7 +199,6 @@ func TestDesktopDurableResumeHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Receive #1: %v", err)
 	}
-	_ = recv1
 	sink.waitForID(t, send1.ID, "connect", 10*time.Second)
 
 	// Let the transfer complete
@@ -222,6 +222,33 @@ func TestDesktopDurableResumeHappyPath(t *testing.T) {
 	}
 	if len(successEvents) == 0 {
 		t.Fatalf("no success notifications recorded")
+	}
+
+	// RevealCompleted on verified receive transfer succeeds
+	launcherCalled := false
+	var launchedPath string
+	rm := lifecycle.NewRevealManager(func(target string) error {
+		launcherCalled = true
+		launchedPath = target
+		return nil
+	})
+	svc.SetRevealManager(rm)
+
+	if err := svc.RevealCompleted(recv1.ID); err != nil {
+		t.Fatalf("RevealCompleted(%q) failed: %v", recv1.ID, err)
+	}
+	if !launcherCalled {
+		t.Errorf("launcher was not called for completed receive")
+	}
+	expectedPath := filepath.Join(outDir, "resumable.bin")
+	realExpected, _ := filepath.EvalSymlinks(expectedPath)
+	if launchedPath != realExpected && launchedPath != expectedPath {
+		t.Errorf("launchedPath = %q, want %q", launchedPath, expectedPath)
+	}
+
+	// Arbitrary or nonexistent transfer id cannot be revealed
+	if err := svc.RevealCompleted("nonexistent-id"); err == nil {
+		t.Fatalf("RevealCompleted(nonexistent-id) expected error, got nil")
 	}
 
 	_ = hub
@@ -282,25 +309,16 @@ func TestDesktopPathSafetyAndDestinationEscapeDefense(t *testing.T) {
 		t.Fatalf("validatePaths missing file expected error, got nil")
 	}
 
-	// 3. RevealFile path validation
-	launcherCalled := false
-	rm := lifecycle.NewRevealManager(func(_ string) error {
-		launcherCalled = true
-		return nil
-	})
-	svc.SetRevealManager(rm)
-
-	// Valid reveal
-	if err := svc.RevealFile(validFile); err != nil {
-		t.Fatalf("RevealFile valid failed: %v", err)
-	}
-	if !launcherCalled {
-		t.Errorf("launcher was not called for valid file")
+	// 3. Symlinks are rejected in send picker
+	symlinkPath := filepath.Join(dir, "link.txt")
+	_ = os.Symlink(validFile, symlinkPath)
+	if err := validatePaths([]string{symlinkPath}); err == nil {
+		t.Fatalf("validatePaths symlink expected error, got nil")
 	}
 
-	// Traversal / non-existent reveal fails closed
-	if err := svc.RevealFile(filepath.Join(dir, "../outside.txt")); err == nil {
-		t.Fatalf("RevealFile non-existent expected error, got nil")
+	// 4. RevealCompleted refuses unverified IDs
+	if err := svc.RevealCompleted("unverified"); err == nil {
+		t.Fatalf("RevealCompleted on unverified ID expected error, got nil")
 	}
 }
 
@@ -348,6 +366,82 @@ func TestDesktopConfigPersistenceAndAutoAcceptSafety(t *testing.T) {
 	if reloaded.AutoAccept != false {
 		t.Errorf("AutoAccept must remain false, got %v", reloaded.AutoAccept)
 	}
+}
+
+func TestDesktopPersistedICEServersApplication(t *testing.T) {
+	dir := t.TempDir()
+	memSecret := config.NewMemorySecretStore()
+	cfgStore, err := config.NewStore(dir, memSecret)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	turnURL := "turn:relay.custom.org:3478"
+	turnUser := "beamuser"
+	turnSecret := "supersecret"
+
+	if err := cfgStore.SaveTurnCredential(turnURL, turnUser, []byte(turnSecret)); err != nil {
+		t.Fatalf("SaveTurnCredential: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.ICEServers = []string{
+		"stun:stun.l.google.com:19302",
+		"turn:" + turnUser + "@relay.custom.org:3478",
+	}
+	if err := cfgStore.Save(cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	svc := NewTransferService(nil, nil)
+	svc.SetConfigStore(cfgStore)
+
+	resolved, err := svc.resolveICEServers()
+	if err != nil {
+		t.Fatalf("resolveICEServers failed: %v", err)
+	}
+	if len(resolved) != 2 {
+		t.Fatalf("resolved %d servers, want 2", len(resolved))
+	}
+	if resolved[0].URLs[0] != "stun:stun.l.google.com:19302" {
+		t.Errorf("resolved[0] = %+v", resolved[0])
+	}
+	if resolved[1].Username != turnUser || resolved[1].Credential != turnSecret || resolved[1].CredentialType != webrtc.ICECredentialTypePassword {
+		t.Errorf("resolved[1] = %+v, want username %q and credential %q", resolved[1], turnUser, turnSecret)
+	}
+}
+
+func TestDesktopTurnCredentialUnavailableDegradation(t *testing.T) {
+	dir := t.TempDir()
+	unavail := config.NewUnavailableSecretStore("explicit test unavailable")
+	cfgStore, err := config.NewStore(dir, unavail)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.ICEServers = []string{"turn:beamuser@relay.custom.org:3478"}
+	if err := cfgStore.Save(cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	svc := NewTransferService(nil, nil)
+	svc.SetConfigStore(cfgStore)
+
+	_, err = svc.resolveICEServers()
+	if err == nil || !strings.Contains(err.Error(), "protected secret store is unavailable") {
+		t.Fatalf("resolveICEServers expected secret store unavailable error, got %v", err)
+	}
+}
+
+func TestDesktopLifecycleHooks(t *testing.T) {
+	sink := &eventSink{}
+	svc := NewTransferService(sink.emit, nil)
+
+	// Call lifecycle hooks
+	svc.OnSuspend()
+	svc.OnResume()
+	svc.OnNetworkChange()
 }
 
 func TestDesktopGracefulShutdown(t *testing.T) {

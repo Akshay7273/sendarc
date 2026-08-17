@@ -90,11 +90,39 @@ func TestConfigValidation(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "invalid server scheme",
+			name: "invalid server scheme ftp",
 			mutate: func(c *DesktopConfig) {
 				c.ServerURL = "ftp://invalid-url"
 			},
 			wantErr: true,
+		},
+		{
+			name: "invalid server scheme http",
+			mutate: func(c *DesktopConfig) {
+				c.ServerURL = "http://localhost:8443/ws"
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid server scheme https",
+			mutate: func(c *DesktopConfig) {
+				c.ServerURL = "https://localhost:8443/ws"
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid server scheme ws",
+			mutate: func(c *DesktopConfig) {
+				c.ServerURL = "ws://localhost:8443/ws"
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid server scheme wss",
+			mutate: func(c *DesktopConfig) {
+				c.ServerURL = "wss://relay.sendbeam.org/ws"
+			},
+			wantErr: false,
 		},
 		{
 			name: "invalid ICE url prefix",
@@ -244,5 +272,37 @@ func TestStoreTurnCredentials(t *testing.T) {
 	_, err = store.GetTurnCredential(serverURL, username)
 	if !errors.Is(err, ErrSecretNotFound) {
 		t.Fatalf("GetTurnCredential after delete returned %v, want ErrSecretNotFound", err)
+	}
+}
+
+func TestDefaultSecretStoreSelection(t *testing.T) {
+	store := DefaultSecretStore()
+	if store == nil {
+		t.Fatalf("DefaultSecretStore() returned nil")
+	}
+	if store.BackendName() == "" {
+		t.Fatalf("DefaultSecretStore BackendName is empty")
+	}
+}
+
+func TestUnavailableSecretStoreRefusesPlaintextPersistence(t *testing.T) {
+	dir := t.TempDir()
+	unavail := NewUnavailableSecretStore("explicit test unavailability")
+	store, err := NewStore(dir, unavail)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	err = store.SaveTurnCredential("turn:example.com", "user", []byte("secret123"))
+	if err == nil || !errors.Is(err, ErrSecretStoreUnavailable) {
+		t.Fatalf("SaveTurnCredential on unavailable store expected ErrSecretStoreUnavailable, got %v", err)
+	}
+
+	// Verify no secrets file or plaintext was created on disk
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if e.Name() != ConfigFileName {
+			t.Fatalf("unexpected file %q created on disk when secret store is unavailable", e.Name())
+		}
 	}
 }

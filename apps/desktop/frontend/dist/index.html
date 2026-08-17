@@ -566,8 +566,8 @@
       });
 
       $("recv-reveal").addEventListener("click", () => {
-        if (state.recv.outPath) {
-          call(SV.Transfer + ".RevealFile", state.recv.outPath).catch((e) => {
+        if (state.recv.id) {
+          call(SV.Transfer + ".RevealCompleted", state.recv.id).catch((e) => {
             $("recv-status-line").textContent = "Reveal failed: " + e;
           });
         }

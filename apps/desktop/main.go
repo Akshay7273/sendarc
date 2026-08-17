@@ -41,10 +41,12 @@ func main() {
 	lock, err := lifecycle.AcquireSingleInstanceLock(lockPath)
 	if err != nil {
 		if errors.Is(err, lifecycle.ErrAnotherInstanceRunning) {
-			fmt.Fprintln(os.Stderr, "SendBeam Desktop: another instance is already running; focusing existing process.")
+			fmt.Fprintln(os.Stderr, "SendBeam Desktop: another instance is already running.")
 			os.Exit(0)
 		}
-		log.Printf("Warning: single-instance lock unavailable: %v", err)
+		// Fail closed on lock acquisition errors rather than running unprotected
+		fmt.Fprintf(os.Stderr, "SendBeam Desktop: single-instance lock failed: %v\n", err)
+		os.Exit(1)
 	}
 	if lock != nil {
 		defer func() { _ = lock.Release() }()
@@ -60,6 +62,9 @@ func main() {
 		// Real signaling server (same wsclient the CLI uses → browser/CLI interop).
 		nil,
 	)
+	transferSvc.SetNotifier(lifecycle.DefaultNotifier())
+
+	cfg, _ := transferSvc.GetConfig()
 
 	app := application.New(application.Options{
 		Name:        "SendBeam Desktop",
@@ -82,7 +87,7 @@ func main() {
 		},
 	})
 
-	win := app.Window.NewWithOptions(application.WebviewWindowOptions{
+	winOpts := application.WebviewWindowOptions{
 		Title:     "SendBeam Desktop",
 		Width:     1040,
 		Height:    720,
@@ -93,7 +98,22 @@ func main() {
 		// carry data-file-drop-target and the runtime posts the dropped paths
 		// to the FilesDropped window event below.
 		EnableFileDrop: true,
-	})
+	}
+	if cfg.StartMinimized {
+		winOpts.StartState = application.WindowStateMinimised
+	}
+
+	win := app.Window.NewWithOptions(winOpts)
+
+	// Close-to-tray handling where supported
+	if cfg.CloseToTray {
+		win.OnWindowEvent(events.Common.WindowClosing, func(e *application.WindowEvent) {
+			if cfg.CloseToTray {
+				win.Hide()
+				e.Cancel()
+			}
+		})
+	}
 
 	// Forward OS file drops to a new send. Dropped paths are absolute; the
 	// engine's source expansion handles files and folders identically. The
