@@ -162,14 +162,17 @@ jobs:
           cp apps/desktop/bin/sendbeam-desktop.exe staging-portable/
           cp LICENSE staging-portable/
           cp README.md staging-portable/
-          ( cd staging-portable && zip -r ../artifacts/SendBeam-windows-amd64-portable.zip . )
+          ( cd staging-portable && zip -r "$GITHUB_WORKSPACE/artifacts/SendBeam-windows-amd64-portable.zip" . )
 
       - name: Build NSIS Installer
         shell: bash
         run: |
-          makensis apps/desktop/build/windows/nsis/project.nsi
           mkdir -p artifacts
-          cp apps/desktop/bin/SendBeam-windows-amd64-installer.exe artifacts/
+          makensis \
+            -DOUTPUT_FILE="$GITHUB_WORKSPACE/artifacts/SendBeam-windows-amd64-installer.exe" \
+            -DBIN_FILE="$GITHUB_WORKSPACE/apps/desktop/bin/sendbeam-desktop.exe" \
+            -DICON_FILE="$GITHUB_WORKSPACE/apps/desktop/build/windows/icon.ico" \
+            apps/desktop/build/windows/nsis/project.nsi
 
       - name: Validate Windows Artifacts
         shell: bash
@@ -267,7 +270,7 @@ jobs:
       - name: Package macOS Universal ZIP and DMG
         run: |
           mkdir -p artifacts
-          ( cd apps/desktop/bin && zip -r -y "../../artifacts/SendBeam-macos-universal.zip" "SendBeam.app" )
+          ( cd apps/desktop/bin && zip -r -y "$GITHUB_WORKSPACE/artifacts/SendBeam-macos-universal.zip" "SendBeam.app" )
 
           # Prepare DMG contents
           DMG_STAGING="dmg-staging"
@@ -275,7 +278,7 @@ jobs:
           cp -R apps/desktop/bin/SendBeam.app "$DMG_STAGING/"
           ln -s /Applications "$DMG_STAGING/Applications"
 
-          hdiutil create -volname "SendBeam" -srcfolder "$DMG_STAGING" -ov -format UDZO artifacts/SendBeam-macos-universal.dmg
+          hdiutil create -volname "SendBeam" -srcfolder "$DMG_STAGING" -ov -format UDZO "$GITHUB_WORKSPACE/artifacts/SendBeam-macos-universal.dmg"
           rm -rf "$DMG_STAGING"
 
       - name: Validate macOS artifacts
@@ -383,6 +386,7 @@ jobs:
 
       - name: Build AppImage Package
         run: |
+          mkdir -p artifacts
           APPDIR="appimage-staging/AppDir"
           mkdir -p "$APPDIR/usr/bin"
           mkdir -p "$APPDIR/usr/share/applications"
@@ -397,8 +401,8 @@ jobs:
           cp apps/desktop/build/linux/sendbeam-desktop.png "$APPDIR/"
           cp apps/desktop/build/linux/sendbeam-desktop.png "$APPDIR/usr/share/icons/hicolor/512x512/apps/"
 
-          # Fetch appimagetool
-          curl -sSL -o appimagetool https://github.com/AppImage/AppImageKit/releases/download/13/appimagetool-x86_64.AppImage
+          # Fetch appimagetool continuous release
+          curl -sSL -o appimagetool https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool
           sed -i 's|AI\x02|\x00\x00\x00|' appimagetool || true
 

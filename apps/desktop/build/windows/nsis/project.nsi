@@ -9,6 +9,16 @@ Unicode true
 !define UNINST_KEY_NAME     "SendBeam"
 !define REQUEST_EXECUTION_LEVEL "user"
 
+!ifndef OUTPUT_FILE
+  !define OUTPUT_FILE "..\..\..\bin\SendBeam-windows-amd64-installer.exe"
+!endif
+!ifndef BIN_FILE
+  !define BIN_FILE "..\..\..\bin\sendbeam-desktop.exe"
+!endif
+!ifndef ICON_FILE
+  !define ICON_FILE "..\icon.ico"
+!endif
+
 VIProductVersion "${INFO_PRODUCTVERSION}.0"
 VIFileVersion    "${INFO_PRODUCTVERSION}.0"
 
@@ -23,8 +33,8 @@ ManifestDPIAware true
 
 !include "MUI2.nsh"
 
-!define MUI_ICON "..\icon.ico"
-!define MUI_UNICON "..\icon.ico"
+!define MUI_ICON "${ICON_FILE}"
+!define MUI_UNICON "${ICON_FILE}"
 !define MUI_FINISHPAGE_NOAUTOCLOSE
 !define MUI_ABORTWARNING
 
@@ -39,7 +49,7 @@ ManifestDPIAware true
 !insertmacro MUI_LANGUAGE "English"
 
 Name "${INFO_PRODUCTNAME}"
-OutFile "..\..\..\bin\SendBeam-windows-amd64-installer.exe"
+OutFile "${OUTPUT_FILE}"
 InstallDir "$LOCALAPPDATA\Programs\${INFO_PRODUCTNAME}"
 ShowInstDetails show
 
@@ -47,10 +57,10 @@ Section "MainSection" SEC01
     SetOutPath "$INSTDIR"
     SetOverwrite on
 
-    File "..\..\..\bin\sendbeam-desktop.exe"
-    File /nonfatal "..\..\..\LICENSE"
-    File /nonfatal "..\..\..\README.md"
-    File /nonfatal "..\icon.ico"
+    File "${BIN_FILE}"
+    File /nonfatal "..\..\..\..\LICENSE"
+    File /nonfatal "..\..\..\..\README.md"
+    File /nonfatal "${ICON_FILE}"
 
     CreateDirectory "$SMPROGRAMS\${INFO_PRODUCTNAME}"
     CreateShortcut "$SMPROGRAMS\${INFO_PRODUCTNAME}\${INFO_PRODUCTNAME}.lnk" "$INSTDIR\${PRODUCT_EXECUTABLE}" "" "$INSTDIR\icon.ico" 0
