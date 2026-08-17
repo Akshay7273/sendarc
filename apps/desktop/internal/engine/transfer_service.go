@@ -152,11 +152,12 @@ type TransferService struct {
 	next int
 	runs map[string]*transferRun
 
-	configStore    *config.Store
-	notifier       lifecycle.Notifier
-	revealMgr      *lifecycle.RevealManager
-	senderStore    *transfer.SenderStore
-	durableStoreFn func(outDir string) (*transfer.DurableStore, error)
+	configStore           *config.Store
+	notifier              lifecycle.Notifier
+	revealMgr             *lifecycle.RevealManager
+	senderStore           *transfer.SenderStore
+	durableStoreFn        func(outDir string) (*transfer.DurableStore, error)
+	completedDestinations map[string]string
 }
 
 // NewTransferService builds the service. emit is the frontend sink (wails
@@ -174,14 +175,15 @@ func NewTransferService(emit func(name string, data any), dial SignalDialer) *Tr
 	}
 
 	return &TransferService{
-		emit:           emit,
-		dial:           dial,
-		runs:           map[string]*transferRun{},
-		configStore:    cfgStore,
-		notifier:       &lifecycle.SilentNotifier{},
-		revealMgr:      lifecycle.NewRevealManager(nil),
-		senderStore:    sStore,
-		durableStoreFn: transfer.OpenStore,
+		emit:                  emit,
+		dial:                  dial,
+		runs:                  map[string]*transferRun{},
+		configStore:           cfgStore,
+		notifier:              lifecycle.DefaultNotifier(),
+		revealMgr:             lifecycle.NewRevealManager(nil),
+		senderStore:           sStore,
+		durableStoreFn:        transfer.OpenStore,
+		completedDestinations: map[string]string{},
 	}
 }
 
@@ -228,6 +230,124 @@ func (s *TransferService) openDurableStore(outDir string) (*transfer.DurableStor
 		fn = transfer.OpenStore
 	}
 	return fn(outDir)
+}
+
+func (s *TransferService) recordCompleted(id, outPath string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.completedDestinations[id] = outPath
+}
+
+func (s *TransferService) authorizedRoots() []string {
+	var roots []string
+	if s.configStore != nil {
+		if cfg, err := s.configStore.Load(); err == nil && cfg.DownloadDir != "" {
+			roots = append(roots, cfg.DownloadDir)
+		}
+	}
+	if userHome, err := os.UserHomeDir(); err == nil {
+		roots = append(roots, filepath.Join(userHome, "Downloads"))
+		roots = append(roots, filepath.Join(userHome, "Desktop"))
+	}
+	if wd, err := os.Getwd(); err == nil {
+		roots = append(roots, wd)
+	}
+	if tmp := os.TempDir(); tmp != "" {
+		roots = append(roots, tmp)
+	}
+	return roots
+}
+
+func parseTURNServer(rawURL string) (urlNoUser, username, password string) {
+	trimmed := strings.TrimSpace(rawURL)
+	scheme := ""
+	rest := trimmed
+	if strings.HasPrefix(trimmed, "turns:") {
+		scheme = "turns:"
+		rest = strings.TrimPrefix(trimmed, "turns:")
+	} else if strings.HasPrefix(trimmed, "turn:") {
+		scheme = "turn:"
+		rest = strings.TrimPrefix(trimmed, "turn:")
+	} else {
+		return trimmed, "", ""
+	}
+
+	rest = strings.TrimPrefix(rest, "//")
+	if atIdx := strings.LastIndex(rest, "@"); atIdx != -1 {
+		userInfo := rest[:atIdx]
+		hostPort := rest[atIdx+1:]
+		if colonIdx := strings.Index(userInfo, ":"); colonIdx != -1 {
+			username = userInfo[:colonIdx]
+			password = userInfo[colonIdx+1:]
+		} else {
+			username = userInfo
+		}
+		urlNoUser = scheme + hostPort
+		return urlNoUser, username, password
+	}
+
+	return trimmed, "", ""
+}
+
+func (s *TransferService) resolveICEServers() ([]webrtc.ICEServer, error) {
+	s.mu.Lock()
+	override := s.iceServers
+	cs := s.configStore
+	s.mu.Unlock()
+
+	if override != nil {
+		return override, nil
+	}
+	if cs == nil {
+		return nil, nil
+	}
+	cfg, err := cs.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+	if len(cfg.ICEServers) == 0 {
+		return nil, nil
+	}
+
+	var resolved []webrtc.ICEServer
+	for _, raw := range cfg.ICEServers {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if strings.HasPrefix(raw, "turn:") || strings.HasPrefix(raw, "turns:") {
+			urlNoUser, username, pwd := parseTURNServer(raw)
+			srv := webrtc.ICEServer{
+				URLs: []string{urlNoUser},
+			}
+			if username != "" {
+				srv.Username = username
+				if pwd != "" {
+					srv.Credential = pwd
+					srv.CredentialType = webrtc.ICECredentialTypePassword
+				} else {
+					cred, err := cs.GetTurnCredential(urlNoUser, username)
+					if err != nil && !errors.Is(err, config.ErrSecretStoreUnavailable) {
+						cred, err = cs.GetTurnCredential(raw, username)
+					}
+					if err != nil {
+						if errors.Is(err, config.ErrSecretStoreUnavailable) {
+							return nil, fmt.Errorf("turn server %q requires credentials but protected secret store is unavailable: %w", raw, err)
+						}
+						return nil, fmt.Errorf("turn credential not found for %s (user %s): %w", raw, username, err)
+					}
+					srv.Credential = string(cred)
+					srv.CredentialType = webrtc.ICECredentialTypePassword
+				}
+			}
+			resolved = append(resolved, srv)
+		} else {
+			resolved = append(resolved, webrtc.ICEServer{
+				URLs: []string{raw},
+			})
+		}
+	}
+	return resolved, nil
 }
 
 // setLoopbackConfig is the test seam for the loopback relay: host-only ICE and
@@ -300,6 +420,11 @@ func (s *TransferService) Send(paths []string, server string) (Handle, error) {
 	if err := validatePaths(paths); err != nil {
 		return Handle{}, err
 	}
+	iceServers, err := s.resolveICEServers()
+	if err != nil {
+		return Handle{}, err
+	}
+
 	id := s.newID()
 	r := s.newRun(id, wire.RoleOfferer)
 	sources, total, err := transfer.NewOSFileSources(paths)
@@ -316,7 +441,7 @@ func (s *TransferService) Send(paths []string, server string) (Handle, error) {
 	}
 	_ = total
 
-	go r.runSend(r.ctx, server, sources, paths)
+	go r.runSend(r.ctx, server, sources, paths, iceServers)
 	return Handle{ID: id, Role: "send"}, nil
 }
 
@@ -351,10 +476,15 @@ func (s *TransferService) Receive(code string, destDir string, server string) (H
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return Handle{}, fmt.Errorf("create destination: %w", err)
 	}
+	iceServers, err := s.resolveICEServers()
+	if err != nil {
+		return Handle{}, err
+	}
+
 	id := s.newID()
 	r := s.newRun(id, wire.RoleJoiner)
 
-	go r.runReceive(r.ctx, code, destDir, server)
+	go r.runReceive(r.ctx, code, destDir, server, iceServers)
 	return Handle{ID: id, Role: "receive"}, nil
 }
 
@@ -535,9 +665,14 @@ func (s *TransferService) ResumeInterrupted(transferID string, code string, dest
 		return Handle{}, fmt.Errorf("decode resume credential for %s: %w", transferID, err)
 	}
 
+	iceServers, err := s.resolveICEServers()
+	if err != nil {
+		return Handle{}, err
+	}
+
 	id := s.newID()
 	r := s.newRun(id, wire.RoleJoiner)
-	go r.runResumeReceive(r.ctx, transferID, code, destDir, server, secret, ins)
+	go r.runResumeReceive(r.ctx, transferID, code, destDir, server, secret, ins, iceServers)
 	return Handle{ID: id, Role: "receive"}, nil
 }
 
@@ -595,15 +730,21 @@ func (s *TransferService) DiscardAllInterrupted(outDir string) error {
 	return nil
 }
 
-// RevealFile reveals the verified output file in the OS file manager.
-func (s *TransferService) RevealFile(filePath string) error {
+// RevealCompleted reveals the verified completed transfer output in the OS file manager.
+// The backend derives the path from trusted transfer state rather than arbitrary frontend input.
+func (s *TransferService) RevealCompleted(id string) error {
 	s.mu.Lock()
+	targetPath, ok := s.completedDestinations[id]
 	rm := s.revealMgr
 	s.mu.Unlock()
+
+	if !ok || targetPath == "" {
+		return fmt.Errorf("no verified completed output found for transfer %q", id)
+	}
 	if rm == nil {
 		rm = lifecycle.NewRevealManager(nil)
 	}
-	return rm.Reveal(filePath)
+	return rm.Reveal(targetPath, s.authorizedRoots()...)
 }
 
 // GetConfig returns the desktop persistent configuration.
@@ -633,6 +774,36 @@ func (s *TransferService) ActiveCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.runs)
+}
+
+// OnSuspend handles OS application suspend.
+func (s *TransferService) OnSuspend() {
+	if s.emit != nil {
+		s.emit(TransferEventName, &TransferEvent{
+			Kind:  "lifecycle",
+			Phase: "suspend",
+		})
+	}
+}
+
+// OnResume handles OS application resume from sleep.
+func (s *TransferService) OnResume() {
+	if s.emit != nil {
+		s.emit(TransferEventName, &TransferEvent{
+			Kind:  "lifecycle",
+			Phase: "resume",
+		})
+	}
+}
+
+// OnNetworkChange handles OS network changes.
+func (s *TransferService) OnNetworkChange() {
+	if s.emit != nil {
+		s.emit(TransferEventName, &TransferEvent{
+			Kind:  "lifecycle",
+			Phase: "network_change",
+		})
+	}
 }
 
 // Shutdown gracefully cancels active transfers and waits for bounded teardown.
@@ -806,7 +977,7 @@ func (r *transferRun) recordSample(bytes int64) {
 }
 
 // runSend drives the offerer side of the transfer.
-func (r *transferRun) runSend(ctx context.Context, server string, sources []wire.FileSource, paths []string) {
+func (r *transferRun) runSend(ctx context.Context, server string, sources []wire.FileSource, paths []string, iceServers []webrtc.ICEServer) {
 	defer r.svc.remove(r)
 
 	sig, err := r.svc.dial(ctx, server, wire.RoleOfferer)
@@ -899,7 +1070,7 @@ func (r *transferRun) runSend(ctx context.Context, server string, sources []wire
 			}
 		},
 		ForceRelay:     r.svc.forceRelay,
-		ICEServers:     r.svc.iceServers,
+		ICEServers:     iceServers,
 		OnTransport:    r.onTransport,
 		OnConnect:      func() { r.publish("connect") },
 		OnFileProgress: r.onFileProgress,
@@ -964,7 +1135,7 @@ func (r *transferRun) runSend(ctx context.Context, server string, sources []wire
 }
 
 // runReceive drives the joiner side of the transfer.
-func (r *transferRun) runReceive(ctx context.Context, code, destDir, server string) {
+func (r *transferRun) runReceive(ctx context.Context, code, destDir, server string, iceServers []webrtc.ICEServer) {
 	defer r.svc.remove(r)
 
 	sig, err := r.svc.dial(ctx, server, wire.RoleJoiner)
@@ -996,7 +1167,7 @@ func (r *transferRun) runReceive(ctx context.Context, code, destDir, server stri
 		},
 		DestDir:    destDir,
 		ForceRelay: r.svc.forceRelay,
-		ICEServers: r.svc.iceServers,
+		ICEServers: iceServers,
 		OnManifestSet: func(m wire.Manifest) {
 			r.mu.Lock()
 			r.files = r.files[:0]
@@ -1047,6 +1218,9 @@ func (r *transferRun) runReceive(ctx context.Context, code, destDir, server stri
 		outPath = destDir
 	}
 
+	// Record verified completed destination for safe RevealCompleted
+	r.svc.recordCompleted(r.id, outPath)
+
 	r.publish("done", func(ev *TransferEvent) {
 		ev.Digest = out.Digest
 		ev.OutDir = destDir
@@ -1067,7 +1241,7 @@ func (r *transferRun) runReceive(ctx context.Context, code, destDir, server stri
 }
 
 // runResumeReceive drives an interrupted receive transfer resumption.
-func (r *transferRun) runResumeReceive(ctx context.Context, transferID, code, destDir, server string, secret []byte, ins *transfer.Inspect) {
+func (r *transferRun) runResumeReceive(ctx context.Context, transferID, code, destDir, server string, secret []byte, ins *transfer.Inspect, iceServers []webrtc.ICEServer) {
 	defer r.svc.remove(r)
 
 	sig, err := r.svc.dial(ctx, server, wire.RoleJoiner)
@@ -1111,7 +1285,7 @@ func (r *transferRun) runResumeReceive(ctx context.Context, transferID, code, de
 		},
 		DestDir:    destDir,
 		ForceRelay: r.svc.forceRelay,
-		ICEServers: r.svc.iceServers,
+		ICEServers: iceServers,
 		Resume:     resumeCtx,
 		OnResume: func(res transfer.ResumeResult) {
 			if res.Authenticated {
@@ -1175,6 +1349,9 @@ func (r *transferRun) runResumeReceive(ctx context.Context, transferID, code, de
 	if len(out.Files) > 1 {
 		outPath = destDir
 	}
+
+	// Record verified completed destination for safe RevealCompleted
+	r.svc.recordCompleted(r.id, outPath)
 
 	r.publish("done", func(ev *TransferEvent) {
 		ev.Digest = out.Digest

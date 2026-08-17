@@ -60,7 +60,7 @@ func DefaultConfig() DesktopConfig {
 func (c *DesktopConfig) Validate() error {
 	if c.ServerURL != "" {
 		u, err := url.Parse(c.ServerURL)
-		if err != nil || (u.Scheme != "ws" && u.Scheme != "wss" && u.Scheme != "http" && u.Scheme != "https") {
+		if err != nil || (u.Scheme != "ws" && u.Scheme != "wss") || u.Host == "" {
 			return fmt.Errorf("invalid server url %q (must be a valid ws:// or wss:// url)", c.ServerURL)
 		}
 	}

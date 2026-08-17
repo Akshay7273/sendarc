@@ -47,6 +47,14 @@ func TestSingleInstanceLock(t *testing.T) {
 	_ = lock3.Release()
 }
 
+func TestSingleInstanceLockInvalidPath(t *testing.T) {
+	// Empty path
+	_, err := AcquireSingleInstanceLock("")
+	if err == nil {
+		t.Fatalf("AcquireSingleInstanceLock with empty path expected error, got nil")
+	}
+}
+
 func TestRevealPathValidation(t *testing.T) {
 	dir := t.TempDir()
 	file1 := filepath.Join(dir, "hello.txt")
@@ -59,6 +67,16 @@ func TestRevealPathValidation(t *testing.T) {
 	if err := os.WriteFile(otherFile, []byte("outside"), 0o600); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
+
+	// Legitimate dotfile inside dir
+	dotFile := filepath.Join(dir, "..legit.txt")
+	if err := os.WriteFile(dotFile, []byte("dotcontent"), 0o600); err != nil {
+		t.Fatalf("write dotfile: %v", err)
+	}
+
+	// Symlink inside dir pointing to file in otherDir
+	symlinkToOutside := filepath.Join(dir, "symlink_outside.txt")
+	_ = os.Symlink(otherFile, symlinkToOutside)
 
 	tests := []struct {
 		name         string
@@ -95,6 +113,18 @@ func TestRevealPathValidation(t *testing.T) {
 			targetPath:   file1,
 			allowedRoots: []string{dir},
 			wantErr:      nil,
+		},
+		{
+			name:         "legitimate dotfile starting with .. inside allowed root",
+			targetPath:   dotFile,
+			allowedRoots: []string{dir},
+			wantErr:      nil,
+		},
+		{
+			name:         "symlink inside root pointing outside root is rejected",
+			targetPath:   symlinkToOutside,
+			allowedRoots: []string{dir},
+			wantErr:      ErrPathOutsideRoot,
 		},
 		{
 			name:         "valid directory without root restrictions",
@@ -142,8 +172,9 @@ func TestRevealManager(t *testing.T) {
 	if err := mgr.Reveal(file1, dir); err != nil {
 		t.Fatalf("Reveal failed: %v", err)
 	}
-	if launchedPath != file1 {
-		t.Errorf("launchedPath = %q, want %q", launchedPath, file1)
+	realFile1, _ := filepath.EvalSymlinks(file1)
+	if launchedPath != realFile1 && launchedPath != file1 {
+		t.Errorf("launchedPath = %q, want %q or %q", launchedPath, realFile1, file1)
 	}
 
 	// Reveal invalid path fails without calling launcher
@@ -156,13 +187,20 @@ func TestRevealManager(t *testing.T) {
 	}
 }
 
-func TestTestNotifier(t *testing.T) {
-	notifier := NewTestNotifier()
+func TestNotifiers(t *testing.T) {
+	// TestNotifier
+	testNotif := NewTestNotifier()
+	if !testNotif.IsAvailable() {
+		t.Errorf("TestNotifier.IsAvailable() = false, want true")
+	}
+	if testNotif.BackendName() != "test" {
+		t.Errorf("TestNotifier.BackendName() = %q, want test", testNotif.BackendName())
+	}
 
-	notifier.NotifySuccess("Transfer Complete", "file.txt received (100 KiB)", "/tmp/file.txt")
-	notifier.NotifyFailure("Transfer Failed", "network error")
+	testNotif.NotifySuccess("Transfer Complete", "file.txt received (100 KiB)", "/tmp/file.txt")
+	testNotif.NotifyFailure("Transfer Failed", "network error")
 
-	events := notifier.Events()
+	events := testNotif.Events()
 	if len(events) != 2 {
 		t.Fatalf("got %d events, want 2", len(events))
 	}
@@ -173,8 +211,28 @@ func TestTestNotifier(t *testing.T) {
 		t.Errorf("event[1] = %+v, want failure event", events[1])
 	}
 
-	notifier.Reset()
-	if len(notifier.Events()) != 0 {
-		t.Errorf("Events after reset not empty: %v", notifier.Events())
+	testNotif.Reset()
+	if len(testNotif.Events()) != 0 {
+		t.Errorf("Events after reset not empty: %v", testNotif.Events())
+	}
+
+	// SilentNotifier
+	silent := &SilentNotifier{}
+	if silent.IsAvailable() {
+		t.Errorf("SilentNotifier.IsAvailable() = true, want false")
+	}
+	if silent.BackendName() != "silent" {
+		t.Errorf("SilentNotifier.BackendName() = %q, want silent", silent.BackendName())
+	}
+	silent.NotifySuccess("Title", "Msg", "path")
+	silent.NotifyFailure("Title", "Msg")
+
+	// DefaultNotifier
+	defNotif := DefaultNotifier()
+	if defNotif == nil {
+		t.Fatalf("DefaultNotifier() returned nil")
+	}
+	if defNotif.BackendName() == "" {
+		t.Errorf("DefaultNotifier.BackendName() is empty")
 	}
 }
