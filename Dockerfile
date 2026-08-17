@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 
 # --- Stage 1: build the web bundle ------------------------------------------------
-FROM node:22-alpine AS web
+# Build web assets natively on the builder platform (static assets are arch-independent)
+FROM --platform=$BUILDPLATFORM node:22-alpine AS web
 RUN corepack enable
 WORKDIR /src
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
@@ -13,14 +14,17 @@ COPY apps/web ./apps/web
 RUN pnpm --filter @sendbeam/protocol build && pnpm --filter @sendbeam/web build
 
 # --- Stage 2: build the server binary --------------------------------------------
-FROM golang:1.25-alpine AS server
+# Cross-compile Go server natively using GOOS/GOARCH without QEMU emulation overhead
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS server
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 COPY apps/server/go.mod apps/server/go.sum ./apps/server/
 COPY packages/wire/go.mod packages/wire/go.sum ./packages/wire/
 RUN cd apps/server && go mod download
 COPY apps/server ./apps/server
 COPY packages/wire ./packages/wire
-RUN cd apps/server && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /sendbeamd ./cmd/sendbeamd
+RUN cd apps/server && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /sendbeamd ./cmd/sendbeamd
 
 # --- Stage 3: runtime --------------------------------------------------------------
 FROM alpine:3.21
