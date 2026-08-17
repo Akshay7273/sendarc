@@ -13,9 +13,9 @@
 	<key>CFBundleIdentifier</key>
 	<string>com.sendbeam.desktop</string>
 	<key>CFBundleVersion</key>
-	<string>1.4.0</string>
+	<string>0.0.0</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.4.0</string>
+	<string>dev</string>
 	<key>CFBundleIconFile</key>
 	<string>icons.icns</string>
 	<key>LSMinimumSystemVersion</key>

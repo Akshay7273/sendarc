@@ -1,14 +1,14 @@
 {
   "FixedFileInfo": {
     "FileVersion": {
-      "Major": 1,
-      "Minor": 4,
+      "Major": 0,
+      "Minor": 0,
       "Patch": 0,
       "Build": 0
     },
     "ProductVersion": {
-      "Major": 1,
-      "Minor": 4,
+      "Major": 0,
+      "Minor": 0,
       "Patch": 0,
       "Build": 0
     },
@@ -20,19 +20,21 @@
   },
   "StringFileInfo": {
     "Comments": "SendBeam Desktop Application",
-    "CompanyName": "SendBeam",
+    "CompanyName": "Akshay7273",
     "FileDescription": "SendBeam Desktop",
-    "FileVersion": "1.4.0.0",
+    "FileVersion": "0.0.0.0",
     "InternalName": "sendbeam-desktop",
     "LegalCopyright": "Copyright (c) 2026 Akshay7273",
     "OriginalFilename": "sendbeam-desktop.exe",
     "ProductName": "SendBeam",
-    "ProductVersion": "1.4.0.0"
+    "ProductVersion": "dev"
   },
   "VarFileInfo": {
     "Translation": {
       "LangID": "0409",
       "CharsetID": "04B0"
     }
-  }
+  },
+  "IconPath": "build/windows/icon.ico",
+  "ManifestPath": "build/windows/wails.exe.manifest"
 }

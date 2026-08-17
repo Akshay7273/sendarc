@@ -7,6 +7,7 @@ on:
       - 'apps/cli/**'
       - 'apps/desktop/**'
       - 'packages/**'
+      - 'scripts/**'
       - '.github/workflows/distribution.yml'
   workflow_dispatch:
 
@@ -59,14 +60,7 @@ jobs:
 
       - name: Determine version metadata
         id: meta
-        run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            TAG_VER="${GITHUB_REF_NAME#v}"
-            echo "version=${TAG_VER}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=dev" >> "$GITHUB_OUTPUT"
-          fi
-          echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+        run: bash ./scripts/version-metadata.sh --github-output
 
       - name: Build CLI binary
         env:
@@ -133,14 +127,34 @@ jobs:
       - name: Determine version metadata
         id: meta
         shell: bash
+        run: bash ./scripts/version-metadata.sh --github-output
+
+      - name: Generate Windows PE Resources
+        shell: pwsh
         run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            TAG_VER="${GITHUB_REF_NAME#v}"
-            echo "version=${TAG_VER}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=dev" >> "$GITHUB_OUTPUT"
-          fi
-          echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@v1.4.1
+          cd apps/desktop
+          goversioninfo -64 `
+            -icon="build/windows/icon.ico" `
+            -manifest="build/windows/wails.exe.manifest" `
+            -product-name="SendBeam" `
+            -company="Akshay7273" `
+            -description="SendBeam Desktop" `
+            -copyright="Copyright (c) 2026 Akshay7273" `
+            -internal-name="sendbeam-desktop" `
+            -original-name="sendbeam-desktop.exe" `
+            -product-version="${{ steps.meta.outputs.version }}" `
+            -file-version="${{ steps.meta.outputs.windows_fixed_version }}" `
+            -ver-major=${{ steps.meta.outputs.win_major }} `
+            -ver-minor=${{ steps.meta.outputs.win_minor }} `
+            -ver-patch=${{ steps.meta.outputs.win_patch }} `
+            -ver-build=${{ steps.meta.outputs.win_build }} `
+            -product-ver-major=${{ steps.meta.outputs.win_major }} `
+            -product-ver-minor=${{ steps.meta.outputs.win_minor }} `
+            -product-ver-patch=${{ steps.meta.outputs.win_patch }} `
+            -product-ver-build=${{ steps.meta.outputs.win_build }} `
+            -o="resource_windows_amd64.syso" `
+            build/windows/info.json
 
       - name: Build Windows Desktop Binary
         shell: bash
@@ -154,6 +168,46 @@ jobs:
           go build -trimpath \
             -ldflags "-H windowsgui -s -w -X github.com/sendbeam/desktop/internal/engine.ProductVersion=${{ steps.meta.outputs.version }} -X github.com/sendbeam/desktop/internal/engine.GitCommit=${{ steps.meta.outputs.commit }}" \
             -o bin/sendbeam-desktop.exe .
+
+      - name: Validate Windows Executable Resources (PE)
+        shell: pwsh
+        run: |
+          $exe = "apps/desktop/bin/sendbeam-desktop.exe"
+          if (-not (Test-Path $exe)) { throw "Executable not found at $exe" }
+
+          $vi = (Get-Item $exe).VersionInfo
+          Write-Host "Validating Windows PE VersionInfo:"
+          Write-Host "  ProductName:     $($vi.ProductName)"
+          Write-Host "  FileDescription: $($vi.FileDescription)"
+          Write-Host "  ProductVersion:  $($vi.ProductVersion)"
+          Write-Host "  FileVersion:     $($vi.FileVersion)"
+          Write-Host "  CompanyName:     $($vi.CompanyName)"
+
+          if ($vi.ProductName -ne "SendBeam") { throw "Expected ProductName 'SendBeam', got '$($vi.ProductName)'" }
+          if ($vi.FileDescription -ne "SendBeam Desktop") { throw "Expected FileDescription 'SendBeam Desktop', got '$($vi.FileDescription)'" }
+          if ($vi.ProductVersion -ne "${{ steps.meta.outputs.version }}") { throw "Expected ProductVersion '${{ steps.meta.outputs.version }}', got '$($vi.ProductVersion)'" }
+          if ($vi.FileVersion -ne "${{ steps.meta.outputs.windows_fixed_version }}") { throw "Expected FileVersion '${{ steps.meta.outputs.windows_fixed_version }}', got '$($vi.FileVersion)'" }
+          if ($vi.CompanyName -ne "Akshay7273") { throw "Expected CompanyName 'Akshay7273', got '$($vi.CompanyName)'" }
+
+          # Validate PE x64 machine header
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          if ($machine -ne 0x8664) { throw "Expected x64 PE machine type (0x8664), got 0x$($machine.ToString('X4'))" }
+
+          # Validate .rsrc section exists
+          $numSections = [BitConverter]::ToUInt16($bytes, $peOffset + 6)
+          $optHeaderSize = [BitConverter]::ToUInt16($bytes, $peOffset + 20)
+          $sectionTableOffset = $peOffset + 24 + $optHeaderSize
+          $foundRsrc = $false
+          for ($i = 0; $i -lt $numSections; $i++) {
+              $secOffset = $sectionTableOffset + ($i * 40)
+              $secNameBytes = $bytes[$secOffset..($secOffset + 7)]
+              $secName = [System.Text.Encoding]::ASCII.GetString($secNameBytes).Trim("`0")
+              if ($secName -eq ".rsrc") { $foundRsrc = $true; break }
+          }
+          if (-not $foundRsrc) { throw "Executable is missing .rsrc section (embedded icon/manifest/versioninfo missing)!" }
+          Write-Host "PE .rsrc section verified successfully."
 
       - name: Package Portable ZIP
         shell: pwsh
@@ -179,6 +233,10 @@ jobs:
             }
           }
           & $makensis `
+            -DINFO_PRODUCTNAME="SendBeam" `
+            -DINFO_COMPANYNAME="Akshay7273" `
+            -DINFO_PRODUCTVERSION="${{ steps.meta.outputs.display_version }}" `
+            -DINFO_FIXEDVERSION="${{ steps.meta.outputs.windows_fixed_version }}" `
             -DOUTPUT_FILE="$env:GITHUB_WORKSPACE\artifacts\SendBeam-windows-amd64-installer.exe" `
             -DBIN_FILE="$env:GITHUB_WORKSPACE\apps\desktop\bin\sendbeam-desktop.exe" `
             -DICON_FILE="$env:GITHUB_WORKSPACE\apps\desktop\build\windows\icon.ico" `
@@ -222,14 +280,7 @@ jobs:
 
       - name: Determine version metadata
         id: meta
-        run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            TAG_VER="${GITHUB_REF_NAME#v}"
-            echo "version=${TAG_VER}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=dev" >> "$GITHUB_OUTPUT"
-          fi
-          echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+        run: bash ./scripts/version-metadata.sh --github-output
 
       - name: Build arm64 slice
         working-directory: apps/desktop
@@ -274,7 +325,12 @@ jobs:
           cp bin/sendbeam-desktop "$APP_BUNDLE/Contents/MacOS/sendbeam-desktop"
           cp build/darwin/Info.plist "$APP_BUNDLE/Contents/Info.plist"
           cp build/darwin/icons.icns "$APP_BUNDLE/Contents/Resources/icons.icns"
+
+          # Inject authoritative version values into Info.plist
+          plutil -replace CFBundleVersion -string "${{ steps.meta.outputs.numeric_version }}" "$APP_BUNDLE/Contents/Info.plist"
+          plutil -replace CFBundleShortVersionString -string "${{ steps.meta.outputs.display_version }}" "$APP_BUNDLE/Contents/Info.plist"
           plutil -lint "$APP_BUNDLE/Contents/Info.plist"
+
           codesign --force --deep --sign - "$APP_BUNDLE"
 
       - name: Package macOS Universal ZIP and DMG
@@ -295,6 +351,10 @@ jobs:
         run: |
           test -f artifacts/SendBeam-macos-universal.zip
           test -f artifacts/SendBeam-macos-universal.dmg
+
+          # Validate Info.plist in the assembled bundle
+          defaults read "$PWD/apps/desktop/bin/SendBeam.app/Contents/Info.plist" CFBundleShortVersionString | grep -q "${{ steps.meta.outputs.display_version }}"
+          defaults read "$PWD/apps/desktop/bin/SendBeam.app/Contents/Info.plist" CFBundleVersion | grep -q "${{ steps.meta.outputs.numeric_version }}"
 
           # Mount DMG and verify structure
           MOUNT_POINT=$(mktemp -d)
@@ -329,16 +389,7 @@ jobs:
 
       - name: Determine version metadata
         id: meta
-        run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            TAG_VER="${GITHUB_REF_NAME#v}"
-            echo "version=${TAG_VER}" >> "$GITHUB_OUTPUT"
-            echo "deb_ver=${TAG_VER}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=dev" >> "$GITHUB_OUTPUT"
-            echo "deb_ver=1.4.0" >> "$GITHUB_OUTPUT"
-          fi
-          echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+        run: bash ./scripts/version-metadata.sh --github-output
 
       - name: Build Linux Desktop Binary
         working-directory: apps/desktop
@@ -380,7 +431,7 @@ jobs:
 
           cat <<EOF > "$DEB_DIR/DEBIAN/control"
           Package: sendbeam-desktop
-          Version: ${{ steps.meta.outputs.deb_ver }}
+          Version: ${{ steps.meta.outputs.deb_version }}
           Section: net
           Priority: optional
           Architecture: amd64
@@ -391,7 +442,7 @@ jobs:
           EOF
 
           mkdir -p artifacts
-          DEB_FILE="artifacts/sendbeam-desktop_${{ steps.meta.outputs.deb_ver }}_amd64.deb"
+          DEB_FILE="artifacts/sendbeam-desktop_${{ steps.meta.outputs.deb_version }}_amd64.deb"
           dpkg-deb --build --root-owner-group "$DEB_DIR" "$DEB_FILE"
 
       - name: Build AppImage Package
@@ -420,10 +471,13 @@ jobs:
 
       - name: Validate Linux Artifacts
         run: |
-          test -f artifacts/sendbeam-desktop_${{ steps.meta.outputs.deb_ver }}_amd64.deb
+          test -f artifacts/sendbeam-desktop_${{ steps.meta.outputs.deb_version }}_amd64.deb
           test -f artifacts/SendBeam-linux-amd64.AppImage
-          dpkg-deb -I artifacts/sendbeam-desktop_${{ steps.meta.outputs.deb_ver }}_amd64.deb
-          dpkg-deb -c artifacts/sendbeam-desktop_${{ steps.meta.outputs.deb_ver }}_amd64.deb | grep -q "usr/bin/sendbeam-desktop"
+
+          # Inspect Debian control metadata
+          dpkg-deb -f artifacts/sendbeam-desktop_${{ steps.meta.outputs.deb_version }}_amd64.deb Version | grep -q "${{ steps.meta.outputs.deb_version }}"
+          dpkg-deb -I artifacts/sendbeam-desktop_${{ steps.meta.outputs.deb_version }}_amd64.deb
+          dpkg-deb -c artifacts/sendbeam-desktop_${{ steps.meta.outputs.deb_version }}_amd64.deb | grep -q "usr/bin/sendbeam-desktop"
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
