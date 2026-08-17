@@ -45,7 +45,7 @@ The SendBeam Desktop application packages the Go transfer engine with native pla
 
 ## Authoritative Version Resolution Policy
 
-Build and packaging metadata is resolved deterministically through [scripts/version-metadata.sh](file:///home/akshay/Desktop/agy/SendArc/scripts/version-metadata.sh) across all CLI and desktop platforms:
+Build and packaging metadata is resolved deterministically through [scripts/version-metadata.sh](scripts/version-metadata.sh) across all CLI and desktop platforms:
 
 | Version Field                | Untagged / Development / PR Builds | Tagged Release Builds (`vX.Y.Z`) | Description                                                          |
 | :--------------------------- | :--------------------------------- | :------------------------------- | :------------------------------------------------------------------- |
