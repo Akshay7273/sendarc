@@ -236,7 +236,7 @@ jobs:
             -DINFO_PRODUCTNAME="SendBeam" `
             -DINFO_COMPANYNAME="Akshay7273" `
             -DINFO_PRODUCTVERSION="${{ steps.meta.outputs.display_version }}" `
-            -DINFO_FIXEDVERSION="${{ steps.meta.outputs.numeric_version }}" `
+            -DINFO_FIXEDVERSION="${{ steps.meta.outputs.windows_fixed_version }}" `
             -DOUTPUT_FILE="$env:GITHUB_WORKSPACE\artifacts\SendBeam-windows-amd64-installer.exe" `
             -DBIN_FILE="$env:GITHUB_WORKSPACE\apps\desktop\bin\sendbeam-desktop.exe" `
             -DICON_FILE="$env:GITHUB_WORKSPACE\apps\desktop\build\windows\icon.ico" `
