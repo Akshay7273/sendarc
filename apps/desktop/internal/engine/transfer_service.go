@@ -166,9 +166,17 @@ type TransferService struct {
 	configStore           *config.Store
 	notifier              lifecycle.Notifier
 	revealMgr             *lifecycle.RevealManager
+	picker                Picker
 	senderStore           *transfer.SenderStore
 	durableStoreFn        func(outDir string) (*transfer.DurableStore, error)
 	completedDestinations map[string]completedDestination
+}
+
+// SetPicker sets the native dialog picker provider (e.g. Wails dialogs).
+func (s *TransferService) SetPicker(p Picker) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.picker = p
 }
 
 // NewTransferService builds the service. emit is the frontend sink (wails

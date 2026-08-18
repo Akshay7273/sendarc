@@ -195,7 +195,7 @@ jobs:
     # build needs the Linux WebView stack, installed here. The window itself is exercised on
     # real platform builds (V14-PR05); this job proves it compiles on a clean Ubuntu runner.
     name: desktop (server gates + window build)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: apps/desktop
@@ -207,19 +207,24 @@ jobs:
           go-version: '1.25'
           cache-dependency-path: apps/desktop/go.sum
 
+      - name: Cache APT packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: ${{ runner.os }}-apt-webkit-${{ hashFiles('apps/desktop/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-apt-webkit-
+
       - name: Install Linux WebView deps (window build)
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev libsoup-3.0-dev
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev libwebkitgtk-6.0-dev libsoup-3.0-dev
 
-      - name: Vet (server)
-        run: go vet -tags server ./...
+      - name: Vet
+        run: go vet ./...
 
-      - name: Test (server)
-        run: go test -race -tags server ./...
-
-      - name: Build server
-        run: go build -tags server ./...
+      - name: Test
+        run: go test -race ./internal/...
 
       - name: Build window
         run: go build ./...

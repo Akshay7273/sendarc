@@ -1,8 +1,10 @@
 package engine
 
-import (
-	"github.com/wailsapp/wails/v3/pkg/application"
-)
+// Picker defines the native dialog interface for selecting files or folders.
+type Picker interface {
+	PickFiles() ([]string, error)
+	PickDestination() (string, error)
+}
 
 // PickResult is a native picker outcome. Error is set when the dialog is
 // unavailable (server mode) or the user cancels.
@@ -12,22 +14,17 @@ type PickResult struct {
 }
 
 // PickFiles opens the native multi-select picker for files and folders to send.
-// In server mode (no GUI) it returns a descriptive error so the frontend can
+// In server mode (no GUI or nil picker) it returns a descriptive error so the frontend can
 // fall back to manual path entry.
 func (s *TransferService) PickFiles() PickResult {
-	app := application.Get()
-	if app == nil || app.Dialog == nil {
+	s.mu.Lock()
+	picker := s.picker
+	s.mu.Unlock()
+
+	if picker == nil {
 		return PickResult{Error: "native dialogs unavailable (server mode); enter paths manually"}
 	}
-	dlg := app.Dialog.OpenFileWithOptions(&application.OpenFileDialogOptions{
-		CanChooseFiles:          true,
-		CanChooseDirectories:    true,
-		AllowsMultipleSelection: true,
-		Title:                   "Select files and folders to send",
-		Message:                 "Choose one or more files or folders to send securely.",
-		ButtonText:              "Select",
-	})
-	paths, err := dlg.PromptForMultipleSelection()
+	paths, err := picker.PickFiles()
 	if err != nil {
 		return PickResult{Error: err.Error()}
 	}
@@ -37,18 +34,14 @@ func (s *TransferService) PickFiles() PickResult {
 // PickDestination opens a native folder picker for the receive destination.
 // In server mode it returns a descriptive error.
 func (s *TransferService) PickDestination() PickResult {
-	app := application.Get()
-	if app == nil || app.Dialog == nil {
+	s.mu.Lock()
+	picker := s.picker
+	s.mu.Unlock()
+
+	if picker == nil {
 		return PickResult{Error: "native dialogs unavailable (server mode); enter a destination path manually"}
 	}
-	dlg := app.Dialog.OpenFileWithOptions(&application.OpenFileDialogOptions{
-		CanChooseFiles:       false,
-		CanChooseDirectories: true,
-		Title:                "Choose where to save received files",
-		Message:              "Received files are written into this folder.",
-		ButtonText:           "Choose",
-	})
-	dir, err := dlg.PromptForSingleSelection()
+	dir, err := picker.PickDestination()
 	if err != nil {
 		return PickResult{Error: err.Error()}
 	}

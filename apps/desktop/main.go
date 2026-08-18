@@ -65,6 +65,7 @@ func main() {
 		nil,
 	)
 	transferSvc.SetNotifier(lifecycle.DefaultNotifier())
+	transferSvc.SetPicker(wailsPicker{})
 
 	cfg, _ := transferSvc.GetConfig()
 
@@ -210,3 +211,37 @@ func main() {
 	// Bounded graceful teardown upon exit: cancel active transfers cleanly
 	_ = lifecycleCoord.Shutdown(3 * time.Second)
 }
+
+type wailsPicker struct{}
+
+func (wailsPicker) PickFiles() ([]string, error) {
+	app := application.Get()
+	if app == nil || app.Dialog == nil {
+		return nil, errors.New("native dialogs unavailable (server mode); enter paths manually")
+	}
+	dlg := app.Dialog.OpenFileWithOptions(&application.OpenFileDialogOptions{
+		CanChooseFiles:          true,
+		CanChooseDirectories:    true,
+		AllowsMultipleSelection: true,
+		Title:                   "Select files and folders to send",
+		Message:                 "Choose one or more files or folders to send securely.",
+		ButtonText:              "Select",
+	})
+	return dlg.PromptForMultipleSelection()
+}
+
+func (wailsPicker) PickDestination() (string, error) {
+	app := application.Get()
+	if app == nil || app.Dialog == nil {
+		return "", errors.New("native dialogs unavailable (server mode); enter a destination path manually")
+	}
+	dlg := app.Dialog.OpenFileWithOptions(&application.OpenFileDialogOptions{
+		CanChooseFiles:       false,
+		CanChooseDirectories: true,
+		Title:                "Choose where to save received files",
+		Message:              "Received files are written into this folder.",
+		ButtonText:           "Choose",
+	})
+	return dlg.PromptForSingleSelection()
+}
+
