@@ -153,11 +153,17 @@ Full analysis, accepted limitations, and the trust boundary are in the
 
 ## Documentation
 
-- [Self-hosting](docs/HOSTING.md) — deployment, TLS, STUN/TURN, relay limits, metrics
+- [Installation & Quickstart](docs/install.md) — installation instructions for Linux, macOS, and Windows
+- [Compatibility matrix](docs/compat-matrix.md) — Browser ↔ CLI ↔ Desktop cross-client matrix, NAT topologies, networks
+- [Self-hosting server](docs/HOSTING.md) — deployment, TLS, STUN/TURN, relay limits, Prometheus metrics
+- [Self-hosting clients](docs/self-hosting-clients.md) — configuring CLI & Desktop with custom servers and OS secret stores
+- [Troubleshooting & Diagnostics](docs/troubleshooting.md) — network diagnostics, restrictive firewalls, lock resolution
+- [State Storage Locations](docs/state-storage.md) — persistent config, journals, sender records, and keychains
+- [Supply Chain Integrity](docs/supply-chain.md) — build provenance attestations, SPDX 2.3 SBOMs, checksum manifests
+- [Updater Architecture](docs/updater.md) — self-update channels, cryptographic verification, and rollback safety
 - [Distribution](docs/distribution.md) — multi-platform packaging, artifacts, and build metadata
 - [Protocol specification](docs/protocol.md) — `sendbeam/1` wire protocol
 - [Threat model](docs/threat-model.md) — trust boundary, attacks, mitigations
-- [Compatibility matrix](docs/compat-matrix.md) — NAT topologies, degraded networks, browsers
 - [Benchmarks](docs/BENCHMARKS.md) — throughput, memory, methodology
 - [Test vectors](docs/test-vectors/) — cross-language crypto and transfer vectors
 
