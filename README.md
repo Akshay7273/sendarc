@@ -162,6 +162,7 @@ Full analysis, accepted limitations, and the trust boundary are in the
 - [Supply Chain Integrity](docs/supply-chain.md) — build provenance attestations, SPDX 2.3 SBOMs, checksum manifests
 - [Updater Architecture](docs/updater.md) — self-update channels, cryptographic verification, and rollback safety
 - [Distribution](docs/distribution.md) — multi-platform packaging, artifacts, and build metadata
+- [Release Gate v1.4](docs/RELEASE-v1.4.md) — v1.4 milestone criteria, verification evidence, and release checklist
 - [Protocol specification](docs/protocol.md) — `sendbeam/1` wire protocol
 - [Threat model](docs/threat-model.md) — trust boundary, attacks, mitigations
 - [Benchmarks](docs/BENCHMARKS.md) — throughput, memory, methodology
