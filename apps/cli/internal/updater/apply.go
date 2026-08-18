@@ -1,3 +1,4 @@
+// Package updater implements the SendBeam self-update engine, channel policies, cryptographic verification, and atomic rollback guarantees.
 package updater
 
 import (
@@ -208,7 +209,9 @@ func extractFromTarGz(data []byte, binaryName string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening gzip stream: %w", err)
 	}
-	defer gzr.Close()
+	defer func() {
+		_ = gzr.Close()
+	}()
 
 	tr := tar.NewReader(gzr)
 	for {
@@ -221,7 +224,7 @@ func extractFromTarGz(data []byte, binaryName string) ([]byte, error) {
 		}
 
 		baseName := filepath.Base(header.Name)
-		if baseName == binaryName && (header.Typeflag == tar.TypeReg || header.Typeflag == tar.TypeRegA) {
+		if baseName == binaryName && (header.Typeflag == tar.TypeReg || header.Typeflag == '0') {
 			buf := new(bytes.Buffer)
 			if _, err := io.Copy(buf, tr); err != nil {
 				return nil, fmt.Errorf("extracting %s from tar: %w", binaryName, err)
@@ -246,7 +249,9 @@ func extractFromZip(data []byte, binaryName string) ([]byte, error) {
 			if err != nil {
 				return nil, fmt.Errorf("opening %s from zip: %w", binaryName, err)
 			}
-			defer rc.Close()
+			defer func() {
+				_ = rc.Close()
+			}()
 
 			buf := new(bytes.Buffer)
 			if _, err := io.Copy(buf, rc); err != nil {

@@ -85,7 +85,7 @@ func TestRunUpdate_JSON(t *testing.T) {
 
 func TestRunUpdate_CheckRelease(t *testing.T) {
 	// Mock server
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		releases := []map[string]any{
 			{
 				"tag_name":     "v1.4.0",
@@ -108,8 +108,7 @@ func TestRunUpdate_CheckRelease(t *testing.T) {
 	Version = "1.3.0"
 	out, _ := captureOutput(func() {
 		code := runUpdate([]string{"--check", "--repo", "mock/repo"})
-		// Since --repo doesn't redirect the base URL directly in CLI args, this tests parsing
-		_ = code
+		t.Logf("runUpdate exit code: %d", code)
 	})
-	_ = out
+	t.Logf("output: %s", out)
 }

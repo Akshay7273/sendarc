@@ -214,7 +214,9 @@ func (u *Updater) Apply(ctx context.Context, check *CheckResult) error {
 	if err != nil {
 		return fmt.Errorf("downloading update artifact: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("update download failed with HTTP %d %s", resp.StatusCode, resp.Status)
@@ -253,7 +255,9 @@ func (u *Updater) fetchReleases(ctx context.Context) ([]ReleaseMetadata, error) 
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, nil
@@ -337,7 +341,9 @@ func (u *Updater) fetchChecksums(ctx context.Context, checksumURL string) (map[s
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d fetching checksums", resp.StatusCode)
