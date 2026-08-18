@@ -13,6 +13,8 @@ on:
 
 permissions:
   contents: read
+  id-token: write
+  attestations: write
 
 concurrency:
   group: distribution-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
@@ -506,16 +508,32 @@ jobs:
     runs-on: ubuntu-latest
     needs: [cli, desktop-windows, desktop-macos, desktop-linux]
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version metadata
+        id: meta
+        run: bash ./scripts/version-metadata.sh --github-output
+
+      - name: Test SBOM generator
+        run: bash ./scripts/generate-sbom_test.sh
+
+      - name: Generate SPDX SBOMs
+        run: |
+          mkdir -p sboms
+          bash ./scripts/generate-sbom.sh --target cli --output sboms/sendbeam-cli.spdx.json --version "${{ steps.meta.outputs.version }}" --commit "${{ steps.meta.outputs.commit }}"
+          bash ./scripts/generate-sbom.sh --target desktop --output sboms/sendbeam-desktop.spdx.json --version "${{ steps.meta.outputs.version }}" --commit "${{ steps.meta.outputs.commit }}"
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: all-artifacts
           merge-multiple: true
 
-      - name: Generate SHA256SUMS.txt
+      - name: Assemble release bundle
         run: |
           mkdir -p release-bundle
           cp all-artifacts/* release-bundle/
+          cp sboms/* release-bundle/
           cd release-bundle
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
@@ -525,9 +543,63 @@ jobs:
         run: |
           sha256sum -c SHA256SUMS.txt
 
+      - name: Attest Build Provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release-bundle/*
+
+      - name: Attest CLI SBOM
+        uses: actions/attest-sbom@v2
+        with:
+          subject-path: release-bundle/sendbeam-cli-*
+          sbom-path: release-bundle/sendbeam-cli.spdx.json
+
+      - name: Attest Desktop SBOM
+        uses: actions/attest-sbom@v2
+        with:
+          subject-path: release-bundle/SendBeam-*
+          sbom-path: release-bundle/sendbeam-desktop.spdx.json
+
       - name: Upload Complete Distribution Bundle
         uses: actions/upload-artifact@v4
         with:
           name: sendbeam-distribution-${{ github.sha }}
           path: release-bundle/*
           retention-days: 14
+
+  smoke:
+    name: exact artifact smoke tests
+    runs-on: ubuntu-latest
+    needs: [manifest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download distribution bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: sendbeam-distribution-${{ github.sha }}
+          path: bundle
+
+      - name: Verify checksums in bundle
+        working-directory: bundle
+        run: |
+          sha256sum -c SHA256SUMS.txt
+
+      - name: Unpack and smoke test Linux CLI binary
+        working-directory: bundle
+        run: |
+          mkdir -p unpacked-cli
+          tar -xzf sendbeam-cli-linux-amd64.tar.gz -C unpacked-cli
+          test -x unpacked-cli/sendbeam
+          unpacked-cli/sendbeam version
+          unpacked-cli/sendbeam --help
+          unpacked-cli/sendbeam update --check --json
+          unpacked-cli/sendbeam transfers list
+
+      - name: Verify SPDX SBOM documents
+        working-directory: bundle
+        run: |
+          test -f sendbeam-cli.spdx.json
+          test -f sendbeam-desktop.spdx.json
+          python3 -c "import json; d = json.load(open('sendbeam-cli.spdx.json')); assert d['spdxVersion'] == 'SPDX-2.3'; assert len(d['packages']) > 1"
+          python3 -c "import json; d = json.load(open('sendbeam-desktop.spdx.json')); assert d['spdxVersion'] == 'SPDX-2.3'; assert len(d['packages']) > 1"

@@ -81,10 +81,15 @@ Packaging is automated in `.github/workflows/distribution.yml` across native Git
 - `macos-latest` (Universal Mach-O + DMG creation)
 - `windows-latest` (Windows PE resource embedding + NSIS compilation)
 
-### Checksum Manifest
+### Checksum Manifest & Supply Chain Integrity
 
-All produced distribution archives and installers are hashed with SHA-256 and collected into a canonical manifest:
+All produced distribution archives, installers, and SPDX 2.3 SBOM manifests are hashed with SHA-256 and collected into a canonical manifest:
 
 ```text
 SHA256SUMS.txt
 ```
+
+- Cryptographic build provenance: attested in CI via `actions/attest-build-provenance@v2`.
+- Software Bill of Materials: generated via `scripts/generate-sbom.sh` (`sendbeam-cli.spdx.json`, `sendbeam-desktop.spdx.json`).
+- Detailed supply chain security model: [docs/supply-chain.md](supply-chain.md).
+- Standalone self-updater architecture & rollback: [docs/updater.md](updater.md).
