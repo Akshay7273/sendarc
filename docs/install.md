@@ -125,6 +125,7 @@ For cryptographic in-toto build provenance and SBOM verification, refer to [docs
 ## 5. Quickstart: Your First Transfer
 
 ### Web App
+
 Navigate to [omnitrix.space](https://omnitrix.space), drop your files to generate an invite code, or enter an invite code to receive.
 
 ### CLI
@@ -138,4 +139,5 @@ sendbeam receive 7-guitarist-melody
 ```
 
 ### Desktop
+
 Open **SendBeam Desktop**, click **Send Files** (or drag and drop into the window), and share the generated code or QR code with the receiver.

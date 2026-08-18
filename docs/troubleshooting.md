@@ -43,16 +43,17 @@ sendbeam diagnose --json > diagnostics.json
 
 SendBeam uses an adaptive path selection engine that races direct WebRTC against the encrypted WebSocket relay:
 
-| Network Condition | Behavior | Expected Resolution |
-| :--- | :--- | :--- |
-| **Open Internet / UPnP / Full-Cone NAT** | Direct WebRTC engaged within ~1.2s. | High-speed direct peer-to-peer. |
-| **UDP Blocked (Corporate Firewalls)** | No STUN response gathered; relay warms and engages in ~5.2s. | Automatic encrypted WebSocket relay fallback over HTTPS port 443. |
-| **Symmetric NAT to Symmetric NAT** | Direct hole-punching impossible; ICE fails after negotiation timeout (~11s). | Automatic encrypted WebSocket relay fallback. |
-| **Relay Only Requested (`--relay-only`)** | Skips WebRTC ICE gathering entirely. | Instant encrypted relay connection. |
+| Network Condition                         | Behavior                                                                     | Expected Resolution                                               |
+| :---------------------------------------- | :--------------------------------------------------------------------------- | :---------------------------------------------------------------- |
+| **Open Internet / UPnP / Full-Cone NAT**  | Direct WebRTC engaged within ~1.2s.                                          | High-speed direct peer-to-peer.                                   |
+| **UDP Blocked (Corporate Firewalls)**     | No STUN response gathered; relay warms and engages in ~5.2s.                 | Automatic encrypted WebSocket relay fallback over HTTPS port 443. |
+| **Symmetric NAT to Symmetric NAT**        | Direct hole-punching impossible; ICE fails after negotiation timeout (~11s). | Automatic encrypted WebSocket relay fallback.                     |
+| **Relay Only Requested (`--relay-only`)** | Skips WebRTC ICE gathering entirely.                                         | Instant encrypted relay connection.                               |
 
 ### Firewall Ports
 
 If configuring corporate or router firewalls to optimize direct WebRTC transfers:
+
 - **Egress UDP:** Ports 1024–65535 (for STUN/WebRTC media).
 - **Egress TCP / HTTPS:** Port 443 (for signaling and encrypted WebSocket relay).
 
@@ -63,6 +64,7 @@ If configuring corporate or router firewalls to optimize direct WebRTC transfers
 SendBeam Desktop enforces single-instance execution to prevent multiple processes from corrupting persistent journals or clobbering network sockets.
 
 ### Symptoms
+
 - Launching Desktop displays: `SendBeam is already running`.
 - A background instance is active in the system tray.
 
@@ -95,7 +97,9 @@ SendBeam Desktop enforces single-instance execution to prevent multiple processe
 SendBeam Desktop integrates with native credential managers to protect TURN credentials.
 
 ### Linux: `SecretStoreUnavailable`
+
 On minimal or headless Linux installations without a running D-Bus Secret Service:
+
 - Install `gnome-keyring` or `libsecret-tools`:
   ```bash
   sudo apt-get install gnome-keyring libsecret-tools
@@ -103,4 +107,5 @@ On minimal or headless Linux installations without a running D-Bus Secret Servic
 - Or run in headless/CLI mode where sensitive TURN credentials can be passed via command-line arguments.
 
 ### macOS: Keychain Prompts
+
 - If prompted by macOS Keychain to grant access to SendBeam, select **Always Allow** to allow background credential access for scheduled updates and self-host credentials.
