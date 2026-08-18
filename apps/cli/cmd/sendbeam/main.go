@@ -45,6 +45,8 @@ func main() {
 		os.Exit(runTransfers(os.Args[2:]))
 	case "diagnose":
 		os.Exit(runDiagnose(os.Args[2:]))
+	case "update":
+		os.Exit(runUpdate(os.Args[2:]))
 	case "version", "-v", "--version":
 		printVersion(os.Stdout)
 		os.Exit(0)
@@ -67,6 +69,7 @@ func usage(w *os.File) {
 	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam receive")+" <code|link> [flags]")
 	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam transfers")+" <list|inspect|resume|discard> [flags]")
 	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam diagnose")+" [flags]")
+	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam update")+" [flags]")
 	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam version"))
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, s.dim("Common flags:"))

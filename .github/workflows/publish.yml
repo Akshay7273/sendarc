@@ -8,6 +8,8 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write
+  attestations: write
 
 # Concurrency configuration:
 # Keyed on workflow, ref, and commit SHA so image publications on main or version tags
@@ -53,6 +55,8 @@ jobs:
         with:
           context: .
           push: true
+          provenance: mode=max
+          sbom: true
           platforms: linux/amd64,linux/arm64
           tags: |
             ${{ steps.tag.outputs.image }}:${{ steps.tag.outputs.tag }}
