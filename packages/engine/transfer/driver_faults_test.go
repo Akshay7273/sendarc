@@ -218,6 +218,8 @@ func TestDriverCutoverBeforeDataStarts(t *testing.T) {
 
 	trigger := make(chan struct{})
 	var triggerOnce sync.Once
+	recvConnected := make(chan struct{})
+	var recvConnectedOnce sync.Once
 	sendPaths, recvPaths := &pathLog{}, &pathLog{}
 	type result struct {
 		out *Outcome
@@ -232,7 +234,13 @@ func TestDriverCutoverBeforeDataStarts(t *testing.T) {
 			OnTransport: appendPath(sendPaths),
 			breakDirect: trigger,
 			OnConnect: func() {
-				triggerOnce.Do(func() { close(trigger) })
+				go func() {
+					select {
+					case <-recvConnected:
+						triggerOnce.Do(func() { close(trigger) })
+					case <-ctx.Done():
+					}
+				}()
 			},
 		})
 		done <- result{out: out, err: err}
@@ -243,6 +251,9 @@ func TestDriverCutoverBeforeDataStarts(t *testing.T) {
 			DestDir:     dir,
 			ICEServers:  []webrtc.ICEServer{},
 			OnTransport: appendPath(recvPaths),
+			OnConnect: func() {
+				recvConnectedOnce.Do(func() { close(recvConnected) })
+			},
 		})
 		done <- result{out: out, err: err}
 	}()
