@@ -84,13 +84,33 @@ func main() {
 		},
 	)
 
+	deviceSvc, err := engine.NewDeviceService(
+		func(name string, data any) {
+			if app := application.Get(); app != nil && app.Event != nil {
+				app.Event.Emit(name, data)
+			}
+		},
+		"",
+	)
+	if err != nil {
+		log.Printf("SendBeam Desktop: device service failed to initialize: %v", err)
+	}
+	if deviceSvc != nil {
+		defer deviceSvc.Close()
+	}
+
+	services := []application.Service{
+		application.NewService(engine.NewService()),
+		application.NewService(transferSvc),
+	}
+	if deviceSvc != nil {
+		services = append(services, application.NewService(deviceSvc))
+	}
+
 	app := application.New(application.Options{
 		Name:        "SendBeam Desktop",
 		Description: "Secure, end-to-end-encrypted, peer-to-peer file transfer",
-		Services: []application.Service{
-			application.NewService(engine.NewService()),
-			application.NewService(transferSvc),
-		},
+		Services:    services,
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
 		},

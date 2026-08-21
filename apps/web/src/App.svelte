@@ -32,6 +32,9 @@
   } from './lib/transfer/durable-store.js';
   import QrCode from './lib/QrCode.svelte';
   import markUrl from './lib/assets/sendbeam-mark.svg';
+  import DevicesModal from './lib/trust/DevicesModal.svelte';
+  import IncomingTransferModal from './lib/trust/IncomingTransferModal.svelte';
+  import type { TrustedDeviceUI, IncomingTransferRequest } from './lib/trust/types.js';
 
   loadConfig();
   import {
@@ -136,6 +139,24 @@
   let transportPath = $state<'connecting' | 'direct' | 'recovering' | 'relay'>('connecting');
   let outcome = $state<TransferOutcome | null>(null);
   let downloadUrl = $state<string | null>(null);
+
+  // Trusted Devices state (V15-PR06)
+  let showDevicesModal = $state(false);
+  let incomingTransfer = $state<IncomingTransferRequest | null>(null);
+
+  function handleSendToTrustedDevice(dev: TrustedDeviceUI) {
+    void dev;
+    startSend();
+  }
+
+  function handleAcceptIncoming() {
+    incomingTransfer = null;
+    startReceive();
+  }
+
+  function handleDeclineIncoming() {
+    incomingTransfer = null;
+  }
 
   let controller: RendezvousController | undefined;
   let handshake: RendezvousResult | undefined;
@@ -753,9 +774,20 @@
 
 <main>
   <header class="masthead">
-    <div class="brand">
-      <img class="mark" src={markUrl} alt="" />
-      <h1>SendBeam</h1>
+    <div class="masthead-top">
+      <div class="brand">
+        <img class="mark" src={markUrl} alt="" />
+        <h1>SendBeam</h1>
+      </div>
+      <button
+        class="btn-devices-header"
+        onclick={() => {
+          showDevicesModal = true;
+        }}
+      >
+        <span class="devices-icon">📱</span>
+        <span>Devices</span>
+      </button>
     </div>
     <p class="tagline">Secure, end-to-end-encrypted, peer-to-peer file transfer.</p>
   </header>
@@ -1245,6 +1277,20 @@
       <button class="primary" onclick={backHome}>Try again</button>
     </section>
   {/if}
+
+  <DevicesModal
+    bind:open={showDevicesModal}
+    onClose={() => {
+      showDevicesModal = false;
+    }}
+    onSendToDevice={handleSendToTrustedDevice}
+  />
+
+  <IncomingTransferModal
+    request={incomingTransfer}
+    onAccept={handleAcceptIncoming}
+    onDecline={handleDeclineIncoming}
+  />
 </main>
 
 <style>
@@ -1327,10 +1373,37 @@
   .masthead {
     margin-bottom: 2.5rem;
   }
+  .masthead-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
   .brand {
     display: flex;
     align-items: center;
     gap: 0.7rem;
+  }
+  .btn-devices-header {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #e4e4e7;
+    padding: 0.4rem 0.8rem;
+    border-radius: 8px;
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    transition: all 0.15s ease;
+  }
+  .btn-devices-header:hover {
+    background: rgba(255, 255, 255, 0.12);
+    border-color: rgba(255, 255, 255, 0.2);
+    color: #ffffff;
+  }
+  .devices-icon {
+    font-size: 1rem;
   }
   .mark {
     width: 2rem;
