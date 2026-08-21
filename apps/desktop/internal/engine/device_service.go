@@ -195,7 +195,9 @@ func NewDeviceService(emit func(name string, data any), customConfigDir string) 
 		svc.notifyDevicesChanged()
 	})
 
-	_ = lanDiscovery.Start(ctx)
+	go func() {
+		_ = lanDiscovery.Start(ctx)
+	}()
 
 	return svc, nil
 }
