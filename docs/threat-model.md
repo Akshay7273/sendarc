@@ -33,6 +33,14 @@ protocol it refers to is specified in [`protocol.md`](./protocol.md).
   keys, live AEAD counters, or credentials; only the opaque versioned `resumeSecret`
   envelope defined by the future resume protocol). Corrupt, torn, unknown, or unsupported
   journal state fails closed and is never partially applied.
+- The **local trust database and device identity keys are local, user-protected state**
+  ([`docs/trust-model.md`](./trust-model.md)). Device identity is backed by an Ed25519 keypair
+  whose private seed is stored in OS-protected credential facilities or restricted filesystem
+  permissions (`0600`). Device IDs (`sb-dev-...`) and fingerprints (`SB1-...`) are deterministic
+  hashes of the public key; human display labels never authenticate identity. Automated
+  acceptance is strictly opt-in per device and bounded to an absolute destination directory
+  with full path sanitization. Unpairing or revocation is enforced locally without relying on
+  centralized servers.
 
 ## Adversaries and mitigations
 
