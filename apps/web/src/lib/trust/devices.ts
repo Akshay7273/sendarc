@@ -1,8 +1,12 @@
 import {
   type TrustPolicy,
+  type TrustRecord,
+  IndexedDBTrustStore,
+  IndexedDBSecretStore,
   MemoryTrustStore,
   formatFingerprint,
   hexToBytes,
+  isPersistentTrustSupported,
 } from '@sendbeam/protocol';
 import type { TrustedDeviceUI } from './types.js';
 
@@ -31,11 +35,26 @@ declare global {
   }
 }
 
-// Fallback in-memory trust store for browser and test environments
-const fallbackStore = new MemoryTrustStore();
+export { isPersistentTrustSupported };
 
 export function isDesktopApp(): boolean {
   return typeof window !== 'undefined' && !!window.go?.engine?.DeviceService;
+}
+
+// Browser storage instances
+let browserTrustStore: IndexedDBTrustStore | MemoryTrustStore | null = null;
+let browserSecretStore: IndexedDBSecretStore | null = null;
+
+function getBrowserStores() {
+  if (!browserTrustStore) {
+    if (typeof indexedDB !== 'undefined') {
+      browserTrustStore = new IndexedDBTrustStore();
+      browserSecretStore = new IndexedDBSecretStore();
+    } else {
+      browserTrustStore = new MemoryTrustStore();
+    }
+  }
+  return { trustStore: browserTrustStore, secretStore: browserSecretStore };
 }
 
 export async function listTrustedDevices(): Promise<TrustedDeviceUI[]> {
@@ -43,10 +62,11 @@ export async function listTrustedDevices(): Promise<TrustedDeviceUI[]> {
     return window.go.engine.DeviceService.ListTrustedDevices();
   }
 
-  const records = await fallbackStore.listDevices();
+  const { trustStore } = getBrowserStores();
+  const records = await trustStore.listDevices();
   const now = Date.now();
 
-  return records.map((r) => {
+  return records.map((r: TrustRecord) => {
     let status: TrustedDeviceUI['status'] = 'offline';
     if (r.revoked) {
       status = 'revoked';
@@ -84,10 +104,11 @@ export async function renameTrustedDevice(deviceId: string, newLabel: string): P
     return window.go.engine.DeviceService.RenameDevice(deviceId, newLabel);
   }
 
-  const rec = await fallbackStore.getDevice(deviceId);
+  const { trustStore } = getBrowserStores();
+  const rec = await trustStore.getDevice(deviceId);
   if (!rec) throw new Error('device not found');
   rec.localLabel = newLabel.trim();
-  await fallbackStore.addOrUpdateDevice(rec);
+  await trustStore.addOrUpdateDevice(rec);
 }
 
 export async function updateTrustedDevicePolicy(
@@ -98,7 +119,8 @@ export async function updateTrustedDevicePolicy(
     return window.go.engine.DeviceService.UpdateDevicePolicy(deviceId, policy);
   }
 
-  await fallbackStore.updatePolicy(deviceId, policy);
+  const { trustStore } = getBrowserStores();
+  await trustStore.updatePolicy(deviceId, policy);
 }
 
 export async function unpairTrustedDevice(deviceId: string, purge: boolean): Promise<void> {
@@ -106,10 +128,14 @@ export async function unpairTrustedDevice(deviceId: string, purge: boolean): Pro
     return window.go.engine.DeviceService.UnpairDevice(deviceId, purge);
   }
 
+  const { trustStore, secretStore } = getBrowserStores();
   if (purge) {
-    await fallbackStore.unpairDevice(deviceId);
+    await trustStore.unpairDevice(deviceId);
+    if (secretStore) {
+      await secretStore.deletePairSecret(deviceId);
+    }
   } else {
-    await fallbackStore.revokeDevice(deviceId);
+    await trustStore.revokeDevice(deviceId);
   }
 }
 
@@ -124,5 +150,14 @@ export async function pairTrustedDevice(
     return window.go.engine.DeviceService.PairDevice(server, code, name, autoAccept, dest);
   }
 
-  throw new Error('Device pairing ceremony is currently enabled in native desktop mode.');
+  const supported = await isPersistentTrustSupported();
+  if (!supported) {
+    throw new Error(
+      'Persistent device pairing requires WebCrypto and IndexedDB storage, which are unavailable in this context.',
+    );
+  }
+
+  throw new Error(
+    'Interactive browser pairing requires active signaling. Use SendBeam desktop or CLI for background mesh connections.',
+  );
 }

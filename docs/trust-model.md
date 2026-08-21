@@ -243,3 +243,32 @@ The `sendbeam` CLI provides scriptable trusted-device operations:
 - `sendbeam unpair <device> [--yes] [--purge]`: Revokes or purges trust credentials for a specified device ID, label, or fingerprint.
 - `sendbeam send <paths...> @<device>`: Directly transfers files to a trusted device without human room codes or interactive prompts.
 - `sendbeam listen [--dest <dir>] [--auto-accept] [--once]`: Background daemon listening for incoming LAN discovery beacons and opaque rendezvous presence.
+
+---
+
+## 10. Browser Participation & Capability Gating
+
+Browser clients participate in persistent trusted-device mesh operations under strictly defined security boundaries:
+
+- **Capability Gating:** Persistent pairing is enabled only when functional WebCrypto subtle (`crypto.subtle`) and IndexedDB storage (`window.indexedDB`) are available. In restricted browsing contexts (e.g. non-HTTPS, disabled storage), SendBeam cleanly disables persistent trust and preserves one-time room code transfers without faking support via insecure plaintext `localStorage` or cookies.
+- **IndexedDB Isolation:** Device identities (`sendbeam-identity`), trust database records (`sendbeam-trust`), and pair credentials (`sendbeam-secrets`) are scoped to the browser origin.
+- **Site Data Lifetime:** Clearing browsing data or cookies predictably revokes all local paired credentials.
+- **UI Differentiation:** The UI explicitly displays browser storage notices and clarifies that browser identities are local to that specific browser profile.
+
+---
+
+## 11. Attack Matrix & Adversarial Security Guarantees
+
+SendBeam v1.5 enforces formal mitigations against 9 core attack vectors across native and browser engines:
+
+| Attack Vector                    | Threat Scenario                                               | Mitigation & Security Guarantee                                                                                                  |
+| :------------------------------- | :------------------------------------------------------------ | :------------------------------------------------------------------------------------------------------------------------------- |
+| **1. Stolen Trust DB**           | Attacker substitutes public key in victim's local database.   | `ValidateTrustRecord` and challenge verification strictly require `deriveDeviceId(pubKey) == deviceId` and authentic signatures. |
+| **2. Replay & Cloned Profile**   | Attacker replays captured `TrustedAuthInit` message.          | Replay fails due to fresh ephemeral nonces, timestamp skew bounds (±5 min), and domain-separated transcripts.                    |
+| **3. Malicious Server MITM**     | Signaling or relay server modifies ephemeral keys in transit. | Transcript signature and HMAC verification across full payload fail; connection terminates before key derivation.                |
+| **4. Presence Replay**           | Attacker replays LAN beacon tags or rendezvous handles.       | Handles and tags expire every 15-minute epoch window; historical beacons (>1 epoch old) are rejected.                            |
+| **5. Display Name Spoofing**     | Adversary assumes friendly label of a paired peer.            | Local labels are advisory only; identity is authenticated strictly by Ed25519 public key and DeviceID fingerprint.               |
+| **6. Downgrade Attack**          | MITM attempts to strip `sendbeam/2` trusted auth flags.       | Capability set is cryptographically hashed and bound into the transcript; tampering causes handshake failure.                    |
+| **7. Stale/Revoked Credentials** | Unpaired or revoked device attempts connection.               | `store.IsTrusted()` check rejects revoked peers before session establishment; secrets are purged on unpair.                      |
+| **8. Auto-Accept Escape**        | Malicious peer sends `../../etc/passwd` in auto-accept mode.  | `NormalizeTransferPath` strictly enforces safe relative paths within designated destination root.                                |
+| **9. One-Time Isolation**        | Standard one-time transfer executes between devices.          | One-time transfers never mutate trust database or persist credentials without explicit mutual pairing.                           |

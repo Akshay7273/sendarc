@@ -161,7 +161,20 @@ the test-vector suite (KATs + a full transfer vector) is published under
 `docs/test-vectors/` for independent reimplementation. Before public release the crypto
 and server are security-reviewed and the JS/Go dependencies audited.
 
-## Remote Presence & Blinded Discovery Metadata Boundaries (v1.5)
-
 - **Opaque Rendezvous Handles:** Pairwise handles are derived via `HMAC-SHA256(k_pair, "sendbeam/2 rendezvous-handle:" || epoch)` rotating every 15 minutes. The signaling server sees connection attempts for a random-looking 32-byte hex string, but cannot link distinct handles across epochs, determine the underlying device identities, or associate them with account records.
 - **Blinded LAN Beacons:** UDP broadcast/multicast beacons contain only ephemeral random nonces, port numbers, and truncated 16-byte HMAC tags (`HMAC(k_pair, nonce || epoch)`). Passive network observers on the local Wi-Fi see pseudorandom beacons without plaintext device names, fingerprints, or transfer metadata.
+
+## Persistent Device Trust & Browser Storage Boundaries (v1.5)
+
+- **Local Trust Storage Isolation:** Device identities (`identity.key` on CLI/Desktop, `sendbeam-identity` on Web), paired trust records (`trust.json` / `sendbeam-trust`), and pair credentials (`secrets.json` with `0600` permissions / `sendbeam-secrets`) are maintained strictly on the local device. No global account database or centralized directory exists.
+- **Capability Gating:** Persistent pairing is gated on modern WebCrypto subtle API and IndexedDB storage. In environments lacking secure storage, persistent pairing is disabled cleanly and one-time room-code transfers remain active.
+- **Adversarial Attack Matrix:** Automated regression tests in Go (`packages/wire/attack_matrix_test.go`, `packages/engine/trust/attack_matrix_test.go`) and TypeScript (`packages/protocol/src/attack-matrix.test.ts`) continuously exercise and prove resistance against 9 core attack vectors:
+  1. Stolen trust DB / key substitution
+  2. Replay attacks & cloned profiles
+  3. Malicious server MITM / payload modification
+  4. Presence beacon replay & epoch expiration
+  5. Display name / local label spoofing
+  6. Downgrade attacks & capability stripping
+  7. Stale / revoked pair credentials
+  8. Auto-accept path traversal & filesystem escapes
+  9. One-time transfer trust isolation
