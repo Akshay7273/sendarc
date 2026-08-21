@@ -4,9 +4,6 @@ import { describe, expect, it } from 'vitest';
 import { bytesToHex, hexToBytes } from './bytes.js';
 import {
   createDeviceIdentityFromSeed,
-  deriveDeviceId,
-  deriveFingerprint,
-  formatFingerprint,
   generateDeviceIdentity,
   signDeviceMessage,
   validateDeviceId,

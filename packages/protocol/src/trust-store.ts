@@ -3,8 +3,8 @@
  * Matches Go `packages/wire/trust_record.go` and `packages/engine/trust/trust_store.go`.
  */
 
-import { bytesToHex, hexToBytes } from './bytes.js';
-import { deriveDeviceId, deriveFingerprint, validateDeviceId } from './identity.js';
+import { hexToBytes } from './bytes.js';
+import { deriveDeviceId, validateDeviceId } from './identity.js';
 
 export const CAP_TRANSFER_V1 = 'transfer.v1';
 export const CAP_TRANSFER_V2 = 'transfer.v2';
