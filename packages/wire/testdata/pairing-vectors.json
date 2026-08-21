@@ -1,0 +1,30 @@
+[
+  {
+    "name": "alice_bob_standard_pairing",
+    "master_key_hex": "78cc244e0bf23d5adb622030d371798318dc624ab7656bec6866e822a5f92497",
+    "req_seed_hex": "f86485bec02cb4501eab04a0167c7354e4232fc23f5c8761d8c730d429651f61",
+    "req_device_id": "sb-dev-d5ba0a004e9be5e2c4537b289163b5b548ea3043aad133911ae8d18809081287",
+    "req_pub_key_hex": "565c0c1dc287bdfe05c165a3d13d1e3dfafef34d217dec14d45ae3c53c1c89d9",
+    "req_name": "Alice Laptop",
+    "req_caps": [
+      "transfer.v1",
+      "auto_accept"
+    ],
+    "req_nonce_hex": "b9d81bca729d78625201c17a8b9909aca3880515d53176b967207713d1d0d725",
+    "req_sig_hex": "ba074ab41bfb3a8f8532d78c5bd9077c715049c7e0d6105244fc5f8d4eca04e0a7b25a18fbaa4fb4eac321a6699c1b6257821a345f907337bfd733b37f64140e",
+    "resp_seed_hex": "980a6426b9cd61e3c5695cb915fa1e7f39f788508a4e2538a57766a8e4e9ebb1",
+    "resp_device_id": "sb-dev-c415ebc87984d7e79c46ed09ed94b973c8d681c50e18f9fa18adaf719d7fe13e",
+    "resp_pub_key_hex": "2bc37022a3a465dd51d0f60b43794de11c095ab95da1c8141117f54c0660febe",
+    "resp_name": "Bob Phone",
+    "resp_caps": [
+      "transfer.v1",
+      "lan_direct"
+    ],
+    "resp_nonce_hex": "296b24ab56c4781c3569f10ad9ea4c773fb1b98652096e58cc236207dfef0ea4",
+    "resp_sig_hex": "7a6c35d2525ce700aaa1f2cfdd8e43c651a3cdb6fdaa5c2154d388592d7cce90f255fd496d4136cc340001cbcae0be49b7a49d0ccc39ec7196e4417b5192eb0f",
+    "k_pair_hex": "bfc1695a1c10726f8366aa7ad2f6df82c467a72734931fa1d3b9aebdf29c3305",
+    "pair_cred_ref": "cred-bbb85b04297714e96195aba70ce42eac8b7d1b3377493cbe52c56c76c3be3ba6",
+    "req_confirm_tag": "a78a184db8e56135882bd4939a17d7e9a226887d225d0f8abbe7a47777e2a95d",
+    "resp_confirm_tag": "d9203000013a0237beea35fa25bc0418742673cdf3c81bc7f0e3bd67ad163407"
+  }
+]

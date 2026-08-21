@@ -29,6 +29,7 @@ export enum FrameType {
   Fail = 11,
   ResumeState = 12,
   ResumeAuth = 13,
+  PairingExchange = 14,
 }
 
 /** Feature flags negotiated in caps. */
