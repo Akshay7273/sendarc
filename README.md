@@ -119,6 +119,19 @@ go build -o sendbeam-desktop .
 
 See [apps/desktop/README.md](apps/desktop/README.md) and [docs/distribution.md](docs/distribution.md) for platform-specific packaging instructions.
 
+## Trusted Device Mesh & Automation
+
+SendBeam v1.5 introduces cryptographic device identity, mutual pairing, and instant transfer automation across your personal device fleet — with zero cloud accounts or centralized directories:
+
+- **Pair Once, Connect Forever:** Pair two devices over an authenticated SPAKE2 ceremony (`sendbeam pair` in CLI, or via Web/Desktop UI). Once paired, devices establish mutual forward-secret sessions (`sendbeam/2`) without typing room codes.
+- **Targeted Sending:** Send files directly to any paired device by name or ID:
+  ```bash
+  sendbeam send report.pdf @macbook
+  ```
+- **Automated Receiver Listener:** Run `sendbeam listen` on home servers or workstations to automatically receive files from authorized devices under strict path-contained policies (`--dest`, `--max-size`, `--auto-accept`).
+- **Privacy-Preserving Presence:** Devices announce availability using 15-minute epoch-rotated blinded handles across the Internet and blinded UDP multicast beacons on LANs. The rendezvous server never learns device identities, IP associations, or pairwise relationships.
+- **Unified Across All Platforms:** Supported in the CLI, Desktop application, and evergreen web browsers via origin-scoped IndexedDB storage.
+
 ## Self-hosting
 
 Prefer your own infrastructure? The single container runs the web app, the signaling
@@ -162,8 +175,9 @@ Full analysis, accepted limitations, and the trust boundary are in the
 - [Supply Chain Integrity](docs/supply-chain.md) — build provenance attestations, SPDX 2.3 SBOMs, checksum manifests
 - [Updater Architecture](docs/updater.md) — self-update channels, cryptographic verification, and rollback safety
 - [Distribution](docs/distribution.md) — multi-platform packaging, artifacts, and build metadata
+- [Release Gate v1.5](docs/RELEASE-v1.5.md) — v1.5 milestone criteria, verification evidence, and release checklist
 - [Release Gate v1.4](docs/RELEASE-v1.4.md) — v1.4 milestone criteria, verification evidence, and release checklist
-- [Protocol specification](docs/protocol.md) — `sendbeam/1` wire protocol
+- [Protocol specification](docs/protocol.md) — `sendbeam/1` & `sendbeam/2` wire protocols
 - [Threat model](docs/threat-model.md) — trust boundary, attacks, mitigations
 - [Trust & Device Identity Model](docs/trust-model.md) — device identity, trust database, pairing boundaries, and policy confinement
 - [Benchmarks](docs/BENCHMARKS.md) — throughput, memory, methodology

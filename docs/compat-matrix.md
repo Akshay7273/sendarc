@@ -159,6 +159,23 @@ identical semantics.
 - No cloud backup/history, accounts, or server-side presence — durable state is purely
   local.
 
+## Trusted Device Mesh & Automation (v1.5)
+
+SendBeam v1.5 adds mutual cryptographic pairing, persistent trust management, remote presence, LAN beacon discovery, and automated transfers (`sendbeam send @device`, `sendbeam listen`).
+
+| Capability / Host                 |            Go CLI (`apps/cli`)             |      Desktop (`apps/desktop`)      |        Browser (`@sendbeam/protocol`)         |
+| :-------------------------------- | :----------------------------------------: | :--------------------------------: | :-------------------------------------------: |
+| **Ed25519 Device Identity**       | `~/.config/sendbeam/identity.key` (`0600`) |   Shared Go Engine / OS keychain   | Origin-scoped IndexedDB (`sendbeam-identity`) |
+| **SPAKE2 Pairing Ceremony**       |           `sendbeam pair [code]`           |         Desktop Devices UI         |             Web UI Devices Modal              |
+| **`sendbeam/2` Trusted Session**  |         Full Initiator & Responder         |     Full Initiator & Responder     |          Full Initiator & Responder           |
+| **Targeted Transfer (`@device`)** |     `sendbeam send <files...> @device`     |      Desktop Quick-Send Flow       |          Web UI Devices Send Dialog           |
+| **Automated Listener Daemon**     |             `sendbeam listen`              |  Background Presence Coordinator   |          Active browser session only          |
+| **Opt-in Auto-Accept Policy**     |   Strict absolute destination, size caps   | Scoped policy config + file dialog |        Explicit transfer confirmation         |
+| **LAN Blinded Beacon Discovery**  |      UDP Multicast `224.0.0.251:5354`      |  UDP Multicast `224.0.0.251:5354`  |         Rendezvous signaling fallback         |
+| **Origin Trust Isolation**        |     File-level atomic storage (`0600`)     |      Go engine host isolation      |       Origin-isolated IndexedDB stores        |
+
+All 9 cross-client pairs (Browser ↔ CLI ↔ Desktop) interoperate seamlessly across both ephemeral one-time (`sendbeam/1`) and persistent trusted (`sendbeam/2`) sessions.
+
 ## Interpretation
 
 - **Restrictive networks engage the relay without a blind fixed wait**: there is no fixed

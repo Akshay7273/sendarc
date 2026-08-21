@@ -357,3 +357,23 @@ absent, stripped, or untrusted ⇒ cross-session resume unavailable, never an un
 resume. Same-session path recovery (direct↔relay cutover) never re-runs resume-auth — the
 fresh resumed key epoch is per resumed process/session, and a path change within the same
 epoch follows the existing same-session counter/path semantics.
+
+## Trusted Device Mesh & `sendbeam/2` Protocol (v1.5)
+
+SendBeam v1.5 introduces `sendbeam/2` for persistent trusted devices. For complete cryptographic formulas, pairing sequence diagrams, presence handle derivations, and security threat vectors, see [`docs/trust-model.md`](trust-model.md).
+
+### Summary of `sendbeam/2` Wire Messages
+
+1. **Pairing Handshake (`sendbeam/pairing/1`)**:
+   - `pairing_request`: initiator sends Ed25519 identity key, device label, and SPAKE2-bound signature.
+   - `pairing_response`: responder verifies signature, computes `k_pair`, and responds with its signed public key and confirmation tag.
+   - `pairing_confirm`: initiator verifies responder signature and tag, persists pair credential, and returns final confirmation tag.
+
+2. **Trusted Session Authentication (`sendbeam/2`)**:
+   - `trusted_auth_init`: Initiator sends `initiator_device_id`, timestamp, 32-byte nonce, ephemeral X25519 public key, and HMAC tag over the domain challenge.
+   - `trusted_auth_response`: Responder validates device trust, timestamp freshness (±5 min), verifies tag, generates responder ephemeral key, and returns HMAC response tag.
+   - `trusted_auth_confirm`: Initiator verifies responder tag, derives forward-secret `SessionMaster`, `k_i2r`, `k_r2i`, and returns mutual confirmation tag.
+
+3. **Privacy-Preserving Presence & LAN Discovery**:
+   - **Remote Presence**: 15-minute epoch-rotated blind handles (`HMAC(k_pair, "sendbeam/2 rendezvous-handle:" || epoch)`).
+   - **Blinded LAN Discovery**: UDP Multicast `224.0.0.251:5354` carrying 16-byte blinded beacon tags derived from current epoch subkeys.
