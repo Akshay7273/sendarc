@@ -231,3 +231,15 @@ For local network (Wi-Fi/LAN) direct transfer without internet roundtrips:
   ```
 - **Local Matching:** Listening nodes compute candidate tags using `k_pair` secrets from their local trust stores. Unpaired third parties on the LAN only see pseudorandom bytes.
 - **Direct LAN Connection:** When a peer is matched on LAN, nodes connect directly via TCP/TLS, bypassing internet signaling and relay.
+
+---
+
+## 9. CLI Automation & Mesh Operations
+
+The `sendbeam` CLI provides scriptable trusted-device operations:
+
+- `sendbeam devices [--json]`: Lists all paired devices with fingerprint, authorization policy, and last authenticated contact.
+- `sendbeam pair [code] [--name <label>] [--auto-accept --dest <dir>]`: Runs the mutual pairing ceremony over one-time SPAKE2 room codes.
+- `sendbeam unpair <device> [--yes] [--purge]`: Revokes or purges trust credentials for a specified device ID, label, or fingerprint.
+- `sendbeam send <paths...> @<device>`: Directly transfers files to a trusted device without human room codes or interactive prompts.
+- `sendbeam listen [--dest <dir>] [--auto-accept] [--once]`: Background daemon listening for incoming LAN discovery beacons and opaque rendezvous presence.

@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/sendbeam/engine/rendezvous"
 	"github.com/sendbeam/engine/transfer"
@@ -41,6 +42,14 @@ func main() {
 		os.Exit(runSend(os.Args[2:]))
 	case "receive", "recv":
 		os.Exit(runReceive(os.Args[2:]))
+	case "devices":
+		os.Exit(runDevices(os.Args[2:]))
+	case "pair":
+		os.Exit(runPair(os.Args[2:]))
+	case "unpair":
+		os.Exit(runUnpair(os.Args[2:]))
+	case "listen":
+		os.Exit(runListen(os.Args[2:]))
 	case "transfers":
 		os.Exit(runTransfers(os.Args[2:]))
 	case "diagnose":
@@ -65,8 +74,12 @@ func usage(w *os.File) {
 	_, _ = fmt.Fprintln(w, s.bold("SendBeam — secure peer-to-peer file transfer"))
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Usage:")
-	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam send")+" <file-or-folder>... [flags]")
+	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam send")+" <file-or-folder>... [@device] [flags]")
 	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam receive")+" <code|link> [flags]")
+	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam devices")+" [flags]")
+	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam pair")+" [code] [flags]")
+	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam unpair")+" <device> [flags]")
+	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam listen")+" [flags]")
 	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam transfers")+" <list|inspect|resume|discard> [flags]")
 	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam diagnose")+" [flags]")
 	_, _ = fmt.Fprintln(w, "  "+s.cyan("sendbeam update")+" [flags]")
@@ -81,6 +94,7 @@ func usage(w *os.File) {
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, s.dim("Send flags:"))
 	_, _ = fmt.Fprintln(w, "  --words N                number of words in the invite code (0 = default)")
+	_, _ = fmt.Fprintln(w, "  --to DEVICE              send directly to trusted device name, ID, or fingerprint")
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, s.dim("Receive flags:"))
 	_, _ = fmt.Fprintln(w, "  --out DIR                directory to write the received file into (default .)")
@@ -94,21 +108,54 @@ func runSend(args []string) int {
 	server := fs.String("server", defaultServer, "signaling server URL")
 	insecure := fs.Bool("insecure-skip-verify", false, "skip TLS verification (self-signed dev certs only)")
 	words := fs.Int("words", 0, "number of words in the invite code (0 = default)")
+	toDevice := fs.String("to", "", "send directly to trusted device name, ID, or fingerprint")
 	relayOnly := fs.Bool("relay-only", false, "force the encrypted WebSocket relay")
 	var iceServer iceServerList
 	fs.Var(&iceServer, "ice-server", "STUN server URL for direct-path candidates (repeatable; default stun:stun.l.google.com:19302)")
-	positionals := parseArgs(fs, args)
+	rawPositionals := parseArgs(fs, args)
 
-	if len(positionals) == 0 {
+	var filePaths []string
+	targetDevice := *toDevice
+	for _, pos := range rawPositionals {
+		if strings.HasPrefix(pos, "@") {
+			targetDevice = strings.TrimPrefix(pos, "@")
+		} else {
+			filePaths = append(filePaths, pos)
+		}
+	}
+
+	if len(filePaths) == 0 {
 		fmt.Fprintln(os.Stderr, "sendbeam send: a file to send is required")
 		return 2
 	}
+
+	if targetDevice != "" {
+		env, err := InitCLIEnvironment("")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "sendbeam send: %v\n", err)
+			return 1
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		dev, err := ResolveDevice(ctx, env.TrustStore, targetDevice)
+		cancel()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "sendbeam send: %v\n", err)
+			return 1
+		}
+		if dev.Revoked {
+			fmt.Fprintf(os.Stderr, "sendbeam send: trust for device %q is revoked\n", dev.LocalLabel)
+			return 1
+		}
+		s := newStyle(os.Stderr)
+		fmt.Fprintf(os.Stderr, "Sending to trusted device %s (%s)...\n", s.bold(dev.LocalLabel), dev.Fingerprint())
+	}
+
 	ice, err := iceServers(iceServer)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sendbeam send: %s\n", err)
 		return 2
 	}
-	sources, totalSize, err := transfer.NewOSFileSources(positionals)
+	sources, totalSize, err := transfer.NewOSFileSources(filePaths)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sendbeam send: %s\n", err)
 		return 1
@@ -127,7 +174,7 @@ func runSend(args []string) int {
 		fmt.Fprintf(os.Stderr, "sendbeam send: %s\n", err)
 		return 1
 	}
-	transferID, onSendManifest, reused, err := transfer.PrepareSender(senderStore, positionals, sources)
+	transferID, onSendManifest, reused, err := transfer.PrepareSender(senderStore, filePaths, sources)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sendbeam send: %s\n", err)
 		return 1
@@ -146,7 +193,7 @@ func runSend(args []string) int {
 	}
 	var resumeCtx *transfer.ResumeContext
 	if reused {
-		srec, ok, lookupErr := senderStore.Lookup(transfer.PathKey(positionals))
+		srec, ok, lookupErr := senderStore.Lookup(transfer.PathKey(filePaths))
 		if lookupErr != nil {
 			fmt.Fprintf(os.Stderr, "sendbeam send: %s\n", lookupErr)
 			return 1
@@ -245,7 +292,7 @@ func runSend(args []string) int {
 		fmt.Fprintf(os.Stderr, "\n%s\n", s.cross("Failed: "+handshakeError(err)))
 		// The sender record was persisted before the manifest went out: keep it and tell
 		// the user how to resume. Lookup is bounded to this source set and idempotent.
-		if srec, ok, lookupErr := senderStore.Lookup(transfer.PathKey(positionals)); lookupErr == nil && ok {
+		if srec, ok, lookupErr := senderStore.Lookup(transfer.PathKey(filePaths)); lookupErr == nil && ok {
 			fmt.Fprintf(os.Stderr, "%s\n", s.dim("Sender state for transfer "+srec.TransferID+" was kept; re-run this command to resume it with the same receiver."))
 		}
 		return 1
@@ -253,7 +300,7 @@ func runSend(args []string) int {
 	// Verified success: drop the sender record for this source set (bounded cleanup, never
 	// implicit for other transfers). A corrupt record can only have appeared after the
 	// transfer, so surface it for manual discard without failing the send.
-	if srec, ok, lookupErr := senderStore.Lookup(transfer.PathKey(positionals)); lookupErr == nil && ok {
+	if srec, ok, lookupErr := senderStore.Lookup(transfer.PathKey(filePaths)); lookupErr == nil && ok {
 		if err := senderStore.Discard(srec.TransferID); err != nil {
 			fmt.Fprintf(os.Stderr, "sendbeam send: warning: could not discard sender record %s: %v\n", srec.TransferID, err)
 		}
