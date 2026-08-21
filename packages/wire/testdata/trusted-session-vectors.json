@@ -1,0 +1,37 @@
+[
+  {
+    "name": "alice_bob_trusted_session",
+    "k_pair_hex": "b578beac8f38df62b3f7f744ad47e6a6a6f17a7db6427e3949f981da8eb29b7d",
+    "pair_cred_ref": "cred-f5a9067216d304bf2a67fc5446d5a6e7e97dfb9152f937c8c6b6d1a872cc10a5",
+    "init_seed_hex": "34c86db8b3903e5dcf9582abb21e0340602f233b2e12b6e4de11afd585174a3a",
+    "init_device_id": "sb-dev-0ae44c43cf475df86e9a4341e75b02944142c1d4484892d244d7d2d7c4a7f216",
+    "init_pub_key_hex": "0d9745c372d04607f3a765eb7f2e0ab7ea9b7ece9fd0acfca79a57803a4f83ea",
+    "init_ephem_pub_hex": "9d9f13fb3cfa172b0637f36a774d07cab235bb5e24914a9978914efa1160b4d8",
+    "init_nonce_hex": "b9d81bca729d78625201c17a8b9909aca3880515d53176b967207713d1d0d725",
+    "init_caps": [
+      "transfer.v1",
+      "transfer.v2",
+      "auto_accept"
+    ],
+    "init_timestamp": "2026-08-21T12:00:00Z",
+    "init_sig_hex": "ceb2e3decd4e50b255dc69ad7cf2601fcb20c1cdfd67a431acb75bbf301e1bd8b996d82ac962fe8e1adbed2e26452ec193a7145904379e549878cafbe503e104",
+    "init_auth_tag_hex": "fa204a6b43bedd71cd3600fa96c0046b46dea53909be3773d823d79bbbc2dd7f",
+    "resp_seed_hex": "4fb61397bb78ad872f082a4dda02286fc585e612b731664e9b9398d85a3e85df",
+    "resp_device_id": "sb-dev-2a01b9da1e116eec290a92f9edbdb799c73c3abed9e99cd083c24bff6e3645c7",
+    "resp_pub_key_hex": "e61d3ac8f53bade331c2c5b8103b8791de6bb02d47bf4382875f4ad9ddcf5592",
+    "resp_ephem_pub_hex": "7ba2469fa754974a446885ad4dc313666a9198f2720f241aa54befbe0e701a12",
+    "resp_nonce_hex": "296b24ab56c4781c3569f10ad9ea4c773fb1b98652096e58cc236207dfef0ea4",
+    "resp_caps": [
+      "transfer.v1",
+      "transfer.v2",
+      "lan_direct"
+    ],
+    "resp_sig_hex": "a12d4040e92f9fe5f27fc2e209c873841983cf01488e44152f7acbe634353c8c16025b281aad7c6fc74ff6ad9c95018f3f78de39baa5ff19170ebeb76e37e801",
+    "resp_auth_tag_hex": "8ef7c3ddb83a3ca9725e9400577453d41dd666be28f97ed4695230e5831ee577",
+    "session_master_hex": "1d99cc96820594578d99271e7c4b651666b26d0f0bdb2f16c5b5f7d592b96a95",
+    "i2r_key_hex": "ae0baac362e293eaec69e18b00584e563cbe6803c91c9cbecce36c7af2b12a02",
+    "r2i_key_hex": "899f9689903929f51f3897bbc46e544bc2d0d2e0e05bbc51f5e44d21ca982a2a",
+    "init_confirm_tag": "b10766656d6d41f01b14e3c6cd5edc060c471f8ff8c8055eebd1f845b7c57cc9",
+    "resp_confirm_tag": "a0a446e6effc5bd92911c718aca123800704a9668e09daace9a70faee554b1f5"
+  }
+]

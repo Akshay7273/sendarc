@@ -157,3 +157,45 @@ PairCredentialRef = "cred-" || LowercaseHex(SHA-256(k_pair))
 - **Key & Label Conflicts:**
   - If a pairing peer claims an active name already assigned to a different public key, the ceremony aborts with `ErrLabelConflict`.
   - Silent key overwrites are strictly forbidden to prevent impersonation attacks.
+
+---
+
+## 7. Trusted-Session Authentication (`sendbeam/2`)
+
+Repeat connections between paired devices authenticate without human codes or passwords using mutual challenge-response verification over ephemeral key material.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Initiator
+    participant B as Responder
+    Note over A: 1. Generate Ephem_A, Nonce_A<br/>Sign Challenge_A with Ed25519<br/>Compute MAC_A using k_pair
+    A->>B: TrustedAuthInit (InitID, RespID, CredRef, Ephem_A, Nonce_A, Caps_A, TS, Sig_A, MAC_A)
+    Note over B: 2. Check TrustStore & Revocation<br/>Verify Timestamp (±5 min)<br/>Verify Sig_A & MAC_A
+    Note over B: 3. Generate Ephem_B, Nonce_B<br/>Sign Challenge_B with Ed25519<br/>Compute MAC_B using k_pair
+    B->>A: TrustedAuthResponse (Status, RespID, Ephem_B, Nonce_B, Caps_B, Sig_B, MAC_B)
+    Note over A: 4. Verify Sig_B & MAC_B
+    Note over A,B: 5. Derive Forward-Secret Session Keys (k_i2r, k_r2i)
+    A->>B: TrustedAuthConfirm (Status: ready, AuthTag: HMAC(Master, InitID))
+    B->>A: TrustedAuthConfirm (Status: ready, AuthTag: HMAC(Master, RespID))
+    Note over A,B: 6. Secure Transfer Epoch Established
+```
+
+### 7.1 Forward-Secret Key Schedule
+
+```
+IKM = HMAC-SHA256(k_pair, Ephem_A || Ephem_B || Nonce_A || Nonce_B)
+Salt = Nonce_A || Nonce_B
+Transcript = "sendbeam/2 trusted-resp:" || SHA-256(k_pair) || Ephem_A || Ephem_B || Nonce_A || Nonce_B || InitID || RespID || SHA-256(NegotiatedCaps)
+
+SessionMaster = HKDF-SHA256(IKM, Salt, "sendbeam/2 session-master:" || Transcript, 32)
+k_i2r = HKDF-SHA256(SessionMaster, nil, "sendbeam/2 initiator-to-responder key", 32)
+k_r2i = HKDF-SHA256(SessionMaster, nil, "sendbeam/2 responder-to-initiator key", 32)
+```
+
+### 7.2 Replay & Revocation Enforcement
+
+- **Timestamp Skew Bounding:** Timestamps outside ±5 minutes are rejected immediately (`ErrTrustedTimestampSkew`).
+- **Cryptographic Binding:** The signature and MAC tag strictly bind `k_pair`, `EphemeralPub`, `Nonce`, `DeviceID`, and `NegotiatedCapabilities`.
+- **Local Revocation:** If a peer has been marked `revoked: true` in the local trust database, all connection attempts are rejected with `ErrTrustedPeerRevoked`.
+- **Protocol Boundary:** One-time pairing and transfers remain compatible via `sendbeam/1`, while trusted-device mesh operations use `sendbeam/2`.

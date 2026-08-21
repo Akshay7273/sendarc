@@ -56,6 +56,9 @@ const (
 	// FramePairingExchange carries one pairing message (PairingRequest, PairingResponse,
 	// or PairingConfirm JSON) sealed under the SESSION directional keys (V15-PR02).
 	FramePairingExchange uint8 = 14
+	// FrameTrustedAuth carries one trusted-session handshake message (TrustedAuthInit,
+	// TrustedAuthResponse, or TrustedAuthConfirm JSON) for paired devices (V15-PR03).
+	FrameTrustedAuth uint8 = 15
 )
 
 // encodeFrameHeader encodes h into a fresh 16-byte buffer.

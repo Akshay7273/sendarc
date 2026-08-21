@@ -31,3 +31,4 @@ export * from './resume-preamble.js';
 export * from './identity.js';
 export * from './trust-store.js';
 export * from './pairing.js';
+export * from './trusted-auth.js';
