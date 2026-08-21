@@ -160,3 +160,8 @@ Cross-language vector tests keep the TypeScript and Go implementations byte-iden
 the test-vector suite (KATs + a full transfer vector) is published under
 `docs/test-vectors/` for independent reimplementation. Before public release the crypto
 and server are security-reviewed and the JS/Go dependencies audited.
+
+## Remote Presence & Blinded Discovery Metadata Boundaries (v1.5)
+
+- **Opaque Rendezvous Handles:** Pairwise handles are derived via `HMAC-SHA256(k_pair, "sendbeam/2 rendezvous-handle:" || epoch)` rotating every 15 minutes. The signaling server sees connection attempts for a random-looking 32-byte hex string, but cannot link distinct handles across epochs, determine the underlying device identities, or associate them with account records.
+- **Blinded LAN Beacons:** UDP broadcast/multicast beacons contain only ephemeral random nonces, port numbers, and truncated 16-byte HMAC tags (`HMAC(k_pair, nonce || epoch)`). Passive network observers on the local Wi-Fi see pseudorandom beacons without plaintext device names, fingerprints, or transfer metadata.
