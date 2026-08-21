@@ -134,7 +134,7 @@ func (d *DeviceIdentity) Sign(message []byte) ([]byte, error) {
 	return ed25519.Sign(d.PrivateKey, message), nil
 }
 
-// Verify verifies a signature against a message and an Ed25519 public key.
+// VerifyDeviceSignature verifies a signature against a message and an Ed25519 public key.
 func VerifyDeviceSignature(pub ed25519.PublicKey, message, signature []byte) bool {
 	if len(pub) != ed25519.PublicKeySize || len(signature) != ed25519.SignatureSize {
 		return false
