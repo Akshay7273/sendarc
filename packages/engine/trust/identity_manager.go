@@ -1,3 +1,4 @@
+// Package trust manages local device cryptographic identity and paired device trust records.
 package trust
 
 import (
@@ -136,19 +137,19 @@ func (m *IdentityManager) saveLocked(id *wire.DeviceIdentity) error {
 		return fmt.Errorf("create temp identity file: %w", err)
 	}
 	tmpName := tmpFile.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 
 	if err := tmpFile.Chmod(0600); err != nil {
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		return fmt.Errorf("chmod temp identity file: %w", err)
 	}
 
 	if _, err := tmpFile.Write(seed); err != nil {
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		return fmt.Errorf("write temp identity file: %w", err)
 	}
 	if err := tmpFile.Sync(); err != nil {
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		return fmt.Errorf("sync temp identity file: %w", err)
 	}
 	if err := tmpFile.Close(); err != nil {

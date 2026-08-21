@@ -1,3 +1,4 @@
+// Package trust manages local device cryptographic identity and paired device trust records.
 package trust
 
 import (
@@ -21,8 +22,8 @@ var (
 	ErrTrustStoreClosed = errors.New("trust store is closed")
 )
 
-// TrustStore defines the interface for local trust management, peer policy, and revocation.
-type TrustStore interface {
+// Store defines the interface for local trust management, peer policy, and revocation.
+type Store interface {
 	GetDevice(ctx context.Context, deviceID string) (*wire.TrustRecord, error)
 	ListDevices(ctx context.Context) ([]*wire.TrustRecord, error)
 	AddOrUpdateDevice(ctx context.Context, record *wire.TrustRecord) error
@@ -33,7 +34,7 @@ type TrustStore interface {
 	UpdatePolicy(ctx context.Context, deviceID string, policy wire.TrustPolicy) error
 }
 
-// MemoryTrustStore is an in-memory thread-safe implementation of TrustStore.
+// MemoryTrustStore is an in-memory thread-safe implementation of Store.
 type MemoryTrustStore struct {
 	mu      sync.RWMutex
 	devices map[string]*wire.TrustRecord
@@ -46,6 +47,7 @@ func NewMemoryTrustStore() *MemoryTrustStore {
 	}
 }
 
+// GetDevice retrieves a trust record by device ID.
 func (m *MemoryTrustStore) GetDevice(_ context.Context, deviceID string) (*wire.TrustRecord, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -56,6 +58,7 @@ func (m *MemoryTrustStore) GetDevice(_ context.Context, deviceID string) (*wire.
 	return cloneRecord(rec), nil
 }
 
+// ListDevices returns all registered trusted devices.
 func (m *MemoryTrustStore) ListDevices(_ context.Context) ([]*wire.TrustRecord, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -66,6 +69,7 @@ func (m *MemoryTrustStore) ListDevices(_ context.Context) ([]*wire.TrustRecord, 
 	return out, nil
 }
 
+// AddOrUpdateDevice adds or updates a trusted device record.
 func (m *MemoryTrustStore) AddOrUpdateDevice(_ context.Context, record *wire.TrustRecord) error {
 	if record == nil {
 		return wire.ErrInvalidTrustRecord
@@ -80,6 +84,7 @@ func (m *MemoryTrustStore) AddOrUpdateDevice(_ context.Context, record *wire.Tru
 	return nil
 }
 
+// RevokeDevice marks a trusted device as revoked.
 func (m *MemoryTrustStore) RevokeDevice(_ context.Context, deviceID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -93,6 +98,7 @@ func (m *MemoryTrustStore) RevokeDevice(_ context.Context, deviceID string) erro
 	return nil
 }
 
+// UnpairDevice removes a device from the trust store.
 func (m *MemoryTrustStore) UnpairDevice(_ context.Context, deviceID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -100,6 +106,7 @@ func (m *MemoryTrustStore) UnpairDevice(_ context.Context, deviceID string) erro
 	return nil
 }
 
+// IsTrusted reports whether a device ID is known and not revoked.
 func (m *MemoryTrustStore) IsTrusted(_ context.Context, deviceID string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -107,6 +114,7 @@ func (m *MemoryTrustStore) IsTrusted(_ context.Context, deviceID string) bool {
 	return ok && !rec.Revoked
 }
 
+// UpdateLastSeen updates the last seen timestamp for a trusted device.
 func (m *MemoryTrustStore) UpdateLastSeen(_ context.Context, deviceID string, seenAt time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -121,6 +129,7 @@ func (m *MemoryTrustStore) UpdateLastSeen(_ context.Context, deviceID string, se
 	return nil
 }
 
+// UpdatePolicy updates the policy configuration for a trusted device.
 func (m *MemoryTrustStore) UpdatePolicy(_ context.Context, deviceID string, policy wire.TrustPolicy) error {
 	if err := policy.Validate(); err != nil {
 		return err
@@ -223,19 +232,19 @@ func (f *FileTrustStore) saveLocked() error {
 		return fmt.Errorf("create temp trust db file: %w", err)
 	}
 	tmpName := tmpFile.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 
 	if err := tmpFile.Chmod(0600); err != nil {
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		return fmt.Errorf("chmod temp trust db file: %w", err)
 	}
 
 	if _, err := tmpFile.Write(data); err != nil {
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		return fmt.Errorf("write temp trust db: %w", err)
 	}
 	if err := tmpFile.Sync(); err != nil {
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		return fmt.Errorf("sync temp trust db: %w", err)
 	}
 	if err := tmpFile.Close(); err != nil {
@@ -249,6 +258,7 @@ func (f *FileTrustStore) saveLocked() error {
 	return nil
 }
 
+// GetDevice retrieves a trust record by device ID from the file store.
 func (f *FileTrustStore) GetDevice(_ context.Context, deviceID string) (*wire.TrustRecord, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -259,6 +269,7 @@ func (f *FileTrustStore) GetDevice(_ context.Context, deviceID string) (*wire.Tr
 	return cloneRecord(rec), nil
 }
 
+// ListDevices returns all registered trusted devices from the file store.
 func (f *FileTrustStore) ListDevices(_ context.Context) ([]*wire.TrustRecord, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -269,6 +280,7 @@ func (f *FileTrustStore) ListDevices(_ context.Context) ([]*wire.TrustRecord, er
 	return out, nil
 }
 
+// AddOrUpdateDevice adds or updates a trusted device in the file store.
 func (f *FileTrustStore) AddOrUpdateDevice(_ context.Context, record *wire.TrustRecord) error {
 	if record == nil {
 		return wire.ErrInvalidTrustRecord
@@ -283,6 +295,7 @@ func (f *FileTrustStore) AddOrUpdateDevice(_ context.Context, record *wire.Trust
 	return f.saveLocked()
 }
 
+// RevokeDevice marks a device as revoked in the file store.
 func (f *FileTrustStore) RevokeDevice(_ context.Context, deviceID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -296,6 +309,7 @@ func (f *FileTrustStore) RevokeDevice(_ context.Context, deviceID string) error 
 	return f.saveLocked()
 }
 
+// UnpairDevice removes a device from the file store.
 func (f *FileTrustStore) UnpairDevice(_ context.Context, deviceID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -306,6 +320,7 @@ func (f *FileTrustStore) UnpairDevice(_ context.Context, deviceID string) error 
 	return f.saveLocked()
 }
 
+// IsTrusted reports whether a device ID is registered and not revoked in the file store.
 func (f *FileTrustStore) IsTrusted(_ context.Context, deviceID string) bool {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -313,6 +328,7 @@ func (f *FileTrustStore) IsTrusted(_ context.Context, deviceID string) bool {
 	return ok && !rec.Revoked
 }
 
+// UpdateLastSeen updates the last seen timestamp for a device in the file store.
 func (f *FileTrustStore) UpdateLastSeen(_ context.Context, deviceID string, seenAt time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -327,6 +343,7 @@ func (f *FileTrustStore) UpdateLastSeen(_ context.Context, deviceID string, seen
 	return f.saveLocked()
 }
 
+// UpdatePolicy updates the policy configuration for a trusted device in the file store.
 func (f *FileTrustStore) UpdatePolicy(_ context.Context, deviceID string, policy wire.TrustPolicy) error {
 	if err := policy.Validate(); err != nil {
 		return err
