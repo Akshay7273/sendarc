@@ -33,3 +33,7 @@ export * from './trust-store.js';
 export * from './pairing.js';
 export * from './trusted-auth.js';
 export * from './presence.js';
+export * from './capability.js';
+export * from './indexeddb-trust-store.js';
+export * from './indexeddb-secret-store.js';
+export * from './browser-identity.js';

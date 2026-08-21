@@ -8,6 +8,7 @@
     updateTrustedDevicePolicy,
     unpairTrustedDevice,
     pairTrustedDevice,
+    isDesktopApp,
   } from './devices.js';
 
   interface Props {
@@ -192,6 +193,16 @@
               errorMessage = '';
             }}>✕</button
           >
+        </div>
+      {/if}
+
+      {#if !isDesktopApp()}
+        <div class="browser-storage-notice">
+          <span class="notice-icon">ℹ</span>
+          <span class="notice-text">
+            <strong>Browser Storage:</strong> Paired device identities are saved locally in this browser's
+            IndexedDB. Clearing browser data will revoke local pairings.
+          </span>
         </div>
       {/if}
 
@@ -579,6 +590,27 @@
     border: none;
     color: #fecaca;
     cursor: pointer;
+  }
+
+  .browser-storage-notice {
+    background: rgba(37, 99, 235, 0.1);
+    border-bottom: 1px solid rgba(37, 99, 235, 0.2);
+    color: #93c5fd;
+    padding: 0.6rem 1.5rem;
+    font-size: 0.8125rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    line-height: 1.4;
+  }
+
+  .browser-storage-notice .notice-icon {
+    font-size: 0.875rem;
+    color: #60a5fa;
+  }
+
+  .browser-storage-notice strong {
+    color: #bfdbfe;
   }
 
   .device-list-container {
