@@ -53,6 +53,9 @@ const (
 	// starts (V13-PR08). It is never used for transfer protocol frames; after mutual
 	// authentication the transfer runs under the fresh resumed key epoch.
 	FrameResumeAuth uint8 = 13
+	// FramePairingExchange carries one pairing message (PairingRequest, PairingResponse,
+	// or PairingConfirm JSON) sealed under the SESSION directional keys (V15-PR02).
+	FramePairingExchange uint8 = 14
 )
 
 // encodeFrameHeader encodes h into a fresh 16-byte buffer.

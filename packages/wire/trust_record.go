@@ -46,6 +46,16 @@ type TrustPolicy struct {
 	AllowedMimeTypes []string `json:"allowed_mime_types,omitempty"`
 }
 
+// DefaultTrustPolicy returns the default safe trust policy (auto-accept disabled).
+func DefaultTrustPolicy() TrustPolicy {
+	return TrustPolicy{
+		AutoAccept:        false,
+		AutoAcceptDestDir: "",
+		MaxFileSizeBytes:  10 * 1024 * 1024 * 1024, // 10 GB default cap
+		AllowedMimeTypes:  nil,
+	}
+}
+
 // TrustRecord represents a persisted trusted device entry in the local trust database.
 type TrustRecord struct {
 	DeviceID          string      `json:"device_id"`

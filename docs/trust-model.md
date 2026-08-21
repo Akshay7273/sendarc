@@ -110,3 +110,50 @@ Automated transfers (e.g. CLI daemon or background desktop receiver) require str
 2. **Absolute Destination Directory:** `auto_accept_dest_dir` must be an absolute path. Setting it to filesystem root (`/` or `C:\`) is strictly rejected.
 3. **Path Sanitization:** File names are subject to strict relative path validation (`safe_path.go` / `safe-path.ts`) to prevent directory traversal or symlink escapes outside the designated destination root.
 4. **Quota & Size Caps:** Incoming files exceeding `max_file_size_bytes` or available disk headroom abort before writing to disk.
+
+---
+
+## 6. One-Time Pairing Ceremony
+
+The pairing ceremony bootstraps long-term pairwise trust through the existing SPAKE2 authenticated channel without requiring central servers.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Initiator (Alice)
+    participant B as Responder (Bob)
+    Note over A,B: 1. Complete SPAKE2 Handshake -> Shared Master Key
+    A->>B: PairingRequest (DeviceID, PubKey, Name, Caps, Nonce_A, Sig_A)
+    Note over B: 2. Verify Sig_A against PubKey & MasterKey<br/>Check DeviceID == sha256(PubKey)
+    B->>A: PairingResponse (DeviceID, PubKey, Name, Caps, Nonce_B, Sig_B)
+    Note over A: 3. Verify Sig_B against PubKey & MasterKey<br/>Derive k_pair & credRef
+    Note over B: 4. Derive k_pair & credRef (Identical Symmetrical State)
+    A->>B: PairingConfirm (Status: accepted, AuthTag: HMAC(k_pair, ID_B))
+    B->>A: PairingConfirm (Status: accepted, AuthTag: HMAC(k_pair, ID_A))
+    Note over A,B: 5. Store Peer TrustRecord in trust.json
+```
+
+### 6.1 Cryptographic Transcript Binding
+
+- **Request Challenge:** `"sendbeam/1 pairing-request:" || SHA-256(MasterKey) || Nonce_A || DeviceID_A`
+- **Response Challenge:** `"sendbeam/1 pairing-response:" || SHA-256(MasterKey) || Nonce_A || Nonce_B || DeviceID_B`
+- Both signatures are signed with the device's private Ed25519 key.
+
+### 6.2 Pair Credential Derivation (`k_pair`)
+
+```
+k_pair = HKDF-SHA256(
+    IKM = MasterKey,
+    Salt = Nonce_A || Nonce_B,
+    Info = "sendbeam/1 pair-credential" || LexicographicalSort(PubKey_A, PubKey_B),
+    Length = 32 bytes
+)
+PairCredentialRef = "cred-" || LowercaseHex(SHA-256(k_pair))
+```
+
+### 6.3 Re-Pairing & Conflict Mitigation
+
+- **Legitimate Re-Pairing:** When a known device reconnects with the same cryptographic key, its local label, capabilities, and `LastSeenAt` timestamp are safely updated.
+- **Key & Label Conflicts:**
+  - If a pairing peer claims an active name already assigned to a different public key, the ceremony aborts with `ErrLabelConflict`.
+  - Silent key overwrites are strictly forbidden to prevent impersonation attacks.

@@ -35,6 +35,9 @@ var (
 
 	// ErrInvalidSignature indicates signature verification failure.
 	ErrInvalidSignature = errors.New("invalid signature")
+
+	// ErrInvalidIdentity indicates a nil or malformed device identity.
+	ErrInvalidIdentity = errors.New("invalid device identity")
 )
 
 // DeviceIdentity represents a local long-term device identity backed by an Ed25519 keypair.

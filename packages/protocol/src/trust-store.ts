@@ -23,6 +23,13 @@ export interface TrustPolicy {
   allowedMimeTypes?: string[];
 }
 
+export function defaultTrustPolicy(): TrustPolicy {
+  return {
+    autoAccept: false,
+    maxFileSizeBytes: 10 * 1024 * 1024 * 1024,
+  };
+}
+
 export interface TrustRecord {
   deviceId: string;
   publicKey: string; // 64-char lowercase hex string (32 bytes)
