@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"strings"
 	"unicode/utf8"
@@ -27,6 +28,13 @@ type style struct {
 
 func newStyle(w *os.File) *style {
 	return &style{on: isTerminal(w) && os.Getenv("NO_COLOR") == ""}
+}
+
+func newStyleFromWriter(w io.Writer) *style {
+	if f, ok := w.(*os.File); ok {
+		return newStyle(f)
+	}
+	return &style{on: false}
 }
 
 func isTerminal(f *os.File) bool {
