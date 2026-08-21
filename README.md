@@ -165,6 +165,7 @@ Full analysis, accepted limitations, and the trust boundary are in the
 - [Release Gate v1.4](docs/RELEASE-v1.4.md) — v1.4 milestone criteria, verification evidence, and release checklist
 - [Protocol specification](docs/protocol.md) — `sendbeam/1` wire protocol
 - [Threat model](docs/threat-model.md) — trust boundary, attacks, mitigations
+- [Trust & Device Identity Model](docs/trust-model.md) — device identity, trust database, pairing boundaries, and policy confinement
 - [Benchmarks](docs/BENCHMARKS.md) — throughput, memory, methodology
 - [Test vectors](docs/test-vectors/) — cross-language crypto and transfer vectors
 
