@@ -1,0 +1,18 @@
+[
+  {
+    "name": "alice_bob_presence_and_beacon",
+    "k_pair_hex": "8b4c642283597de370a8313836bcc86ca6718f0d71fa4f301134d3f049da2848",
+    "timestamp": "2026-08-21T12:00:00Z",
+    "epoch_index": 1985904,
+    "rendezvous_handle": "edb08d40e1746a31d09e8eb428f709945fc514d0d6c16107f86dc17a28fd7428",
+    "skew_handles": [
+      "21281a90dd17ca4e970d4ac0340eed1a5990e76d84e7a16427f650b06b29e4c1",
+      "edb08d40e1746a31d09e8eb428f709945fc514d0d6c16107f86dc17a28fd7428",
+      "fd2f12fa6f7d5c496f03ed08f360476773bbb30855d5c80fc2fc21bae4c9754e"
+    ],
+    "presence_nonce_hex": "4d6338b3f7ac53122d614db533e20a7b0e4cf6cc7567d447d4db256e49bb4251",
+    "presence_proof_hex": "e30a17e362961905e53228ac82e4c72a4478c170f8fba02ba8655a9dda7225a4",
+    "beacon_nonce_hex": "c83888c50dc690cbf88691633df49122",
+    "beacon_tag_hex": "f8bd0174d09e9392354a71fa9b629b76"
+  }
+]

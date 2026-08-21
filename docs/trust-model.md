@@ -199,3 +199,35 @@ k_r2i = HKDF-SHA256(SessionMaster, nil, "sendbeam/2 responder-to-initiator key",
 - **Cryptographic Binding:** The signature and MAC tag strictly bind `k_pair`, `EphemeralPub`, `Nonce`, `DeviceID`, and `NegotiatedCapabilities`.
 - **Local Revocation:** If a peer has been marked `revoked: true` in the local trust database, all connection attempts are rejected with `ErrTrustedPeerRevoked`.
 - **Protocol Boundary:** One-time pairing and transfers remain compatible via `sendbeam/1`, while trusted-device mesh operations use `sendbeam/2`.
+
+---
+
+## 8. Privacy-Preserving Remote Presence & LAN Discovery
+
+SendBeam allows paired devices to discover each other across the internet and local networks without leaking device identities, filenames, user accounts, or global directories.
+
+### 8.1 Opaque Epoch-Rotated Rendezvous Handles
+
+To discover peers over the signaling server without creating a global directory or publishing device IDs:
+
+- **Pairwise Time-Windowed Handle Derivation:**
+  ```
+  epochIndex = floor(unixTimestampSeconds / 900)  // 15-minute epoch window
+  handle = HMAC-SHA256(k_pair, "sendbeam/2 rendezvous-handle:" || epochIndex)
+  ```
+- **Clock Drift Tolerance:** Clients compute candidate handles for `[epochIndex-1, epochIndex, epochIndex+1]` to tolerate clock skew.
+- **Server Privacy:** The signaling server matches connections solely on exact handle equality. The server cannot determine which devices share a handle or link different epoch handles together.
+
+### 8.2 Blinded LAN Discovery Beacons
+
+For local network (Wi-Fi/LAN) direct transfer without internet roundtrips:
+
+- **Beacon Frame Format:**
+  - Header (32 bytes): Magic `"SB2B"`, Version `1`, TCP Listening Port (2 bytes), Timestamp (8 bytes), Nonce (16 bytes), Tag Count (1 byte).
+  - Tags: Up to 32 truncated 16-byte blinded tags.
+- **Blinded Tag Formula:**
+  ```
+  tag = HMAC-SHA256(k_pair, "sendbeam/2 lan-beacon:" || Nonce || epochIndex)[0:16]
+  ```
+- **Local Matching:** Listening nodes compute candidate tags using `k_pair` secrets from their local trust stores. Unpaired third parties on the LAN only see pseudorandom bytes.
+- **Direct LAN Connection:** When a peer is matched on LAN, nodes connect directly via TCP/TLS, bypassing internet signaling and relay.

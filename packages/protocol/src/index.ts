@@ -32,3 +32,4 @@ export * from './identity.js';
 export * from './trust-store.js';
 export * from './pairing.js';
 export * from './trusted-auth.js';
+export * from './presence.js';
