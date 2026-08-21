@@ -5,6 +5,7 @@ bin/
 pnpm-lock.yaml
 infra/certs/
 test-vectors/
+**/testdata/
 
 # SendBeam brand assets (SVG/PNG exports are not formatted source)
 *.svg
